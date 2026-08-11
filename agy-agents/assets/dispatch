@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+#
+# Dispatch one task to the implementer model through the Antigravity CLI,
+# headlessly. This is the only sanctioned way to call `agy` in this project.
+#
+# Three things about agy shape this whole script.
+#
+# First, `--add-dir` is not optional. agy's default CLI project has no
+# resources attached (projectResources is {}), so a headless run gets a scratch
+# workspace under ~/.gemini/antigravity-cli/scratch and every path in the
+# prompt resolves to nothing. The init event still reports the real cwd, which
+# makes this look like it worked: an early probe reported "not a git
+# repository", "php is not recognized" and "scripts/gates: No such file", while
+# status read SUCCESS.
+#
+# Second, it cannot be trusted by exit code. A tool call it is not permitted to
+# make is *soft-denied*: the run continues, the process exits 0, `status` still
+# reads SUCCESS, and the only trace is a notice on stderr. Verified with a
+# probe whose every command was blocked; it exited 0, status SUCCESS, empty
+# response. So this script parses the event stream and judges the run itself.
+#
+# Third, its permission system is inverted in headless mode.
+# `permissions.allow` is honoured interactively but ignored under --print, so
+# every allowed command is denied and the run lies about it. A fence that
+# blocks the work and permits the lie is worse than none, so we run with
+# --dangerously-skip-permissions and put a fence we control around it instead:
+# .agy/tripwire, which records the surfaces the implementer must never touch,
+# before and after the run.
+#
+# The flag lives in here, never in a bare command, so it cannot be used without
+# the fence attached to it. If the fence will not arm, the dispatch does not
+# happen.
+#
+# ---------------------------------------------------------------------------
+# MODEL GROUPS AND FALLBACK
+#
+# Antigravity meters two independent buckets, each with its own weekly and
+# 5-hour limit:
+#
+#   GEMINI MODELS          Gemini Flash, Gemini Pro          <- primary
+#   CLAUDE AND GPT MODELS  Claude Opus, Claude Sonnet, GPT   <- reserve
+#
+# Gemini is always tried first. The Claude group drains much faster for the
+# same work, so it is a reserve and never a co-equal: we fall back only when
+# Gemini's *weekly* limit is gone. A spent 5-hour window is not a reason to
+# burn the reserve — it refreshes on its own within hours, so we report and
+# hold instead.
+#
+# `agy` exposes quota only in its interactive panel; there is no subcommand to
+# query it (`agy quota` produces nothing, and no quota verb appears in
+# `agy --help`). So exhaustion is detected from the failure itself rather than
+# polled in advance.
+#
+# Nothing about being in fallback is ever persisted. Every dispatch starts on
+# Gemini again, which is what makes "switch back the moment it is available"
+# automatic — there is no sticky flag that could strand you on the reserve.
+#
+# CAVEAT, and it is load-bearing: the classifier below is written against the
+# vocabulary these errors normally use, not against a captured Antigravity
+# exhaustion event. It is therefore deliberately conservative. A quota-shaped
+# error that does not clearly say *weekly* does NOT trigger fallback; it stops
+# and prints the raw text, so the first genuine occurrence tells you the exact
+# string and this matcher gets corrected once. Use AGY_FALLBACK=force in the
+# meantime — the interactive panel shows the real number.
+# ---------------------------------------------------------------------------
+#
+# Usage:
+#   .agy/dispatch 4                # runs <workspace>/task-4-dispatch.md
+#   .agy/dispatch --file <path>    # runs an arbitrary prompt file
+#   .agy/dispatch --continue 4     # resumes the last conversation
+#
+# Overrides (environment beats .agy/config):
+#   AGY_MODEL, AGY_FALLBACK_MODEL, AGY_EFFORT, AGY_TIMEOUT, AGY_ARGS
+#   AGY_SKIP_GATES=1               report only; do not run the gates
+#   AGY_FALLBACK=auto|force|off    default auto
+#     auto  - Gemini first; reserve only on a clear weekly exhaustion
+#     force - go straight to the reserve (use when the panel already shows the
+#             Gemini weekly bucket spent)
+#     off   - never use the reserve; fail instead
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+	printf 'dispatch: not a git repository.\n' >&2
+	exit 2
+}
+cd "$ROOT" || exit 1
+
+[ -f .agy/config ] || { printf 'dispatch: no .agy/config — run the agy-agents installer\n' >&2; exit 2; }
+# shellcheck disable=SC1091
+. .agy/config
+
+: "${AGY_WORKSPACE:=.agy/work}"
+: "${AGY_GATES:=}"
+: "${AGY_MODEL:=gemini-3.6-flash-high}"
+: "${AGY_FALLBACK_MODEL:=claude-opus-4-6-thinking}"
+: "${AGY_FALLBACK:=auto}"
+: "${AGY_EFFORT:=high}"
+: "${AGY_TIMEOUT:=45m}"
+
+LOGDIR="$AGY_WORKSPACE/logs"
+
+case "$AGY_FALLBACK" in
+	auto|force|off) ;;
+	*) printf 'dispatch: AGY_FALLBACK must be auto, force or off (got %s)\n' "$AGY_FALLBACK" >&2; exit 2 ;;
+esac
+
+AGY="$(command -v agy 2>/dev/null)"
+[ -n "$AGY" ] || AGY="$HOME/AppData/Local/agy/bin/agy.exe"
+if [ ! -x "$AGY" ]; then
+	printf 'dispatch: agy not found (looked for %s)\n' "$AGY" >&2
+	exit 127
+fi
+
+CONTINUE=""
+if [ "${1:-}" = "--continue" ]; then
+	CONTINUE="--continue"
+	shift
+fi
+
+# The prompt stays one line on purpose: the implementer reads the same disk you
+# do, so a dispatch points at a file rather than quoting it.
+if [ "${1:-}" = "--file" ]; then
+	[ -f "${2:-}" ] || { printf 'dispatch: no such prompt file: %s\n' "${2:-}" >&2; exit 2; }
+	PROMPT="Read ${2} and execute it in full."
+	LABEL="$(basename "$2" | sed 's/\.[^.]*$//')"
+elif [ -n "${1:-}" ]; then
+	N="$1"
+	DISPATCH="$AGY_WORKSPACE/task-$N-dispatch.md"
+	[ -f "$DISPATCH" ] || { printf 'dispatch: no dispatch file at %s\n' "$DISPATCH" >&2; exit 2; }
+	PROMPT="Read $DISPATCH and execute it in full."
+	LABEL="task-$N"
+else
+	printf 'usage: .agy/dispatch [--continue] <task-number> | --file <path>\n' >&2
+	exit 2
+fi
+
+mkdir -p "$LOGDIR"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BASE="$LOGDIR/$LABEL-$STAMP"
+SNAP="$BASE.fence"
+
+REPO_WIN="$(cygpath -w "$PWD" 2>/dev/null)" || REPO_WIN="$PWD"
+
+printf 'dispatching  %s\n' "$LABEL"
+if [ "$AGY_FALLBACK" = "force" ]; then
+	FIRST_MODEL="$AGY_FALLBACK_MODEL"
+	printf 'model        %s (RESERVE, forced) effort %s, timeout %s\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"
+else
+	FIRST_MODEL="$AGY_MODEL"
+	printf 'model        %s (effort %s, timeout %s)\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"
+fi
+printf 'log          %s.ndjson\n\n' "$BASE"
+
+# --------------------------------------------------------------- arm the fence
+# Armed once, verified once at the end. When a fallback attempt runs, the same
+# snapshot spans both attempts, so the fence covers everything either model did
+# rather than only the last one.
+printf -- '--- arming fence ---------------------------------------------------\n'
+if ! bash .agy/tripwire snapshot "$SNAP"; then
+	printf '\ndispatch: REFUSING TO DISPATCH. The fence would not arm, and this run\n' >&2
+	printf 'auto-approves every tool call. Fix .agy/tripwire first.\n' >&2
+	exit 3
+fi
+
+# ------------------------------------------------------------------ one attempt
+# $1 model, $2 output base, $3 extra continue flag ("" or "--continue")
+run_attempt() {
+	local model="$1" out="$2" cont="$3" started elapsed
+
+	started=$SECONDS
+
+	# --mode accept-edits because the default mode pauses for an interactive
+	# diff review that a headless run has no way to answer.
+	# shellcheck disable=SC2086
+	"$AGY" --print "$PROMPT" \
+		$cont \
+		--add-dir "$REPO_WIN" \
+		--output-format stream-json \
+		--model "$model" \
+		--effort "$AGY_EFFORT" \
+		--mode accept-edits \
+		--dangerously-skip-permissions \
+		--print-timeout "$AGY_TIMEOUT" \
+		${AGY_ARGS:-} \
+		> "$out.ndjson" 2> "$out.stderr"
+	local rc=$?
+
+	elapsed=$(( SECONDS - started ))
+
+	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" <<'NODE'
+const fs = require('fs');
+const [ndjson, stderrPath, responsePath, agyCode, classPath, wall] = process.argv.slice(2);
+
+// Real event shape (verified against agy 1.1.12 — the published docs describe
+// a flattened form that does not match the wire):
+//   {"event":"init",        "init":        {model, cwd, tools:[...]}}
+//   {"event":"step_update", "step_update": {step_index, state, step_type,
+//                                           tool_name, tool_info:{name,
+//                                           parameters, output, error}, usage}}
+//   {"event":"result",      "result":      {status, response, num_turns, usage}}
+const events = fs.readFileSync(ndjson, 'utf8')
+	.split('\n').filter(Boolean)
+	.map(l => { try { return JSON.parse(l); } catch { return null; } })
+	.filter(Boolean);
+
+const init = (events.find(e => e.event === 'init') || {}).init || {};
+const result = (events.find(e => e.event === 'result') || {}).result || {};
+
+const tools = new Map();
+const errors = [];
+const denials = [];
+
+for (const e of events) {
+	const s = e.step_update;
+	if (!s || s.step_type !== 'tool' || s.state === 'ACTIVE') continue;
+	const info = s.tool_info || {};
+	const name = info.name || s.tool_name || 'unknown';
+	const cmd = (info.parameters && (info.parameters.CommandLine || info.parameters.command)) || '';
+
+	if (s.state === 'DONE') tools.set(name, (tools.get(name) || 0) + 1);
+
+	if (info.error) {
+		const msg = (info.error.message || info.error.type || 'error').replace(/\s+/g, ' ');
+		// A denial should be impossible, since permissions are skipped. If one
+		// appears anyway, the run is not what we think it is — so it stays a
+		// hard failure rather than a warning.
+		if (/denied permission|permission denied|not allowed|auto-denied/i.test(msg)) {
+			denials.push(`${cmd || name}: ${msg}`.slice(0, 200));
+		} else {
+			errors.push(`${name}${cmd ? ' [' + cmd + ']' : ''}: ${msg}`.slice(0, 200));
+		}
+	}
+}
+
+const stderr = fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, 'utf8').trim() : '';
+if (/auto-denied|permission/i.test(stderr) && !denials.length) denials.push(stderr.slice(0, 300));
+
+const response = result.response || '';
+if (response) fs.writeFileSync(responsePath, response);
+
+const status = result.status || '';
+const failed = status !== 'SUCCESS' || Number(agyCode) !== 0;
+
+// Quota classification. Only ever consulted on a FAILED run: a successful run
+// whose report happens to discuss rate limiting must not be mistaken for an
+// exhausted bucket. Conservative by design — see the header. `unknown` means
+// "quota-shaped but it never said weekly", and does not authorise the reserve.
+let quota = 'none';
+let quotaRaw = '';
+if (failed) {
+	const parts = [JSON.stringify(result.error || ''), status, stderr, response.slice(0, 4000)];
+	const hay = parts.join(' \n ').toLowerCase();
+	if (/quota|rate.?limit|resource.?exhausted|\b429\b|too many requests|usage limit|limit reached|exhausted/.test(hay)) {
+		if (/week/.test(hay)) quota = 'weekly';
+		else if (/5.?hour|five.?hour|hourly/.test(hay)) quota = 'fivehour';
+		else quota = 'unknown';
+		quotaRaw = [JSON.stringify(result.error || ''), stderr].join(' ').replace(/\s+/g, ' ').trim().slice(0, 400);
+	}
+}
+
+fs.writeFileSync(classPath,
+	`quota=${quota}\ntools=${tools.size}\nstatus=${status}\nraw=${quotaRaw.replace(/\n/g, ' ')}\n`);
+
+const u = result.usage || {};
+const pad = s => String(s).padEnd(13);
+console.log(pad('status'), status || '(none)');
+console.log(pad('model'), init.model || '(unknown)');
+// Wall clock is measured by the caller. result.duration_seconds is NOT the run:
+// on a --continue it reports time since the *thread* started, which read
+// 21286s for a 246s run. Keep both, clearly labelled.
+console.log(pad('duration'), `${wall}s wall / ${result.duration_seconds ?? '?'}s thread-elapsed / ${result.num_turns ?? '?'} turns`);
+console.log(pad('tokens'), `in ${u.input_tokens ?? '?'}  out ${u.output_tokens ?? '?'}  think ${u.thinking_tokens ?? '?'}  total ${u.total_tokens ?? '?'}`);
+console.log(pad('tools'), tools.size
+	? [...tools].map(([n, c]) => `${n}x${c}`).join('  ')
+	: 'NONE — the run touched nothing');
+if (quota !== 'none') {
+	console.log(pad('quota'), quota === 'weekly'   ? 'WEEKLY bucket exhausted'
+	                        : quota === 'fivehour' ? '5-hour window exhausted (refreshes on its own)'
+	                        :                        'quota-shaped error, bucket UNCLEAR');
+	if (quotaRaw) console.log(pad(''), quotaRaw);
+}
+
+let problems = 0;
+const fail = (headline, lines) => {
+	problems++;
+	console.log('\nFAIL  ' + headline);
+	(lines || []).slice(0, 15).forEach(l => console.log('      - ' + l));
+};
+
+if (denials.length) {
+	fail(`${denials.length} tool call(s) BLOCKED despite --dangerously-skip-permissions.`, denials);
+	console.log('      The run still exited 0 with status SUCCESS. Report is unreliable.');
+}
+if (status !== 'SUCCESS') {
+	fail('status is not SUCCESS', result.error ? [JSON.stringify(result.error)] : []);
+}
+if (errors.length) fail(`${errors.length} tool error(s)`, errors);
+if (!tools.size) fail('no tool calls recorded — the implementer answered without doing the work');
+if (!response.trim()) fail('empty response — the implementer produced no report');
+if (Number(agyCode) !== 0) fail(`agy exited ${agyCode}`);
+
+process.exit(problems ? 1 : 0);
+NODE
+	return $?
+}
+
+# ------------------------------------------------------------------- attempt 1
+printf -- '\n--- run report -----------------------------------------------------\n'
+run_attempt "$FIRST_MODEL" "$BASE" "$CONTINUE"
+stream_rc=$?
+
+USED_MODEL="$FIRST_MODEL"
+FELL_BACK=0
+HANDOVER=""
+
+read_class() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+
+quota_class="$(read_class "$BASE.class" quota)"
+tools_used="$(read_class "$BASE.class" tools)"
+
+# ------------------------------------------------------------------- attempt 2
+# Only a clear weekly exhaustion opens the reserve. A spent 5-hour window waits
+# it out; an unclear quota error stops and shows its raw text.
+if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
+	case "$quota_class" in
+	weekly)
+		printf -- '\n--- falling back to the reserve group -------------------------------\n'
+		printf 'The Gemini WEEKLY bucket is spent. Switching to %s.\n' "$AGY_FALLBACK_MODEL"
+		printf 'This group drains fast — the next dispatch starts on Gemini again.\n\n'
+
+		# A run that already touched the tree must be handed over, not restarted:
+		# a cold retry would redo half-finished work on top of itself.
+		HANDOVER_FLAG="$CONTINUE"
+		if [ "${tools_used:-0}" != "0" ]; then
+			HANDOVER_FLAG="--continue"
+			HANDOVER="mid-run: Gemini had already made ${tools_used} tool call(s) before the wall"
+			printf 'NOTE  %s.\n' "$HANDOVER"
+			printf '      Resuming the thread so the reserve continues rather than restarts.\n\n'
+		fi
+
+		run_attempt "$AGY_FALLBACK_MODEL" "$BASE.reserve" "$HANDOVER_FLAG"
+		stream_rc=$?
+		USED_MODEL="$AGY_FALLBACK_MODEL"
+		FELL_BACK=1
+		;;
+	fivehour)
+		printf -- '\n--- holding --------------------------------------------------------\n'
+		printf 'The Gemini 5-hour window is spent but the weekly bucket is not. Holding:\n'
+		printf 'that window refreshes within hours, and the reserve group is scarcer\n'
+		printf 'than the wait. Re-run this dispatch after the refresh, or override with\n'
+		printf 'AGY_FALLBACK=force if you need it done now.\n'
+		;;
+	unknown)
+		printf -- '\n--- holding --------------------------------------------------------\n'
+		printf 'A quota-shaped error came back that does not say which bucket it is.\n'
+		printf 'Not spending the reserve on a guess. The raw text is in the run report\n'
+		printf 'above and in %s.\n' "$BASE.class"
+		printf 'If the interactive panel shows the weekly bucket spent, re-run with\n'
+		printf 'AGY_FALLBACK=force — and fix the matcher in .agy/dispatch.\n'
+		;;
+	esac
+fi
+
+# ------------------------------------------------------------- check the fence
+printf -- '\n--- fence ----------------------------------------------------------\n'
+bash .agy/tripwire verify "$SNAP"
+trip_rc=$?
+
+# ------------------------------------------------------------------- run gates
+printf -- '\n--- gates ----------------------------------------------------------\n'
+if [ "${AGY_SKIP_GATES:-0}" = "1" ]; then
+	printf 'skipped (AGY_SKIP_GATES=1). Run the gates before believing anything.\n'
+	gates_rc=-1
+elif [ -z "$AGY_GATES" ]; then
+	printf 'AGY_GATES is empty in .agy/config. A dispatch with no gate is a dispatch\n'
+	printf 'you cannot check. Configure it before trusting any of this.\n'
+	gates_rc=99
+else
+	# shellcheck disable=SC2086
+	bash $AGY_GATES
+	gates_rc=$?
+fi
+
+# --------------------------------------------------------------------- verdict
+printf -- '\n--- verdict --------------------------------------------------------\n'
+v() { printf '  %-7s %s\n' "$1" "$2"; }
+if [ "$FELL_BACK" -eq 1 ]; then
+	v model "$USED_MODEL  <- RESERVE GROUP BURNED (Gemini weekly exhausted)"
+	[ -n "$HANDOVER" ] && v '' "$HANDOVER"
+elif [ "$AGY_FALLBACK" = "force" ]; then
+	v model "$USED_MODEL  <- reserve group, forced"
+else
+	v model "$USED_MODEL"
+fi
+if [ "$stream_rc" -eq 0 ]; then v run 'clean'; else v run 'PROBLEMS — see run report above'; fi
+if [ "$trip_rc"  -eq 0 ]; then v fence 'clean — no guarded surface moved'; else v fence 'VIOLATED — see fence section above'; fi
+if   [ "$gates_rc" -eq 0 ]; then v gates 'green'
+elif [ "$gates_rc" -lt 0 ]; then v gates 'not run'
+else v gates "$gates_rc FAILING"
+fi
+printf '\n  fence snapshot kept at %s\n' "$SNAP"
+
+if [ "$trip_rc" -ne 0 ]; then
+	printf '\nA guarded surface moved. Investigate that before reading anything else.\n'
+	exit 4
+fi
+if [ "$stream_rc" -ne 0 ] || [ "$gates_rc" -gt 0 ]; then
+	exit 1
+fi
+exit 0

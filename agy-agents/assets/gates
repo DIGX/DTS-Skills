@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#
+# Every verification gate for this project, in one condensed block.
+#
+#   .agy/gates
+#
+# Exit code is the number of FAILING gates, so `.agy/gates && git commit` works.
+#
+# This file is YOURS. The installer wrote a starter from what it could detect;
+# it is not authoritative and it is not complete. The gates are the only thing
+# standing between a confident implementer report and a broken tree, so treat
+# them as the most important file in .agy/.
+#
+# Rules that keep them worth trusting:
+#   - A gate that cannot run must FAIL, never pass quietly. `command || true`
+#     anywhere in here defeats the entire protocol.
+#   - Print the result line, not the whole run: a dispatch pastes this output
+#     into the controller's context on every task.
+#   - Keep it fast. A gate suite over ~60s stops being run on every change,
+#     and one that is skipped guards nothing.
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf 'gates: not a git repository\n' >&2; exit 1; }
+cd "$ROOT" || exit 1
+
+# Environment (PATH additions, test roots) lives in the config so a dispatch,
+# a manual run and the implementer's own run all get the same one.
+[ -f .agy/config ] && . .agy/config
+
+fail=0
+ran=0
+
+# gate <label> <command...>
+# On success prints one line. On failure prints the tail of the output, which
+# is where every runner puts the thing you actually need to see.
+gate() {
+	local label="$1"
+	shift
+	local out code
+	out="$("$@" 2>&1)"
+	code=$?
+	ran=$((ran + 1))
+
+	if [ $code -ne 0 ]; then
+		fail=$((fail + 1))
+		printf '%-12s FAIL\n' "$label"
+		printf '%s\n' "$out" | tail -25
+		printf -- '---\n'
+	else
+		printf '%-12s ok\n' "$label"
+	fi
+}
+
+# gate_line <label> <summary-regex> <command...>
+# Same, but on success reports the matching line from the output rather than a
+# bare "ok" — use it for test runners so the controller sees the test count and
+# can spot a suite that silently stopped collecting.
+gate_line() {
+	local label="$1" pattern="$2"
+	shift 2
+	local out code line
+	out="$("$@" 2>&1)"
+	code=$?
+	ran=$((ran + 1))
+	line="$(printf '%s\n' "$out" | grep -E "$pattern" | tail -1)"
+
+	if [ $code -ne 0 ]; then
+		fail=$((fail + 1))
+		printf '%-12s FAIL  %s\n' "$label" "$line"
+		printf '%s\n' "$out" | tail -25
+		printf -- '---\n'
+	else
+		printf '%-12s %s\n' "$label" "${line:-ok}"
+	fi
+}
+
+# ==========================================================================
+# GATES — edit below this line.
+# ==========================================================================
+
+#AGY_INSTALLER_GATES#
+
+# ==========================================================================
+
+if [ "$ran" -eq 0 ]; then
+	printf '\nNO GATES ARE CONFIGURED.\n'
+	printf 'This is a hard failure, not a pass: an unverified dispatch is worse\n'
+	printf 'than no dispatch, because its report will be believed. Add real gates\n'
+	printf 'to .agy/gates before delegating anything.\n'
+	exit 1
+fi
+
+if [ $fail -eq 0 ]; then
+	printf '\nAll %d gates green.\n' "$ran"
+else
+	printf '\n%d of %d gate(s) failing.\n' "$fail" "$ran"
+fi
+
+exit $fail

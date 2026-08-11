@@ -1,0 +1,18 @@
+# Anything a skill run produces locally. None of it belongs in the repo.
+.agy/
+.superpowers/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Scratch
+tmp/
+*.log
+*.ndjson
+*.diff
+*.fence/

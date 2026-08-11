@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#
+# Build a review package for a task: commit list, stat summary, and the full
+# -U10 diff for BASE..HEAD, in one file a reviewer can read in a single call.
+#
+#   .agy/review-pkg <base> <name> [head]
+#
+#   .agy/review-pkg 17dd100 task-3      -> <workspace>/review-task-3.diff
+#   .agy/review-pkg dfafed2 task-3-r1   -> <workspace>/review-task-3-r1.diff
+#
+# Lockfiles are excluded. On the first package built by hand for this workflow,
+# composer.lock and package-lock.json ran to 3,476 of 4,261 lines, which would
+# have pushed the real content past the reviewer's read limit. The manifests
+# themselves (composer.json, package.json, …) are always present in full, so
+# nothing a reviewer must judge is hidden.
+
+set -euo pipefail
+
+if [ $# -lt 2 ]; then
+	echo "usage: .agy/review-pkg <base-commit> <name> [head]" >&2
+	exit 64
+fi
+
+base="$1"
+name="$2"
+head="${3:-HEAD}"
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+	echo "review-pkg: not a git repository" >&2
+	exit 2
+}
+cd "$ROOT"
+
+[ -f .agy/config ] || { echo "review-pkg: no .agy/config — run the agy-agents installer" >&2; exit 2; }
+# shellcheck disable=SC1091
+. .agy/config
+: "${AGY_WORKSPACE:=.agy/work}"
+
+mkdir -p "$AGY_WORKSPACE"
+out="$AGY_WORKSPACE/review-$name.diff"
+
+if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+	echo "review-pkg: '$base' is not a commit" >&2
+	exit 1
+fi
+
+if [ "$(git rev-parse "$base")" = "$(git rev-parse "$head")" ]; then
+	echo "review-pkg: $base and $head are the same commit — nothing to review" >&2
+	exit 1
+fi
+
+{
+	echo "# Review package — $name ($base..$head)"
+	echo
+	echo "Lockfiles are excluded from the diff below; the manifests they lock"
+	echo "(composer.json, package.json, Cargo.toml, …) are present in full."
+	echo
+	echo "## Commits"
+	git log --oneline "$base..$head"
+	echo
+	echo "## Stat"
+	git diff --stat "$base..$head"
+	echo
+	echo "## Diff (-U10)"
+	echo
+	git diff -U10 "$base..$head" -- . \
+		':(exclude)composer.lock' \
+		':(exclude)package-lock.json' \
+		':(exclude)pnpm-lock.yaml' \
+		':(exclude)yarn.lock' \
+		':(exclude)Cargo.lock' \
+		':(exclude)poetry.lock' \
+		':(exclude)uv.lock' \
+		':(exclude)go.sum'
+} >"$out"
+
+printf '%s (%s lines)\n' "$out" "$(wc -l <"$out" | tr -d ' ')"

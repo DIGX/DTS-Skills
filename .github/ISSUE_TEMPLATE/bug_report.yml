@@ -1,0 +1,64 @@
+name: Bug report
+description: Something in a skill behaves differently from what it documents
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please run the selftest — it is free and it separates
+        "the harness is broken" from "this run went wrong":
+
+        ```bash
+        bash ~/.claude/skills/agy-agents/scripts/selftest
+        ```
+
+  - type: dropdown
+    id: skill
+    attributes:
+      label: Skill
+      options: [agy-agents, other]
+    validations: { required: true }
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+    validations: { required: true }
+
+  - type: textarea
+    id: verdict
+    attributes:
+      label: The verdict block
+      description: >
+        The `run` / `fence` / `gates` lines from the end of the dispatch, if
+        this involves a run. Paste it verbatim — a summary loses the detail
+        that distinguishes the three failure modes.
+      render: text
+
+  - type: textarea
+    id: selftest
+    attributes:
+      label: Selftest result
+      description: The last few lines, including the pass/fail count.
+      render: text
+
+  - type: input
+    id: agy
+    attributes:
+      label: agy --version
+      placeholder: "1.1.12"
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and shell
+      placeholder: "Windows 11 / Git Bash — or Ubuntu 24.04 / bash"
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: >
+        Log excerpts are welcome. Please redact API keys, tokens and private
+        paths first — issues are public.

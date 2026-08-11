@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+#
+# Integrity fence for delegated runs.
+#
+# The implementer runs headless with --dangerously-skip-permissions, because
+# agy does not honour permissions.allow in --print mode: every allowed command
+# is soft-denied, the run continues, and it still exits 0 with status SUCCESS.
+# The CLI's own fence is not merely weak, it is inverted — it blocks the work
+# and permits the lie.
+#
+# This is the fence we control instead. It records the surfaces the implementer
+# must never touch, before and after a run, and names every file that moved. It
+# asks the CLI nothing and trusts the CLI's report not at all.
+#
+# Usage:
+#   .agy/tripwire snapshot <dir>   record the baseline
+#   .agy/tripwire verify   <dir>   compare now against it; non-zero on drift
+#   .agy/tripwire check            snapshot + verify in one shot (self-test)
+#   .agy/tripwire surface <name>   emit one surface's listing (spot-check)
+#   .agy/tripwire surfaces         list the configured surface names
+#
+# Surfaces come from .agy/config, not from this file. Every surface emits the
+# same shape — <fingerprint><TAB><path> — so one differ reads all of them.
+#
+#
+# WHY AGY_GUARD_TREE IS FINGERPRINTED BY METADATA AND NOT BY CONTENT
+#
+# A guarded external tree (a dev site, a data directory) is typically tens of
+# thousands of files. Content-hashing it means opening every one, which on
+# Windows wakes Defender's real-time scanner: measured at ~3,500 files/s cold,
+# collapsing to ~60 files/s once the scanner engages — a 6s pass becomes one
+# that cannot finish in 150s. A fence that intermittently takes minutes is a
+# fence that gets switched off.
+#
+# MSYS `find` is no better: it answers `-type f` from the directory entry
+# (fast), but any mtime predicate — `-newer`, `-printf '%T@'` — forces a
+# per-file stat() that opens the file. Same cost as hashing.
+#
+# PowerShell's Get-ChildItem returns Length and LastWriteTime as *part of* the
+# directory enumeration, so size+mtime for a whole tree costs under a second
+# and never opens a file. That is what the tree surface uses on Windows; GNU
+# find's -printf is the equivalent on Linux, where stat() is cheap.
+#
+# The trade, stated rather than hidden: a write that preserves both size and
+# mtime slips past the tree surface. Defeating it takes deliberate forgery
+# (`touch -r`), not an agent overstepping — which is the threat this is built
+# for. Every other surface is small enough to hash by content, so they get the
+# stronger check.
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+	printf 'tripwire: not a git repository. The fence needs git to judge history.\n' >&2
+	exit 2
+}
+cd "$ROOT" || exit 1
+
+[ -f .agy/config ] || { printf 'tripwire: no .agy/config — run the agy-agents installer\n' >&2; exit 2; }
+# shellcheck disable=SC1091
+. .agy/config
+
+: "${AGY_WORKSPACE:=.agy/work}"
+: "${AGY_LEDGER:=}"
+: "${AGY_GUARD_DIRS:=}"
+: "${AGY_GUARD_FILES:=}"
+: "${AGY_GUARD_TREE:=}"
+: "${AGY_GUARD_TREE_SKIP:=}"
+: "${AGY_REQUIRE:=}"
+
+# ------------------------------------------------------------------ utilities
+
+# An array, not a function: this gets handed to `find -exec`, which can only
+# run a real program. A shell function here silently hashes nothing, and the
+# fence then reports every surface as empty.
+if command -v sha256sum >/dev/null 2>&1; then
+	SHA=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+	SHA=(shasum -a 256)
+else
+	printf 'tripwire: no sha256sum or shasum on PATH\n' >&2
+	exit 2
+fi
+
+# sha256sum prints "<64 hex>  <path>"; the fence wants "<64 hex><TAB><path>".
+# A path containing a literal tab would confuse this. Source trees have none.
+sha_to_fp() { sed 's/^\(.\{64\}\)..\(.*\)$/\1\t\2/'; }
+
+# Surface names are derived from paths so the config stays a plain path list:
+#   docs -> docs    .claude -> claude    src/core -> src-core
+surface_name() {
+	printf '%s' "$1" | sed -e 's#^\./##' -e 's#/*$##' -e 's#^\.##' -e 's#[/ ]#-#g'
+}
+
+norm() { printf '%s' "$1" | sed -e 's#^\./##' -e 's#/*$##'; }
+
+DIR_SURFACES=""
+for d in $AGY_GUARD_DIRS; do
+	DIR_SURFACES="$DIR_SURFACES $(surface_name "$d")"
+done
+SURFACES="$(printf '%s' "$DIR_SURFACES" | tr -s ' ')"
+[ -n "$AGY_GUARD_FILES$AGY_LEDGER" ] && SURFACES="$SURFACES files"
+[ -n "$AGY_GUARD_TREE" ] && SURFACES="$SURFACES tree"
+SURFACES="$(printf '%s' "$SURFACES" | sed 's/^ *//')"
+
+# Reverse the mapping: surface name -> the configured path it came from.
+dir_for_surface() {
+	local d
+	for d in $AGY_GUARD_DIRS; do
+		[ "$(surface_name "$d")" = "$1" ] && { printf '%s' "$(norm "$d")"; return 0; }
+	done
+	return 1
+}
+
+# ------------------------------------------------------------------- surfaces
+
+# The workspace lives inside a guarded directory by default (.agy/work under
+# .agy), and every dispatch writes logs into it. Pruning it here is what lets
+# the harness guard itself without firing on its own output. The ledger is
+# guarded separately, as a file, because that one *must* not move during a run.
+hash_dir() {
+	local d
+	d="$(norm "$1")"
+	[ -d "$d" ] || return 0
+
+	local -a expr=()
+	local p
+	for p in ".git" "$(norm "$AGY_WORKSPACE")"; do
+		[ -n "$p" ] && expr+=(-path "$p" -prune -o)
+	done
+
+	find "$d" "${expr[@]}" -type f -exec "${SHA[@]}" {} + 2>/dev/null |
+		sha_to_fp | sort
+	return 0
+}
+
+hash_files() {
+	local f resolved
+	for f in $AGY_LEDGER $AGY_GUARD_FILES; do
+		# Allow ~ and $HOME in the config for files outside the repo.
+		resolved="${f/#\~/$HOME}"
+		[ -f "$resolved" ] && "${SHA[@]}" "$resolved" 2>/dev/null | sha_to_fp
+	done
+	return 0
+}
+
+tree_fingerprint() {
+	local root="${AGY_GUARD_TREE/#\~/$HOME}"
+	[ -d "$root" ] || return 0
+
+	if command -v powershell.exe >/dev/null 2>&1 && [ -f .agy/fingerprint-tree.ps1 ]; then
+		local win ps_win skip
+		win="$(cygpath -w "$root" 2>/dev/null)" || win="$root"
+		ps_win="$(cygpath -w .agy/fingerprint-tree.ps1 2>/dev/null)" || ps_win=".agy/fingerprint-tree.ps1"
+		skip="$(printf '%s' "$AGY_GUARD_TREE_SKIP" | tr ' ' ';')"
+		powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+			-File "$ps_win" -Root "$win" -Skip "$skip" | tr -d '\r'
+		return "${PIPESTATUS[0]}"
+	fi
+
+	if find --version 2>/dev/null | grep -qi gnu; then
+		local -a expr=()
+		local pat
+		for pat in $AGY_GUARD_TREE_SKIP; do
+			expr+=(-name "$pat" -prune -o -path "*/$pat/*" -prune -o)
+		done
+		find "$root" "${expr[@]}" -type f -printf '%s:%T@\t%P\n' 2>/dev/null | sort
+		return 0
+	fi
+
+	printf 'tripwire: AGY_GUARD_TREE is set but neither PowerShell nor GNU find is\n' >&2
+	printf 'available to fingerprint it cheaply. Unset it or add a fingerprinter.\n' >&2
+	return 4
+}
+
+# One definition per surface, shared by snapshot and verify, so the two can
+# never drift apart and quietly compare different things.
+hash_surface() {
+	case "$1" in
+	files) hash_files ;;
+	tree)  tree_fingerprint ;;
+	*)
+		local d
+		if d="$(dir_for_surface "$1")"; then
+			hash_dir "$d"
+		else
+			printf 'tripwire: unknown surface: %s\n' "$1" >&2
+			return 2
+		fi
+		;;
+	esac
+	return 0
+}
+
+git_state() {
+	printf 'branch\t%s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+	printf 'head\t%s\n'   "$(git rev-parse HEAD 2>/dev/null)"
+	printf 'origin\t%s\n' "$(git config --get remote.origin.url 2>/dev/null)"
+}
+
+# Surfaces that must never legitimately be empty. If one of these comes back
+# with nothing, the fence is broken, not clean — and a broken fence that says
+# "clean" is worse than no fence, because it is believed. An early revision of
+# the original did exactly that: a bad PowerShell invocation returned zero
+# files and `check` reported success.
+is_required() {
+	case " $AGY_REQUIRE " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# -------------------------------------------------------------------- verbs
+
+snapshot() {
+	local dir="$1" s rc n failed=0
+	mkdir -p "$dir" || return 1
+
+	for s in $SURFACES; do
+		hash_surface "$s" > "$dir/$s.fp"
+		rc=$?
+		n="$(wc -l < "$dir/$s.fp" 2>/dev/null)"
+		printf '  %-10s %7s files\n' "$s" "${n:-0}"
+		if [ "$rc" -ne 0 ]; then
+			printf 'tripwire: surface %s failed to record (exit %s)\n' "$s" "$rc" >&2
+			failed=1
+		elif [ "${n:-0}" -eq 0 ] && is_required "$s"; then
+			printf 'tripwire: surface %s came back EMPTY — it would guard nothing\n' "$s" >&2
+			failed=1
+		fi
+	done
+
+	git_state > "$dir/git.txt"
+
+	if [ "$failed" -ne 0 ]; then
+		printf 'tripwire: BASELINE INVALID — refusing to arm a fence that guards nothing\n' >&2
+		return 1
+	fi
+	printf 'tripwire: baseline armed — %s files across %s surfaces\n' \
+		"$(cat "$dir"/*.fp 2>/dev/null | wc -l)" "$(printf '%s' "$SURFACES" | wc -w)"
+}
+
+# Node rather than diff/comm because paths may contain spaces and we want the
+# changed paths named, not just a yes/no.
+diff_fp() {
+	node - "$1" "$2" "$3" <<'NODE'
+const fs = require('fs');
+const [label, beforePath, afterPath] = process.argv.slice(2);
+const load = p => {
+	const m = new Map();
+	if (!fs.existsSync(p)) return m;
+	for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
+		const i = line.indexOf('\t');
+		if (i > 0) m.set(line.slice(i + 1), line.slice(0, i));
+	}
+	return m;
+};
+const before = load(beforePath), after = load(afterPath);
+const added = [], removed = [], modified = [];
+for (const [p, h] of after) {
+	if (!before.has(p)) added.push(p);
+	else if (before.get(p) !== h) modified.push(p);
+}
+for (const p of before.keys()) if (!after.has(p)) removed.push(p);
+
+const total = added.length + removed.length + modified.length;
+if (!total) process.exit(0);
+
+console.log(`\nVIOLATION  ${label}: ${total} file(s) changed`);
+let shown = 0;
+for (const [tag, list] of [['added', added], ['removed', removed], ['modified', modified]]) {
+	for (const p of list.slice(0, 20)) { console.log(`  ${tag.padEnd(8)}  ${p}`); shown++; }
+}
+if (total > shown) console.log(`  … and ${total - shown} more`);
+process.exit(1);
+NODE
+}
+
+verify() {
+	local dir="$1"
+	if [ ! -f "$dir/git.txt" ]; then
+		printf 'tripwire: no baseline at %s\n' "$dir" >&2
+		return 2
+	fi
+
+	local violations=0 s now rc n
+	now="$(mktemp -d)"
+
+	for s in $SURFACES; do
+		hash_surface "$s" > "$now/$s.fp"
+		rc=$?
+		n="$(wc -l < "$now/$s.fp" 2>/dev/null)"
+		# Distinguish "the fence broke" from "everything was deleted". Both are
+		# failures, but they send you to different places.
+		if [ "$rc" -ne 0 ] || { [ "${n:-0}" -eq 0 ] && is_required "$s"; }; then
+			printf '\nVIOLATION  %s: could not be read back (exit %s, %s files). The fence itself failed — this is not a clean run.\n' \
+				"$s" "$rc" "${n:-0}"
+			violations=$((violations + 1))
+			continue
+		fi
+		diff_fp "$s" "$dir/$s.fp" "$now/$s.fp" || violations=$((violations + 1))
+	done
+	rm -rf "$now"
+
+	# Git is judged differently: the whole point of a dispatch is that HEAD
+	# moves. What must not happen is the branch changing, the remote being
+	# repointed, or history being rewritten under us.
+	local was_branch was_head was_origin is_branch is_head is_origin
+	was_branch="$(awk -F'\t' '$1=="branch"{print $2}' "$dir/git.txt")"
+	was_head="$(awk -F'\t' '$1=="head"{print $2}' "$dir/git.txt")"
+	was_origin="$(awk -F'\t' '$1=="origin"{print $2}' "$dir/git.txt")"
+	is_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+	is_head="$(git rev-parse HEAD 2>/dev/null)"
+	is_origin="$(git config --get remote.origin.url 2>/dev/null)"
+
+	if [ "$was_branch" != "$is_branch" ]; then
+		printf '\nVIOLATION  git: branch changed %s -> %s\n' "$was_branch" "$is_branch"
+		violations=$((violations + 1))
+	fi
+	if [ "$was_origin" != "$is_origin" ]; then
+		printf '\nVIOLATION  git: origin changed %s -> %s\n' "$was_origin" "$is_origin"
+		violations=$((violations + 1))
+	fi
+	if [ "$was_head" != "$is_head" ]; then
+		if git merge-base --is-ancestor "$was_head" "$is_head" 2>/dev/null; then
+			printf '\ngit         HEAD %s -> %s (fast-forward)\n' \
+				"${was_head:0:7}" "${is_head:0:7}"
+			git --no-pager log --oneline "$was_head..$is_head" 2>/dev/null |
+				sed 's/^/  commit  /'
+		else
+			printf '\nVIOLATION  git: history rewritten, %s is not an ancestor of %s\n' \
+				"${was_head:0:7}" "${is_head:0:7}"
+			violations=$((violations + 1))
+		fi
+	fi
+
+	if [ "$violations" -eq 0 ]; then
+		printf '\ntripwire: clean — no guarded surface moved\n'
+		return 0
+	fi
+	printf '\ntripwire: %s GUARDED SURFACE(S) VIOLATED. Investigate before trusting anything from this run.\n' \
+		"$violations"
+	return 1
+}
+
+case "${1:-}" in
+snapshot)
+	[ -n "${2:-}" ] || { printf 'usage: .agy/tripwire snapshot <dir>\n' >&2; exit 2; }
+	snapshot "$2"
+	;;
+verify)
+	[ -n "${2:-}" ] || { printf 'usage: .agy/tripwire verify <dir>\n' >&2; exit 2; }
+	verify "$2"
+	;;
+surface)
+	[ -n "${2:-}" ] || { printf 'usage: .agy/tripwire surface <name>\n' >&2; exit 2; }
+	hash_surface "$2"
+	;;
+surfaces)
+	printf '%s\n' "$SURFACES" | tr ' ' '\n'
+	;;
+check)
+	# Self-test: a snapshot immediately followed by a verify must be clean.
+	# If this ever reports drift, an exclusion is missing and the fence will
+	# cry wolf on every dispatch until it is fixed.
+	d="$(mktemp -d)"
+	snapshot "$d"
+	verify "$d"
+	rc=$?
+	rm -rf "$d"
+	exit $rc
+	;;
+*)
+	printf 'usage: .agy/tripwire {snapshot <dir>|verify <dir>|surface <name>|surfaces|check}\n' >&2
+	exit 2
+	;;
+esac

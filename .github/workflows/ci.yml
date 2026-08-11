@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: selftest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The suite stubs `agy` and asserts that the stub is what resolves, so it
+      # never reaches the real CLI and never spends quota. Nothing outside its
+      # temp directory is touched.
+      - name: Run the agy-agents selftest
+        run: bash agy-agents/scripts/selftest
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every script must parse
+        run: |
+          rc=0
+          for f in agy-agents/assets/dispatch agy-agents/assets/gates \
+                   agy-agents/assets/review-pkg agy-agents/assets/tripwire \
+                   agy-agents/scripts/install agy-agents/scripts/selftest \
+                   scripts/install-skill; do
+            bash -n "$f" || { echo "::error file=$f::syntax error"; rc=1; }
+          done
+          exit $rc
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning -e SC1090,SC1091,SC2317 \
+            agy-agents/assets/dispatch agy-agents/assets/gates \
+            agy-agents/assets/review-pkg agy-agents/assets/tripwire \
+            agy-agents/scripts/install agy-agents/scripts/selftest \
+            scripts/install-skill
+
+      # PowerShell 5.1 reads a .ps1 in the system codepage unless it has a
+      # UTF-8 BOM, so one non-ASCII character breaks the parser with an error
+      # that points nowhere near the real fault. Cheaper to catch here.
+      - name: PowerShell files are ASCII-only
+        run: |
+          if LC_ALL=C grep -rn '[^ -~	]' --include='*.ps1' .; then
+            echo "::error::non-ASCII byte in a .ps1 — see CONTRIBUTING.md"
+            exit 1
+          fi
+          echo "clean"
+
+      # A CRLF shebang fails on Linux with `bad interpreter: ...^M`, and on a
+      # Windows checkout that happens silently at clone time.
+      - name: No CRLF in shell scripts
+        run: |
+          rc=0
+          while IFS= read -r f; do
+            if grep -qU $'\r' "$f"; then echo "::error file=$f::CRLF line endings"; rc=1; fi
+          done < <(git ls-files 'agy-agents/assets/*' 'agy-agents/scripts/*' 'scripts/*' '*.sh' '*.ps1')
+          exit $rc
+
+  skill-frontmatter:
+    name: skill frontmatter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Claude Code caps skill frontmatter at 1024 characters and requires
+      # name + description. An over-long block fails to load at runtime with
+      # no useful message, so it is worth asserting here.
+      - name: Validate every SKILL.md
+        run: |
+          rc=0
+          for f in */SKILL.md; do
+            fm="$(awk 'NR==1 && $0=="---"{f=1;next} f && $0=="---"{exit} f' "$f")"
+            n=$(printf '%s' "$fm" | wc -c)
+            printf '%s: %s bytes of frontmatter\n' "$f" "$n"
+            [ "$n" -gt 1024 ] && { echo "::error file=$f::frontmatter is $n bytes, limit is 1024"; rc=1; }
+            printf '%s' "$fm" | grep -q '^name:'        || { echo "::error file=$f::missing name:"; rc=1; }
+            printf '%s' "$fm" | grep -q '^description:' || { echo "::error file=$f::missing description:"; rc=1; }
+          done
+          exit $rc
+
+      # A skill that points at a reference file it does not ship is a skill
+      # that silently loses its own instructions.
+      #
+      # Only `reference/` and `assets/` are checked. A backticked `scripts/...`
+      # is ambiguous: the docs legitimately name the *adopted project's*
+      # scripts/gates and scripts/gemini-dispatch, which are not files here.
+      # The skill's own two scripts are asserted by name below instead.
+      - name: Internal reference links resolve
+        run: |
+          rc=0
+          for d in */SKILL.md; do
+            dir="$(dirname "$d")"
+            for target in $(grep -rhoE '`(reference|assets)/[A-Za-z0-9._/-]+`' "$dir" | tr -d '`' | sort -u); do
+              [ -e "$dir/$target" ] || { echo "::error::$dir references missing $target"; rc=1; }
+            done
+            for required in scripts/install scripts/selftest; do
+              [ -f "$dir/$required" ] || { echo "::error::$dir is missing $required"; rc=1; }
+            done
+          done
+          exit $rc

@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a change to an existing skill, or a new one
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What goes wrong today
+      description: >
+        Describe the failure, not the solution. This project's whole subject is
+        failures that look like successes, so the most valuable reports are
+        "X reported clean and was not" rather than "please add Y".
+    validations: { required: true }
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+    validations: { required: true }
+
+  - type: textarea
+    id: test
+    attributes:
+      label: How would a test catch this?
+      description: >
+        Not required, but it shapes the work. Every change here starts with an
+        assertion in `scripts/selftest` that fails first — see CONTRIBUTING.md.

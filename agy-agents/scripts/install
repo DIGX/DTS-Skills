@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+#
+# Deploy the Claude Manager + Antigravity Implementer protocol into a project.
+#
+#   install [options]
+#
+#   --root <path>        project root (default: git root of the cwd)
+#   --project <name>     display name (default: the root directory's name)
+#   --milestone <slug>   workspace slug (default: m1)
+#   --workspace <path>   use an existing workspace instead of .agy/work/<slug>
+#   --gates <path>       use an existing gate runner instead of writing .agy/gates
+#   --guard-tree <path>  an external read-only tree to fence (a dev site, a
+#                        data dir). Fingerprinted by size+mtime, not content.
+#   --plan <path>        the plan the ledger should reference
+#   --force              overwrite config, gates and templates that already exist
+#   --dry-run            print what would happen, change nothing
+#
+# Idempotent by default: re-running never clobbers a config or a gate runner
+# you have edited. The scripts themselves are always refreshed, because they
+# are the skill's to own.
+
+set -uo pipefail
+
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ASSETS="$SKILL_DIR/assets"
+
+ROOT=""; PROJECT=""; MILESTONE="m1"; WORKSPACE=""; GATES=""; GUARD_TREE=""
+PLAN=""; FORCE=0; DRY=0
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--root)       ROOT="$2"; shift 2 ;;
+	--project)    PROJECT="$2"; shift 2 ;;
+	--milestone)  MILESTONE="$2"; shift 2 ;;
+	--workspace)  WORKSPACE="$2"; shift 2 ;;
+	--gates)      GATES="$2"; shift 2 ;;
+	--guard-tree) GUARD_TREE="$2"; shift 2 ;;
+	--plan)       PLAN="$2"; shift 2 ;;
+	--force)      FORCE=1; shift ;;
+	--dry-run)    DRY=1; shift ;;
+	-h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
+	*) printf 'install: unknown option %s\n' "$1" >&2; exit 2 ;;
+	esac
+done
+
+if [ -z "$ROOT" ]; then
+	ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+		printf 'install: not a git repository, and no --root given.\n' >&2
+		printf 'The fence judges git history, so the protocol needs one. Run\n' >&2
+		printf '`git init` first, or pass --root <path-to-a-repo>.\n' >&2
+		exit 2
+	}
+fi
+cd "$ROOT" || exit 1
+ROOT="$PWD"
+[ -n "$PROJECT" ] || PROJECT="$(basename "$ROOT")"
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+TODAY="$(date +%Y-%m-%d)"
+
+say()  { printf '  %-8s %s\n' "$1" "$2"; }
+do_it() { [ "$DRY" -eq 1 ] && return 1; return 0; }
+
+printf '\nagy-agents installer\n'
+printf 'root         %s\n' "$ROOT"
+printf 'project      %s\n' "$PROJECT"
+[ "$DRY" -eq 1 ] && printf 'mode         DRY RUN — nothing will be written\n'
+printf '\n'
+
+# ---------------------------------------------------------------- adoption scan
+# Anything already here that this protocol should use rather than duplicate.
+ADOPTED=""
+if [ -z "$WORKSPACE" ]; then
+	for candidate in .superpowers/sdd/*/ .agy/work/*/; do
+		[ -d "$candidate" ] || continue
+		[ -f "${candidate}progress.md" ] || continue
+		WORKSPACE="${candidate%/}"
+		ADOPTED="$ADOPTED workspace"
+		break
+	done
+fi
+[ -n "$WORKSPACE" ] || WORKSPACE=".agy/work/$MILESTONE"
+WORKSPACE="${WORKSPACE#./}"
+
+if [ -z "$GATES" ]; then
+	for candidate in scripts/gates bin/gates ./gates; do
+		if [ -f "$candidate" ]; then
+			GATES="${candidate#./}"
+			ADOPTED="$ADOPTED gates"
+			break
+		fi
+	done
+fi
+[ -n "$GATES" ] || GATES=".agy/gates"
+
+printf -- '--- plan -----------------------------------------------------------\n'
+say workspace "$WORKSPACE"
+say gates     "$GATES"
+say branch    "$BRANCH"
+[ -n "$GUARD_TREE" ] && say tree "$GUARD_TREE (size+mtime fence)"
+[ -n "$ADOPTED" ] && say adopted "existing:$ADOPTED"
+printf '\n'
+
+# ------------------------------------------------------------------- detection
+# Guard surfaces: .agy always (a run must not edit its own fence), plus any
+# specification or agent-instruction directory that exists. Source directories
+# are deliberately NOT guarded — the implementer must edit those, and git is
+# the guard there.
+# .agy and .claude are unconditional: this installer is about to populate both,
+# so "does it exist yet" is the wrong question for them.
+GUARD_DIRS=".agy .claude"
+for d in docs spec specs .github; do
+	[ -d "$d" ] && GUARD_DIRS="$GUARD_DIRS $d"
+done
+
+# Config files outside the repo that a run must not rewrite.
+GUARD_FILES=""
+for f in "$HOME/.gemini/antigravity-cli/settings.json" \
+	"$HOME/.gemini/config/config.json" \
+	"$HOME/.claude/settings.json"; do
+	[ -f "$f" ] && GUARD_FILES="$GUARD_FILES ${f/#$HOME/\~}"
+done
+
+# A surface that must never legitimately come back empty. Computed now, from
+# what is actually on disk, so the fence can tell "nothing changed" apart from
+# "the fingerprinter broke".
+REQUIRE=""
+for d in $GUARD_DIRS; do
+	name="$(printf '%s' "$d" | sed -e 's#^\.##' -e 's#[/ ]#-#g')"
+	# .agy and .claude are about to be populated; count them regardless.
+	if [ "$d" = ".agy" ] || [ "$d" = ".claude" ] || [ -n "$(find "$d" -type f -print -quit 2>/dev/null)" ]; then
+		REQUIRE="$REQUIRE $name"
+	fi
+done
+[ -n "$GUARD_TREE" ] && REQUIRE="$REQUIRE tree"
+REQUIRE="${REQUIRE# }"
+
+# Gate detection. Emits `gate`/`gate_line` lines for .agy/gates. Anything it is
+# not sure about is emitted commented-out with a TODO, never silently dropped.
+detect_gates() {
+	local found=0
+
+	if [ -f composer.json ]; then
+		[ -f vendor/bin/phpunit ]  && { printf "gate_line   tests   '^(OK|Tests:|FAILURES|ERRORS)' php vendor/bin/phpunit\n"; found=1; }
+		[ -f vendor/bin/phpcs ]    && { printf 'gate        lint    php vendor/bin/phpcs\n'; found=1; }
+		[ -f vendor/bin/phpstan ]  && { printf 'gate        types   php vendor/bin/phpstan analyse --no-progress\n'; found=1; }
+	fi
+
+	if [ -f package.json ] && command -v node >/dev/null 2>&1; then
+		local scripts
+		scripts="$(node -e '
+			try {
+				const p = require(process.cwd() + "/package.json");
+				const s = p.scripts || {};
+				const want = ["test","lint","typecheck","type-check","tsc","build","check"];
+				for (const k of want) if (s[k]) console.log(k);
+			} catch (e) {}
+		' 2>/dev/null)"
+		local k
+		for k in $scripts; do
+			case "$k" in
+			test)  printf "gate_line   tests   '(pass|fail|tests?)' npm test --silent\n" ;;
+			build) printf 'gate        build   npm run build --silent\n' ;;
+			*)     printf 'gate        %-7s npm run %s --silent\n' "$k" "$k" ;;
+			esac
+			found=1
+		done
+	fi
+
+	if [ -f Cargo.toml ]; then
+		printf "gate_line   tests   'test result' cargo test --quiet\n"
+		printf 'gate        lint    cargo clippy --quiet -- -D warnings\n'
+		printf 'gate        fmt     cargo fmt --check\n'
+		found=1
+	fi
+
+	if [ -f go.mod ]; then
+		printf 'gate        tests   go test ./...\n'
+		printf 'gate        vet     go vet ./...\n'
+		found=1
+	fi
+
+	if [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+		command -v pytest >/dev/null 2>&1 && printf "gate_line   tests   '(passed|failed|error)' pytest -q\n"
+		command -v ruff   >/dev/null 2>&1 && printf 'gate        lint    ruff check .\n'
+		command -v mypy   >/dev/null 2>&1 && printf 'gate        types   mypy .\n'
+		found=1
+	fi
+
+	if [ "$found" -eq 0 ]; then
+		printf '# TODO: no toolchain was detected here. Add your real gates, e.g.\n'
+		printf '#   gate      tests   <your test command>\n'
+		printf '#   gate      lint    <your lint command>\n'
+		printf '#\n'
+		printf '# Until at least one uncommented gate exists, this script exits 1 on\n'
+		printf '# purpose. That is the protocol working: an unverified dispatch is\n'
+		printf '# worse than no dispatch, because its report gets believed.\n'
+	fi
+}
+
+# ------------------------------------------------------------------- write it
+printf -- '--- writing --------------------------------------------------------\n'
+
+if do_it; then mkdir -p .agy "$WORKSPACE/logs"; fi
+say mkdir ".agy/ and $WORKSPACE/logs/"
+
+for f in dispatch tripwire review-pkg fingerprint-tree.ps1; do
+	if do_it; then
+		cp "$ASSETS/$f" ".agy/$f" || exit 1
+		case "$f" in *.ps1) ;; *) chmod +x ".agy/$f" ;; esac
+	fi
+	say script ".agy/$f"
+done
+
+# Gates: never clobber one that already exists and may have been tuned.
+if [ "$GATES" = ".agy/gates" ]; then
+	if [ -f .agy/gates ] && [ "$FORCE" -eq 0 ]; then
+		say keep '.agy/gates (already present — pass --force to regenerate)'
+	else
+		if do_it; then
+			detected="$(detect_gates)"
+			# Substitute at the marker without a shell expansion of the payload.
+			awk -v repl="$detected" '
+				/#AGY_INSTALLER_GATES#/ { print repl; next }
+				{ print }
+			' "$ASSETS/gates" > .agy/gates || exit 1
+			chmod +x .agy/gates
+		fi
+		say write ".agy/gates ($( detect_gates | grep -c '^gate' ) gate(s) detected)"
+	fi
+else
+	say adopt "$GATES (left exactly as it is)"
+fi
+
+# An adopted runner is the project's own script and does not source .agy/config.
+# Exports here still reach it through the dispatch's environment, but they will
+# NOT be there if you run the runner by hand — which is exactly when a missing
+# PATH entry looks like a real gate failure. Say so rather than let it surprise.
+if [ "$GATES" = ".agy/gates" ]; then
+	ENV_CAVEAT=""
+else
+	ENV_CAVEAT="
+#
+# \`$GATES\` is your own script and does not read this file, so a bare
+# \`$GATES\` run will not have these. Add \`[ -f .agy/config ] && . .agy/config\`
+# to it if you want the two paths to behave identically."
+fi
+
+# Config: the one file that is genuinely the project's. Never silently rewritten.
+if [ -f .agy/config ] && [ "$FORCE" -eq 0 ]; then
+	say keep '.agy/config (already present — pass --force to regenerate)'
+else
+	if do_it; then
+		cat > .agy/config <<CONFIG
+# .agy/config — sourced by every .agy script.
+#
+# Every value uses the \`: "\${VAR:=default}"\` form, so an environment variable
+# of the same name always wins over what is written here. That is how a
+# one-off override works:  AGY_FALLBACK=force .agy/dispatch 4
+#
+# Written by the agy-agents installer on $TODAY. Yours to edit thereafter.
+
+# ---------------------------------------------------------------- where things are
+: "\${AGY_WORKSPACE:=$WORKSPACE}"
+: "\${AGY_LEDGER:=\$AGY_WORKSPACE/progress.md}"
+: "\${AGY_GATES:=$GATES}"
+
+# ------------------------------------------------------------------------- models
+# Gemini is primary. The Claude/GPT group is a separate quota bucket that
+# drains much faster for the same work, so it is a reserve, entered only on a
+# clear *weekly* Gemini exhaustion. See .agy/dispatch's header.
+: "\${AGY_MODEL:=gemini-3.6-flash-high}"
+: "\${AGY_FALLBACK_MODEL:=claude-opus-4-6-thinking}"
+: "\${AGY_FALLBACK:=auto}"
+: "\${AGY_EFFORT:=high}"
+: "\${AGY_TIMEOUT:=45m}"
+
+# ------------------------------------------------------------------------- fence
+# Surfaces the implementer must never touch. Source directories are absent on
+# purpose: the implementer has to edit those, and git is the guard there.
+#
+# Note that .agy guards the harness against itself. The workspace inside it is
+# pruned automatically (every dispatch writes logs there), but the ledger is
+# guarded as a file — so do not edit progress.md while a dispatch is running.
+: "\${AGY_GUARD_DIRS:=$GUARD_DIRS}"
+: "\${AGY_GUARD_FILES:=$GUARD_FILES}"
+
+# An external read-only tree (a dev site, a data directory). Fingerprinted by
+# size+mtime rather than content, because content-hashing tens of thousands of
+# files is slow enough that the fence stops being run. Leave empty if none.
+: "\${AGY_GUARD_TREE:=$GUARD_TREE}"
+: "\${AGY_GUARD_TREE_SKIP:=uploads database upgrade cache tmp *.log *.sqlite*}"
+
+# Surfaces that must never come back empty. If one does, the fingerprinter
+# broke — and a broken fence reporting "clean" is worse than no fence.
+: "\${AGY_REQUIRE:=$REQUIRE}"
+
+# --------------------------------------------------------------- project environment
+# Anything the gates and the implementer both need. \`.agy/dispatch\` sources
+# this file before it runs \`$GATES\`, so exports here reach the gates on every
+# dispatch.$ENV_CAVEAT
+#
+# export PATH="\$PWD/dev-tools/php:\$PATH"
+# export APP_ENV=test
+CONFIG
+	fi
+	say write '.agy/config'
+fi
+
+# Workspace scaffolding.
+subst() {
+	sed -e "s#{{PROJECT}}#$PROJECT#g" \
+		-e "s#{{WORKSPACE}}#$WORKSPACE#g" \
+		-e "s#{{ROOT}}#$ROOT#g" \
+		-e "s#{{BRANCH}}#$BRANCH#g" \
+		-e "s#{{DATE}}#$TODAY#g" \
+		-e "s#{{GATES}}#$GATES#g" \
+		-e "s#{{PLAN_PATH}}#${PLAN:-<no plan recorded>}#g" \
+		-e "s#{{PROTOCOL}}#$SKILL_DIR/reference/protocol.md#g" \
+		-e "s#{{MODEL}}#gemini-3.6-flash-high#g" \
+		-e "s#{{FALLBACK_MODEL}}#claude-opus-4-6-thinking#g" \
+		"$1"
+}
+
+for pair in "dispatch-context.md:$WORKSPACE/dispatch-context.md" \
+	"progress.md:$WORKSPACE/progress.md" \
+	"task-dispatch.md:$WORKSPACE/task-dispatch.template.md"; do
+	src="${pair%%:*}"; dst="${pair#*:}"
+	if [ -f "$dst" ] && [ "$FORCE" -eq 0 ]; then
+		say keep "$dst"
+	else
+		if do_it; then subst "$ASSETS/templates/$src" > "$dst" || exit 1; fi
+		say write "$dst"
+	fi
+done
+
+# Project-local skill: how a fresh session in this repo discovers the protocol.
+if [ -f .claude/skills/agy-task-cycle/SKILL.md ] && [ "$FORCE" -eq 0 ]; then
+	say keep '.claude/skills/agy-task-cycle/SKILL.md'
+else
+	if do_it; then
+		mkdir -p .claude/skills/agy-task-cycle
+		subst "$ASSETS/templates/project-skill.md" > .claude/skills/agy-task-cycle/SKILL.md || exit 1
+	fi
+	say write '.claude/skills/agy-task-cycle/SKILL.md'
+fi
+
+# Logs and fence snapshots are noise; briefs, reports, reviews and the ledger
+# are the project's decision record and stay in git.
+if [ ! -f .agy/.gitignore ] || [ "$FORCE" -eq 1 ]; then
+	if do_it; then
+		printf 'work/*/logs/\nwork/*/*.diff\n' > .agy/.gitignore
+	fi
+	say write '.agy/.gitignore (logs and review packages only)'
+fi
+
+# ------------------------------------------------------------------ verify it
+printf '\n--- checking -------------------------------------------------------\n'
+if [ "$DRY" -eq 1 ]; then
+	printf '  dry run — nothing written, nothing checked\n'
+	exit 0
+fi
+
+problems=0
+
+if command -v agy >/dev/null 2>&1 || [ -x "$HOME/AppData/Local/agy/bin/agy.exe" ]; then
+	say agy 'found'
+else
+	say agy 'NOT FOUND — install the Antigravity CLI before dispatching'
+	problems=$((problems + 1))
+fi
+
+if command -v node >/dev/null 2>&1; then
+	say node 'found'
+else
+	say node 'NOT FOUND — the fence differ and the stream parser both need it'
+	problems=$((problems + 1))
+fi
+
+printf '\n'
+if bash .agy/tripwire check >/dev/null 2>&1; then
+	say fence 'arms and verifies clean'
+else
+	say fence 'FAILS ITS OWN SELF-TEST — run `bash .agy/tripwire check` and read it'
+	problems=$((problems + 1))
+fi
+
+if bash "$GATES" >/dev/null 2>&1; then
+	say gates 'green'
+else
+	rc=$?
+	if [ "$GATES" = ".agy/gates" ] && ! grep -qE '^\s*gate(_line)?\s' .agy/gates; then
+		say gates 'none configured — .agy/gates exits 1 until you add real ones'
+		problems=$((problems + 1))
+	else
+		say gates "$rc failing (that may be the truth about this tree, not a wiring problem)"
+	fi
+fi
+
+printf '\n--- next -----------------------------------------------------------\n'
+cat <<NEXT
+  1. Fill in $WORKSPACE/dispatch-context.md. Every agent reads it,
+     so an omission there is inherited by all of them.
+  2. Make $GATES real, and confirm it fails when the tree is broken.
+     A gate you have never seen go red is not yet a gate.
+  3. Review the fence: bash .agy/tripwire surfaces
+  4. Write $WORKSPACE/task-1-dispatch.md from
+     $WORKSPACE/task-dispatch.template.md, then: .agy/dispatch 1
+NEXT
+
+[ "$problems" -gt 0 ] && printf '\n  %d thing(s) above need attention before the first dispatch.\n' "$problems"
+exit 0

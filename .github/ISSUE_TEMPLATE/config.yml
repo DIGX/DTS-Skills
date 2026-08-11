@@ -1,0 +1,9 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Antigravity CLI itself
+    url: https://github.com/google-antigravity/antigravity-cli
+    about: >
+      Bugs in `agy` — install, auth, models, quota. This repo only wraps it.
+  - name: Claude Code
+    url: https://github.com/anthropics/claude-code
+    about: Bugs in Claude Code, skill loading, or slash commands.

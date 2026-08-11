@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# Install a skill from this repository into the Claude Code skills directory.
+#
+#   bash scripts/install-skill agy-agents           # copy
+#   bash scripts/install-skill agy-agents --link    # symlink (for contributors)
+#   bash scripts/install-skill --list
+#
+# Copy vs link:
+#   copy   the installed skill is a snapshot. `git pull` here does not change
+#          it until you re-run this script. Safe default.
+#   link   the installed skill IS this working tree. `git pull` updates it
+#          immediately — and so does every uncommitted edit, including the
+#          broken ones. Use it when you are working on the skill.
+
+set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+REPO="$PWD"
+DEST_ROOT="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+
+skills() { find . -mindepth 2 -maxdepth 2 -name SKILL.md -printf '%h\n' 2>/dev/null | sed 's|^\./||' | sort; }
+
+if [ "${1:-}" = "--list" ] || [ $# -eq 0 ]; then
+	printf 'skills in this repository:\n'
+	skills | sed 's/^/  /'
+	printf '\nusage: bash scripts/install-skill <name> [--link]\n'
+	[ $# -eq 0 ] && exit 64 || exit 0
+fi
+
+NAME="$1"; shift
+LINK=0
+for a in "$@"; do
+	case "$a" in
+	--link) LINK=1 ;;
+	*) printf 'install-skill: unknown option %s\n' "$a" >&2; exit 64 ;;
+	esac
+done
+
+SRC="$REPO/$NAME"
+if [ ! -f "$SRC/SKILL.md" ]; then
+	printf 'install-skill: no skill called "%s" here (no %s/SKILL.md).\n' "$NAME" "$NAME" >&2
+	printf 'available:\n' >&2
+	skills | sed 's/^/  /' >&2
+	exit 1
+fi
+
+DEST="$DEST_ROOT/$NAME"
+mkdir -p "$DEST_ROOT" || exit 1
+
+# Replacing an existing install is destructive, and a symlink target is very
+# easy to delete by accident with a recursive remove. Report exactly what is
+# there and what will happen to it, rather than silently clobbering.
+if [ -L "$DEST" ]; then
+	printf 'install-skill: %s is currently a symlink to %s\n' "$DEST" "$(readlink "$DEST")"
+	rm -f "$DEST" || exit 1
+elif [ -d "$DEST" ]; then
+	printf 'install-skill: %s already exists and will be replaced.\n' "$DEST"
+	printf 'Anything you edited in place there will be lost. Ctrl-C now to keep it.\n'
+	printf 'Continuing in 5s...\n'
+	sleep 5
+	rm -rf "$DEST" || exit 1
+fi
+
+if [ "$LINK" -eq 1 ]; then
+	# MSYS/Git Bash needs winsymlinks:nativestrict to make a real symlink, and
+	# that requires Developer Mode or an elevated shell. Fall back rather than
+	# leave a copy the user believes is a link.
+	if MSYS=winsymlinks:nativestrict ln -s "$SRC" "$DEST" 2>/dev/null; then
+		printf 'linked   %s -> %s\n' "$DEST" "$SRC"
+	else
+		printf 'install-skill: could not create a symlink (on Windows this needs\n' >&2
+		printf 'Developer Mode or an elevated shell). Falling back to a copy.\n\n' >&2
+		LINK=0
+	fi
+fi
+
+if [ "$LINK" -eq 0 ]; then
+	mkdir -p "$DEST" || exit 1
+	cp -R "$SRC/." "$DEST/" || exit 1
+	printf 'copied   %s -> %s\n' "$SRC" "$DEST"
+fi
+
+# The scripts are useless without the executable bit, and a copy across some
+# filesystems drops it.
+find "$DEST" -type f \( -name install -o -name selftest -o -name dispatch \
+	-o -name tripwire -o -name gates -o -name review-pkg \) \
+	-exec chmod +x {} + 2>/dev/null
+
+printf '\nInstalled. In Claude Code:  /%s\n' "$NAME"
+if [ -x "$DEST/scripts/selftest" ]; then
+	printf 'Verify with:                bash %s/scripts/selftest\n' "$DEST"
+fi

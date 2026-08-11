@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+#
+# Prove the harness still works, in a throwaway repo, without spending a token
+# of quota.
+#
+#   selftest [--keep]
+#
+# Every assertion here exists because the property it checks is one you cannot
+# see failing from the outside. A fence that hashes nothing still prints
+# "clean"; a gate runner with no gates still exits 0 if you let it; a quota
+# classifier that falls back too eagerly just quietly burns the scarce bucket.
+# Run this after editing anything in assets/.
+#
+# The Antigravity CLI is stubbed. `agy` is never really called.
+
+set -uo pipefail
+
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+KEEP=0
+[ "${1:-}" = "--keep" ] && KEEP=1
+
+TMP="$(mktemp -d)"
+REPO="$TMP/repo"
+BIN="$TMP/bin"
+PASS=0; FAIL=0
+
+ok()   { PASS=$((PASS+1)); printf '  PASS  %s\n' "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
+want() { # want <label> <expected-rc> <actual-rc> [detail]
+	if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected exit $2, got $3. ${4:-}"; fi
+}
+has()  { # has <label> <needle> <file>
+	if grep -qF -- "$2" "$3" 2>/dev/null; then ok "$1"; else bad "$1" "no '$2' in $(basename "$3")"; fi
+}
+hasnt() {
+	if grep -qF -- "$2" "$3" 2>/dev/null; then bad "$1" "unexpected '$2'"; else ok "$1"; fi
+}
+
+cleanup() {
+	if [ "$KEEP" -eq 1 ]; then
+		printf '\nkept: %s\n' "$TMP"
+	else
+		rm -rf "$TMP"
+	fi
+}
+trap cleanup EXIT
+
+# --------------------------------------------------------------- the fake agy
+# Gemini models report an exhausted bucket (FAKE_ERROR picks which); every
+# other model succeeds. That is enough to drive all four routing paths.
+mkdir -p "$BIN"
+cat > "$BIN/agy" <<'STUB'
+#!/usr/bin/env bash
+model=""; prev=""
+for a in "$@"; do [ "$prev" = "--model" ] && model="$a"; prev="$a"; done
+printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
+case "$model" in
+*gemini*)
+	case "${FAKE_ERROR:-weekly}" in
+	fivehour) msg="Rate limit: 5 hour limit reached, refreshes in 3h45m" ;;
+	unknown)  msg="429 RESOURCE_EXHAUSTED" ;;
+	none)     printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{}}}}'
+	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Gemini did the work.","num_turns":2,"duration_seconds":5}}'
+	          exit 0 ;;
+	*)        msg="RESOURCE_EXHAUSTED: weekly limit reached for Gemini models" ;;
+	esac
+	printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":{"message":"'"$msg"'"},"response":"","num_turns":0,"duration_seconds":3}}'
+	exit 1 ;;
+*)
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
+	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Reserve model completed the task.","num_turns":2,"duration_seconds":9}}'
+	exit 0 ;;
+esac
+STUB
+chmod +x "$BIN/agy"
+
+# PATH entries must be POSIX-form on git-bash. A "C:/..." entry is accepted
+# silently and then never resolved, so the REAL agy gets found and dispatched.
+# That has happened; it cost ~148k tokens of live quota. Hence the assertion.
+BIN_U="$(cygpath -u "$BIN" 2>/dev/null || printf '%s' "$BIN")"
+export PATH="$BIN_U:$PATH"
+case "$(command -v agy)" in
+"$BIN_U"/*) ;;
+*) printf 'selftest: ABORT — `agy` resolves to %s, not the stub at %s.\n' "$(command -v agy)" "$BIN_U" >&2
+   printf 'Refusing to run: this would dispatch the real CLI and spend quota.\n' >&2
+   exit 1 ;;
+esac
+
+# ------------------------------------------------------------------ the repo
+mkdir -p "$REPO/docs" "$REPO/src"
+cd "$REPO" || exit 1
+git init -q .
+git config user.email selftest@local
+git config user.name selftest
+printf 'spec\n' > docs/spec.md
+printf 'x\n'    > src/a.txt
+git add -A && git commit -qm init
+
+printf '\n=== install ========================================================\n'
+bash "$SKILL_DIR/scripts/install" --project Selftest --milestone m1 >"$TMP/install.log" 2>&1
+want "installer exits 0" 0 $?
+
+for f in .agy/config .agy/dispatch .agy/tripwire .agy/review-pkg .agy/gates \
+	.agy/work/m1/progress.md .agy/work/m1/dispatch-context.md \
+	.claude/skills/agy-task-cycle/SKILL.md; do
+	[ -f "$f" ] && ok "wrote $f" || bad "wrote $f" "missing"
+done
+
+# The project skill defers to the protocol by absolute path. Rename or move
+# reference/protocol.md and every already-installed project silently points at
+# nothing — the skill still loads, it just quietly loses its own instructions.
+proto="$(sed -n 's/^`\(.*protocol\.md\)`$/\1/p' .claude/skills/agy-task-cycle/SKILL.md | head -1)"
+[ -n "$proto" ] && [ -f "$proto" ] \
+	&& ok "the project skill's protocol path resolves" \
+	|| bad "the project skill's protocol path resolves" "got '${proto:-<unsubstituted>}'"
+
+# Hermetic: the fence must not depend on this machine's ~/.claude or ~/.gemini,
+# which can change under a running session and make the suite flaky.
+cat >> .agy/config <<'CFG'
+AGY_GUARD_FILES=""
+CFG
+
+printf '\n=== fence ==========================================================\n'
+bash .agy/tripwire check >"$TMP/f0.log" 2>&1
+want "arms and self-verifies clean" 0 $? "$(tail -3 "$TMP/f0.log" | tr '\n' ' ')"
+
+# Every surface must actually contain files. This is the failure that hides:
+# a fingerprinter that returns nothing makes the whole fence report clean.
+for s in agy claude docs; do
+	n="$(bash .agy/tripwire surface "$s" | wc -l)"
+	[ "${n:-0}" -gt 0 ] && ok "surface $s fingerprints $n file(s)" \
+		|| bad "surface $s fingerprints $n file(s)" "an empty surface guards nothing"
+done
+
+SNAP="$TMP/snap"
+bash .agy/tripwire snapshot "$SNAP" >/dev/null 2>&1
+
+printf 'planted\n' > docs/planted.md
+bash .agy/tripwire verify "$SNAP" >"$TMP/f1.log" 2>&1
+want "detects a planted file in a guarded dir" 1 $?
+has  "  names the file" "docs/planted.md" "$TMP/f1.log"
+rm -f docs/planted.md
+
+# Logs land inside .agy, which is guarded. If the workspace were not pruned,
+# every dispatch would trip its own fence and the fence would get switched off.
+mkdir -p .agy/work/m1/logs && printf 'log\n' > .agy/work/m1/logs/noise.ndjson
+bash .agy/tripwire verify "$SNAP" >"$TMP/f2.log" 2>&1
+want "ignores its own workspace writes" 0 $?
+
+printf '\ntampered\n' >> .agy/work/m1/progress.md
+bash .agy/tripwire verify "$SNAP" >"$TMP/f3.log" 2>&1
+want "detects a ledger edit" 1 $?
+git checkout -q -- . 2>/dev/null
+git clean -qfd .agy/work/m1/progress.md 2>/dev/null
+bash "$SKILL_DIR/scripts/install" --force >/dev/null 2>&1
+cat >> .agy/config <<'CFG'
+AGY_GUARD_FILES=""
+CFG
+
+bash .agy/tripwire snapshot "$SNAP" >/dev/null 2>&1
+printf 'more\n' > src/b.txt
+git add -A && git commit -qm "task work" >/dev/null 2>&1
+bash .agy/tripwire verify "$SNAP" >"$TMP/f4.log" 2>&1
+want "allows a fast-forward commit" 0 $?
+has  "  reports the new commit" "task work" "$TMP/f4.log"
+
+git checkout -q -b sneaky
+bash .agy/tripwire verify "$SNAP" >"$TMP/f5.log" 2>&1
+want "detects a branch switch" 1 $?
+git checkout -q - && git branch -qD sneaky
+
+mkdir -p hollow
+AGY_GUARD_DIRS=".agy .claude docs hollow" AGY_REQUIRE="hollow" \
+	bash .agy/tripwire snapshot "$TMP/snap2" >"$TMP/f6.log" 2>&1
+want "refuses to arm on an empty required surface" 1 $?
+has  "  says why" "would guard nothing" "$TMP/f6.log"
+rmdir hollow
+
+printf '\n=== gates ==========================================================\n'
+cp .agy/gates "$TMP/gates.bak"
+# Strip gate CALLS only. A bare `^gate` also deletes `gate() {` and
+# `gate_line() {`, leaving orphaned function bodies — the runner then exits 1
+# from a syntax error and "no gates fails" passes for entirely the wrong reason.
+# A call has whitespace after the name; a definition has "(".
+grep -vE '^[[:space:]]*gate(_line)?[[:space:]]' "$TMP/gates.bak" > .agy/gates
+bash -n .agy/gates 2>"$TMP/g0.syn"
+want "the stripped runner is still valid bash" 0 $? "$(cat "$TMP/g0.syn")"
+bash .agy/gates >"$TMP/g0.log" 2>&1
+want  "a gate runner with no gates FAILS" 1 $?
+has   "  says why" "NO GATES ARE CONFIGURED" "$TMP/g0.log"
+hasnt "  does not claim green" "gates green" "$TMP/g0.log"
+
+cp "$TMP/gates.bak" .agy/gates
+{ printf 'gate        pass    true\n'; } >> .agy/gates
+bash .agy/gates >"$TMP/g1.log" 2>&1
+rc=$?
+[ "$rc" -ge 0 ] && ok "a configured gate runner runs" || bad "a configured gate runner runs" "rc=$rc"
+
+printf 'gate        boom    false\n' >> .agy/gates
+bash .agy/gates >"$TMP/g2.log" 2>&1
+[ $? -gt 0 ] && ok "a failing gate is counted" || bad "a failing gate is counted" "exited 0"
+cp "$TMP/gates.bak" .agy/gates
+
+printf '\n=== dispatch =======================================================\n'
+mkdir -p .agy/work/m1
+printf '# task 9\nDo the thing.\n' > .agy/work/m1/task-9-dispatch.md
+
+bash .agy/dispatch 404 >"$TMP/d0.log" 2>&1
+want "refuses a missing dispatch file" 2 $?
+
+AGY_GUARD_DIRS=".agy .claude docs hollow2" AGY_REQUIRE="hollow2" \
+	bash .agy/dispatch 9 >"$TMP/d1.log" 2>&1
+want "refuses to dispatch when the fence will not arm" 3 $?
+has  "  says why" "REFUSING TO DISPATCH" "$TMP/d1.log"
+
+run_dispatch() { # run_dispatch <label> <FAKE_ERROR> <AGY_FALLBACK> <expected-rc> <log>
+	FAKE_ERROR="$2" AGY_FALLBACK="$3" AGY_SKIP_GATES=1 \
+		bash .agy/dispatch 9 >"$5" 2>&1
+	want "$1" "$4" $?
+}
+
+run_dispatch "weekly exhaustion falls back to the reserve" weekly auto 0 "$TMP/d2.log"
+has   "  names the burn"        "RESERVE GROUP BURNED" "$TMP/d2.log"
+has   "  used the reserve model" "claude-opus-4-6-thinking" "$TMP/d2.log"
+
+run_dispatch "a spent 5-hour window HOLDS" fivehour auto 1 "$TMP/d3.log"
+hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d3.log"
+has   "  says it is waiting"       "refreshes within hours" "$TMP/d3.log"
+
+run_dispatch "an unclear quota error HOLDS" unknown auto 1 "$TMP/d4.log"
+hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d4.log"
+has   "  shows the raw text"       "does not say which bucket" "$TMP/d4.log"
+
+run_dispatch "AGY_FALLBACK=off never falls back" weekly off 1 "$TMP/d5.log"
+hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d5.log"
+
+run_dispatch "AGY_FALLBACK=force starts on the reserve" weekly force 0 "$TMP/d6.log"
+has   "  labelled as forced" "reserve group, forced" "$TMP/d6.log"
+
+run_dispatch "a clean Gemini run stays on Gemini" none auto 0 "$TMP/d7.log"
+hasnt "  did not touch the reserve" "claude-opus" "$TMP/d7.log"
+
+FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d8.log" 2>&1
+has "gates run as part of a dispatch" "--- gates ---" "$TMP/d8.log"
+
+printf '\n=== idempotency ====================================================\n'
+printf '\n# EDITED BY THE USER\n' >> .agy/config
+printf '\n# EDITED BY THE USER\n' >> .agy/gates
+bash "$SKILL_DIR/scripts/install" >/dev/null 2>&1
+has "re-install keeps an edited config" "EDITED BY THE USER" .agy/config
+has "re-install keeps an edited gate runner" "EDITED BY THE USER" .agy/gates
+
+printf '\n=== adoption =======================================================\n'
+# Adopting a repo that already has its own gate runner is the path a real
+# migration takes, and it is the one that goes wrong quietly: the generated
+# templates told the implementer to run `.agy/gates`, which adoption never
+# writes. The dispatch would then be graded against a command that does not
+# exist. Every generated file must name the runner that is actually there.
+ADOPT="$TMP/adoptee"
+mkdir -p "$ADOPT/scripts" "$ADOPT/docs"
+(
+	cd "$ADOPT" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf '#!/usr/bin/env bash\necho "house gates"\n' > scripts/gates
+	chmod +x scripts/gates
+	printf 'plan\n' > docs/plan.md
+	git add -A && git commit -qm init
+	AGY_GUARD_FILES="" bash "$SKILL_DIR/scripts/install" --gates scripts/gates >/dev/null 2>&1
+) || bad "adoption install runs" "setup failed"
+
+stale="$(grep -rlF '.agy/gates' "$ADOPT/.agy/config" "$ADOPT/.claude/skills/agy-task-cycle/SKILL.md" \
+	"$ADOPT"/.agy/work/*/task-dispatch.template.md "$ADOPT"/.agy/work/*/dispatch-context.md 2>/dev/null | tr '\n' ' ')"
+[ -z "$stale" ] \
+	&& ok "adoption never names a gate runner it did not write" \
+	|| bad "adoption never names a gate runner it did not write" "still says .agy/gates in: $stale"
+
+has "the dispatch template names the adopted runner" "scripts/gates" \
+	"$(echo "$ADOPT"/.agy/work/*/task-dispatch.template.md)"
+[ -f "$ADOPT/.agy/gates" ] \
+	&& bad "adoption does not write a competing runner" "wrote .agy/gates anyway" \
+	|| ok "adoption does not write a competing runner"
+
+printf '\n====================================================================\n'
+printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1

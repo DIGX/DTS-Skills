@@ -1,0 +1,28 @@
+# Shell scripts and PowerShell must be LF in the working tree on every platform.
+#
+# This is not cosmetic. A `.sh`-style file checked out with CRLF fails on Linux
+# and macOS with `bad interpreter: /usr/bin/env bash^M` — the shebang line ends
+# in a carriage return, so the kernel looks for an interpreter that does not
+# exist. On a Windows checkout with core.autocrlf=true that happens silently at
+# clone time, so the author never sees it and the first Linux user does.
+#
+# `eol=lf` overrides autocrlf for these paths specifically.
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.ps1       text eol=lf
+
+# The harness scripts are extensionless, so they need naming individually.
+agy-agents/assets/dispatch      text eol=lf
+agy-agents/assets/gates         text eol=lf
+agy-agents/assets/review-pkg    text eol=lf
+agy-agents/assets/tripwire      text eol=lf
+agy-agents/scripts/install      text eol=lf
+agy-agents/scripts/selftest     text eol=lf
+scripts/install-skill           text eol=lf
+
+# Markdown and config: normalize to LF in the repository, let git decide the
+# working copy. These are never executed, so a stray CR is harmless.
+*.md        text
+*.yml       text
+*.yaml      text
+*.json      text

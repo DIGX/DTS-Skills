@@ -1,0 +1,54 @@
+name: Quota exhaustion string
+description: You hit a real weekly or 5-hour wall — the raw text is genuinely useful
+labels: [quota, help wanted]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The fallback classifier in `.agy/dispatch` was written against the
+        vocabulary these errors *normally* use, not against a captured
+        Antigravity exhaustion event — there was no real sample to match when
+        it was written. That is why it holds instead of guessing.
+
+        **A real error string is the single most useful thing you can
+        contribute.** It gets the matcher corrected once, for everyone.
+
+  - type: textarea
+    id: raw
+    attributes:
+      label: The raw text
+      description: >
+        From the `quota` line of the run report, or from
+        `<workspace>/logs/<label>-<stamp>.class`. Verbatim, please.
+      render: text
+    validations: { required: true }
+
+  - type: dropdown
+    id: bucket
+    attributes:
+      label: Which bucket was actually spent
+      description: From the interactive panel, which is the only place quota is visible.
+      options:
+        - Gemini — weekly
+        - Gemini — 5-hour
+        - Claude/GPT — weekly
+        - Claude/GPT — 5-hour
+        - Not sure
+    validations: { required: true }
+
+  - type: dropdown
+    id: didright
+    attributes:
+      label: What did the dispatcher do
+      options:
+        - Held (correct, if the bucket was 5-hour)
+        - Fell back to the reserve (correct, if the bucket was Gemini weekly)
+        - Held on an unclear error (conservative, but it should have fallen back)
+        - Fell back when it should not have
+    validations: { required: true }
+
+  - type: input
+    id: agy
+    attributes:
+      label: agy --version
+      placeholder: "1.1.12"
