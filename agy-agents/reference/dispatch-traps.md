@@ -199,14 +199,21 @@ so keep them consistent: if you set `AGY_MODEL=gemini-3.6-flash-low`, set
 
 ## Reading a verdict block
 
-Every dispatch ends with three judgements. Anything other than
-clean / clean / green stops the cycle.
+Every dispatch ends with three judgements and the path to the evidence behind
+them. Anything other than clean / clean / green stops the cycle.
 
 | Line | Means |
 |---|---|
 | `run` | the harness's own reading of the event stream, not `$?` |
 | `fence` | guarded surfaces before vs after — a violation names the files |
+| `log` | the event stream of the attempt that produced this verdict |
 | `gates` | the project's verification suite, run by the harness |
+
+The header prints a `log` line too, but it does so before any attempt runs, so
+it is provisional. On a quota fallback the reserve attempt writes to
+`<base>.reserve.*` and the header's path now points at the attempt that hit the
+wall — open it and you are grading a failed run's artefacts as the work. The
+verdict block's copy is the one to act on.
 
 `gates  not run` appears only under `AGY_SKIP_GATES=1`. If `AGY_GATES` is unset
 the dispatch fails rather than passing: an unverified dispatch is worse than no

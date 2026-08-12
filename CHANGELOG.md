@@ -52,6 +52,13 @@ filled, a `PATH` entry the shell quietly ignores.
   `return 0` discarded every failure the surfaces report, including the
   PowerShell tree walk exiting 4, leaving the empty-surface check as the only
   thing between a broken fingerprinter and the word `clean`.
+- **The verdict block names the log the work actually landed in.** The header
+  prints its log path before any attempt runs, so on a quota fallback it
+  advertised the attempt that hit the wall while the reserve attempt wrote to
+  `<base>.reserve.*`. A reader following the advertised path opens a failed run
+  and grades its artefacts as the work — this harness's own failure family,
+  reintroduced by the harness. `LOG_BASE` now tracks which attempt produced the
+  work and the verdict block prints it; the header's copy stays, provisional.
 
 ### [1.5.0] — 2026-08-12
 

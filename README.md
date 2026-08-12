@@ -43,7 +43,7 @@ reports *green* — and "it said it worked" stops being information.
 - **`.agy/dispatch`** — the only sanctioned way to call `agy`. Handles the four
   traps that can wreck a run, parses the NDJSON event stream and judges the run
   itself rather than reading `$?`, watchdogs a stream that goes silent, and
-  prints one verdict block: `run` / `fence` / `gates`.
+  prints one verdict block: `run` / `fence` / `log` / `gates`.
 - **`.agy/tripwire`** — an integrity fence you control, since the CLI's own
   permission system cannot be trusted headlessly. Fingerprints the surfaces the
   implementer must never touch, before and after every run. **Refuses to arm if

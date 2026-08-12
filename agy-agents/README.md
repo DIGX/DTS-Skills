@@ -267,7 +267,7 @@ It:
   (trap 4);
 - arms the fence before the run, re-checks it after, then runs the gates itself;
 - classifies quota exhaustion conservatively (see below);
-- prints exactly one verdict block: `run` / `fence` / `gates`.
+- prints exactly one verdict block: `run` / `fence` / `log` / `gates`.
 
 Supports `--continue --file <path>` to resume the implementer's existing thread
 for a correction round, which is far cheaper than starting cold.
@@ -555,14 +555,20 @@ the opposite.
 
 ## Reading a verdict block
 
-Every dispatch ends with three judgements. **Anything other than
-clean / clean / green stops the cycle.**
+Every dispatch ends with three judgements and the path to the evidence behind
+them. **Anything other than clean / clean / green stops the cycle.**
 
 | Line | Means |
 |---|---|
 | `run` | the harness's own reading of the event stream, not `$?` |
 | `fence` | guarded surfaces before vs after — a violation names the files |
+| `log` | the event stream of the attempt that produced this verdict |
 | `gates` | the project's verification suite, run by the harness |
+
+Read the `log` line here, not the one in the header. The header prints its path
+before any attempt runs, so on a quota fallback it names the attempt that hit
+the wall while the work happened under `<base>.reserve.*`. Following the header
+on a fallback means grading a failed run's artefacts as the work.
 
 `gates  not run` appears only under `AGY_SKIP_GATES=1`. If `AGY_GATES` is unset
 the dispatch fails rather than passing.

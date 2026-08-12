@@ -54,8 +54,10 @@ setting `AGY_ALLOW_UNFILLED=1`.
 
 4. **Dispatch** — `.agy/dispatch N`. It arms the fence, runs the implementer,
    parses the event stream, re-checks the fence and runs the gates, then prints
-   one verdict block: `run` / `fence` / `gates`. Anything other than
-   clean/clean/green stops the cycle here.
+   one verdict block: `run` / `fence` / `log` / `gates`. Anything other than
+   clean/clean/green stops the cycle here. Read logs from the `log` line in
+   *that* block rather than the header's — on a quota fallback the header names
+   the attempt that failed, not the one that did the work.
 
    Two lines in that block mean the report itself is not to be trusted, rather
    than that a step failed:
