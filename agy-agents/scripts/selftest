@@ -55,6 +55,20 @@ model=""; prev=""
 for a in "$@"; do [ "$prev" = "--model" ] && model="$a"; prev="$a"; done
 printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
 
+# A report written by the run itself, so it is genuinely newer than RUN_START.
+if [ -n "${FAKE_REPORT:-}" ] && [ -n "${FAKE_REPORT_TEXT:-}" ]; then
+	printf '%s\n' "$FAKE_REPORT_TEXT" > "$FAKE_REPORT"
+fi
+
+# A blocked call, followed by the same call wearing a wrapper the deny rule
+# does not recognise. Both lines are in the stream; only the pair means anything.
+if [ -n "${FAKE_BYPASS:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"npm install"},"error":{"message":"Command was denied permission by user settings"}}}}'
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"cmd /c npm install"}}}}'
+	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Installed the dependencies and ran the suite.","num_turns":3,"duration_seconds":7}}'
+	exit 0
+fi
+
 # Trap 4: the run does the work, writes its report, and then never emits a
 # result event. FAKE_HANG is how many seconds it sits there; FAKE_REPORT, when
 # set, is the report it claims to have written on the way.
@@ -260,6 +274,17 @@ hasnt "  did not touch the reserve" "claude-opus" "$TMP/d7.log"
 FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d8.log" 2>&1
 has "gates run as part of a dispatch" "--- gates ---" "$TMP/d8.log"
 
+# The gate runner's exit status reaches the verdict. It is read through a pipe
+# so the output can also be measured against the report, and a pipeline reports
+# the status of its LAST stage by default — which would be `tee`, always 0.
+# A dispatch that cannot see a red gate is worse than one with no gates at all.
+cp .agy/gates "$TMP/gates.rc.bak"
+printf '#!/usr/bin/env bash\nprintf "boom\\n"\nexit 1\n' > .agy/gates
+FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d9.log" 2>&1
+want "a failing gate fails the dispatch" 1 $?
+has  "  the verdict says so" "FAILING" "$TMP/d9.log"
+cp "$TMP/gates.rc.bak" .agy/gates
+
 printf '\n=== watchdog (trap 4) ==============================================\n'
 # A run that finishes its work and then never emits `result` is indistinguishable
 # from a slow one except that the event stream stops growing. Killing it is the
@@ -307,6 +332,49 @@ has  "  names it as a leftover" "predates this run" "$TMP/w3.log"
 # classify, so classifying one would let a hang spend the scarce reserve group.
 hasnt "  a hang never burns the reserve" "RESERVE GROUP BURNED" "$TMP/w1.log"
 
+rm -f "$REPORT_9"
+
+printf '\n=== bypass =========================================================\n'
+# A denial on its own is an incomplete run. A denial followed by the same
+# command under another name is a different thing entirely: the boundary held,
+# the implementer walked around it, and the work happened somewhere you did not
+# authorise. The run report will describe that work as done — correctly — which
+# is why the pairing has to be named. `cmd /c npm install` is not another
+# command; it is `npm install` wearing a wrapper the literal-string deny rule
+# cannot see (agy failure 5).
+FAKE_BYPASS=1 FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/b1.log" 2>&1
+want "a denied-then-renamed command FAILS" 1 $?
+has  "  names it a bypass"        "BYPASS" "$TMP/b1.log"
+has  "  shows the denied form"    "npm install" "$TMP/b1.log"
+has  "  shows the form that ran"  "cmd /c npm install" "$TMP/b1.log"
+
+printf '\n=== report vs gates ================================================\n'
+# The report is the implementer's own account of its work. The gates are a
+# measurement. Where the two name the same quantity, the measurement wins — a
+# report claiming more assertions than the suite contains is the signature of
+# work that was described rather than done.
+cp .agy/gates "$TMP/gates.claims.bak"
+printf '#!/usr/bin/env bash\nprintf "64 assertions passed\\n"\nexit 0\n' > .agy/gates
+
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Done. All 719 assertions pass.' \
+	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b2.log" 2>&1
+has "a report number the gates contradict is flagged" "CLAIM" "$TMP/b2.log"
+has "  quotes the report's number" "719" "$TMP/b2.log"
+has "  quotes the gate's number"   "64"  "$TMP/b2.log"
+
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Done. All 64 assertions pass.' \
+	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b3.log" 2>&1
+hasnt "a report number the gates confirm is not flagged" "CLAIM" "$TMP/b3.log"
+
+# The gates cannot contradict a quantity they never measured. Inventing a
+# disagreement out of unrelated numbers would train the controller to ignore
+# the check, which is worse than not having it.
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Took 12 minutes across 3 commits.' \
+	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b4.log" 2>&1
+hasnt "an unmeasured quantity is not flagged" "CLAIM" "$TMP/b4.log"
+
+cp "$TMP/gates.claims.bak" .agy/gates
 rm -f "$REPORT_9"
 
 printf '\n=== idempotency ====================================================\n'

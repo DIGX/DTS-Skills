@@ -286,6 +286,33 @@ const deferred = killed && !resultEvent;
 const tools = new Map();
 const errors = [];
 const denials = [];
+const deniedCmds = [];
+const ranCmds = [];
+
+// A denial and the call that got through are two separate lines in the stream,
+// and only their pairing carries the meaning. `cmd /c npm install` is not a
+// different command from `npm install` — it is the same command wearing a
+// wrapper that a literal-string deny rule cannot see (agy failure 5). Reduce
+// both sides to the same shape so the pair becomes visible.
+const norm = cmd => {
+	let s = String(cmd).trim().replace(/^["']|["']$/g, '');
+	// Wrappers nest: `cmd /c "bash -c 'npm install'"` is three deep.
+	for (let i = 0; i < 4; i++) {
+		const before = s;
+		s = s
+			.replace(/^(?:cmd(?:\.exe)?\s+\/[a-z]\s+|(?:ba|z|)sh\s+-c\s+|powershell(?:\.exe)?\s+(?:-\w+\s+)*-c(?:ommand)?\s+|npx\s+(?:--yes\s+|-y\s+)?|env\s+|sudo\s+)/i, '')
+			.replace(/^["']|["']$/g, '')
+			.trim();
+		if (s === before) break;
+	}
+	const t = s.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+	// Strip the path and extension off the executable: an absolute path is
+	// another way to wear a different name for the same binary.
+	if (t.length) t[0] = t[0].replace(/\\/g, '/').replace(/^.*\//, '').replace(/\.(exe|cmd|bat|ps1)$/i, '');
+	return t.map(x => x.toLowerCase());
+};
+// Two tokens is the unit of intent: `npm install`, `git push`, `rm -rf`.
+const head = cmd => norm(cmd).slice(0, 2).join(' ');
 
 for (const e of events) {
 	const s = e.step_update;
@@ -294,7 +321,10 @@ for (const e of events) {
 	const name = info.name || s.tool_name || 'unknown';
 	const cmd = (info.parameters && (info.parameters.CommandLine || info.parameters.command)) || '';
 
-	if (s.state === 'DONE') tools.set(name, (tools.get(name) || 0) + 1);
+	if (s.state === 'DONE') {
+		tools.set(name, (tools.get(name) || 0) + 1);
+		if (cmd) ranCmds.push(cmd);
+	}
 
 	if (info.error) {
 		const msg = (info.error.message || info.error.type || 'error').replace(/\s+/g, ' ');
@@ -303,9 +333,24 @@ for (const e of events) {
 		// hard failure rather than a warning.
 		if (/denied permission|permission denied|not allowed|auto-denied/i.test(msg)) {
 			denials.push(`${cmd || name}: ${msg}`.slice(0, 200));
+			if (cmd) deniedCmds.push(cmd);
 		} else {
 			errors.push(`${name}${cmd ? ' [' + cmd + ']' : ''}: ${msg}`.slice(0, 200));
 		}
+	}
+}
+
+// Pair each denial with any call that completed under the same intent. This is
+// the fact that distinguishes an incomplete run from a compromised one: the
+// work described in the report happened, but outside the boundary you set.
+const bypasses = [];
+for (const d of deniedCmds) {
+	const h = head(d);
+	if (!h) continue;
+	for (const r of ranCmds) {
+		if (head(r) !== h) continue;
+		bypasses.push(`denied: ${d}   ->   ran: ${r}`.slice(0, 200));
+		break;
 	}
 }
 
@@ -368,6 +413,13 @@ const fail = (headline, lines) => {
 	(lines || []).slice(0, 15).forEach(l => console.log('      - ' + l));
 };
 
+if (bypasses.length) {
+	fail(`${bypasses.length} denied command(s) then ran under another name — BYPASS.`, bypasses);
+	console.log('      The boundary held and the implementer walked around it. The work');
+	console.log('      happened somewhere you did not authorise, and the report will');
+	console.log('      describe it as done — accurately. Treat the whole report as');
+	console.log('      unverified, and fix the boundary before re-running.');
+}
 if (denials.length) {
 	fail(`${denials.length} tool call(s) BLOCKED despite --dangerously-skip-permissions.`, denials);
 	console.log('      The run still exited 0 with status SUCCESS. Report is unreliable.');
@@ -460,13 +512,23 @@ fi
 WATCHDOG_KILLED="$(read_class "$LAST_CLASS" killed)"
 DEFERRED="$(read_class "$LAST_CLASS" deferred)"
 WATCHDOG_IDLE="$(read_class "$LAST_CLASS" idle)"
+
+# Freshness is computed on every run, not just a deferred one: a report is only
+# evidence about THIS dispatch if this dispatch wrote it. Only the deferred path
+# fails on it, because there the report is the sole account of the work.
+REPORT_FRESH=0
+if [ -n "$REPORT" ] && [ -f "$REPORT" ] \
+	&& [ "$(stat -c %Y "$REPORT" 2>/dev/null || echo 0)" -ge "$RUN_START" ]; then
+	REPORT_FRESH=1
+fi
+
 if [ "$DEFERRED" = "1" ] && [ -n "$REPORT" ]; then
 	printf -- '\n--- report freshness -----------------------------------------------\n'
 	if [ ! -f "$REPORT" ]; then
 		printf 'FAIL  no report at %s.\n' "$REPORT"
 		printf '      The run was killed and left no account of itself.\n'
 		stream_rc=1
-	elif [ "$(stat -c %Y "$REPORT" 2>/dev/null || echo 0)" -lt "$RUN_START" ]; then
+	elif [ "$REPORT_FRESH" != "1" ]; then
 		printf 'FAIL  %s predates this run.\n' "$REPORT"
 		printf '      It is a leftover from an earlier dispatch, not this one.\n'
 		stream_rc=1
@@ -490,9 +552,73 @@ elif [ -z "$AGY_GATES" ]; then
 	printf 'you cannot check. Configure it before trusting any of this.\n'
 	gates_rc=99
 else
+	# Output is teed, not swallowed: the gates stay visible in real time, and
+	# the copy is what the report's own numbers get measured against below.
 	# shellcheck disable=SC2086
-	bash $AGY_GATES
-	gates_rc=$?
+	bash $AGY_GATES 2>&1 | tee "$BASE.gates.log"
+	gates_rc=${PIPESTATUS[0]}
+fi
+
+# ------------------------------------------------------- report vs gate output
+# The report is the implementer's account of its work. The gates are a
+# measurement of it. Where both name the same quantity, the measurement wins.
+#
+# This is a warning, not a gate, and it is deliberately narrow: only a unit that
+# appears on BOTH sides is ever compared, because the gates cannot contradict a
+# number they never measured. A checker that invents disagreements teaches the
+# controller to ignore it, which is worse than not having one.
+CLAIMS_RC=0
+if [ "$REPORT_FRESH" = "1" ] && [ "$gates_rc" -ge 0 ] && [ -s "$BASE.gates.log" ]; then
+	printf -- '\n--- report vs gates ------------------------------------------------\n'
+	node - "$REPORT" "$BASE.gates.log" <<'NODE'
+const fs = require('fs');
+const [, , reportPath, gatesPath] = process.argv;
+const read = p => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return ''; } };
+
+// Quantities a gate suite actually measures and a report actually claims.
+// Anything outside this list (minutes, commits, line numbers) is not compared.
+const UNITS = ['assertion', 'test', 'check', 'gate', 'spec', 'example', 'case', 'suite', 'failure', 'error', 'warning'];
+const singular = w => w.toLowerCase().replace(/e?s$/, '').replace(/^(assertion|test|check|gate|spec|example|case|suite|failure|error|warning)$/, '$1');
+
+const grab = text => {
+	const found = new Map();
+	const add = (n, w) => {
+		const unit = singular(w);
+		if (!UNITS.includes(unit)) return;
+		if (!found.has(unit)) found.set(unit, new Set());
+		found.get(unit).add(n.replace(/,/g, ''));
+	};
+	let m;
+	const forward = /(\d[\d,]*)\s+([A-Za-z]+)/g;          // "719 assertions"
+	while ((m = forward.exec(text))) add(m[1], m[2]);
+	const reverse = /([A-Za-z]+)\s*[:=]\s*(\d[\d,]*)/g;    // "assertions: 64"
+	while ((m = reverse.exec(text))) add(m[2], m[1]);
+	return found;
+};
+
+const claimed = grab(read(reportPath));
+const measured = grab(read(gatesPath));
+
+const conflicts = [];
+for (const [unit, nums] of claimed) {
+	const got = measured.get(unit);
+	if (!got) continue;
+	for (const n of nums) if (!got.has(n)) conflicts.push({ unit, n, got: [...got] });
+}
+
+if (!conflicts.length) {
+	console.log('ok    no number in the report contradicts the gate output.');
+	process.exit(0);
+}
+for (const c of conflicts) {
+	console.log(`CLAIM the report says ${c.n} ${c.unit}(s); the gates reported ${c.got.join(', ')}.`);
+}
+console.log('      The gates measured it; the report only asserts it. Resolve this');
+console.log('      before accepting the task. A number that drifts is usually work');
+console.log('      that was described rather than done.');
+process.exit(1);
+NODE
+	CLAIMS_RC=$?
 fi
 
 # --------------------------------------------------------------------- verdict
@@ -518,6 +644,10 @@ if [ "$trip_rc"  -eq 0 ]; then v fence 'clean — no guarded surface moved'; els
 if   [ "$gates_rc" -eq 0 ]; then v gates 'green'
 elif [ "$gates_rc" -lt 0 ]; then v gates 'not run'
 else v gates "$gates_rc FAILING"
+fi
+if [ "$CLAIMS_RC" -ne 0 ]; then
+	v claims 'CONTRADICTED by the gates — see the section above'
+	v '' 'not a gate failure on its own; do not accept the task on it'
 fi
 printf '\n  fence snapshot kept at %s\n' "$SNAP"
 

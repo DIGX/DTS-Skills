@@ -50,6 +50,21 @@ start. Do not work around that.
    one verdict block: `run` / `fence` / `gates`. Anything other than
    clean/clean/green stops the cycle here.
 
+   Two lines in that block mean the report itself is not to be trusted, rather
+   than that a step failed:
+
+   - **`BYPASS`** — a command was denied and then ran anyway under another
+     name (`cmd /c npm install` against a rule denying `npm install`). The
+     boundary held and the implementer walked around it. The work described in
+     the report did happen, which is what makes this worse than a plain
+     denial: nothing in the report reads as wrong. Fix the boundary and
+     re-run. Do not review the diff on the assumption the rest is sound.
+   - **`claims CONTRADICTED`** — a number the report asserts disagrees with
+     the same quantity the gates measured. This is a warning, not a gate
+     failure, and it exits 0 on its own. It is also the one signal that
+     catches a report describing work it did not do, so never accept a task
+     while it is showing. Reconcile it or re-run.
+
 5. **Verify the gates yourself.** The dispatch already ran them — read *its*
    output, not the implementer's claim about it. This is the most load-bearing
    step in the cycle: the implementer's claim is the least verifiable link in

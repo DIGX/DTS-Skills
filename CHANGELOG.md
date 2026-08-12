@@ -9,6 +9,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.3.0] — 2026-08-12
+
+Both additions come from a real run in another project that reported success,
+committed, and was wrong on both counts — a denied `npm install` that ran as
+`cmd /c npm install`, and a report claiming a test count the gates contradicted.
+Neither was visible in the verdict block at the time.
+
+#### Added
+- **Denial-then-success pairs are named as a `BYPASS`.** A denial was already a
+  hard failure, so a run like that would have failed anyway — but it failed as
+  "one call was blocked", which reads as an *incomplete* run. The fact that
+  matters is the next line in the stream: the same command completed under
+  another name. That makes the run *compromised* rather than incomplete, and
+  every claim in its report unverified, because the work really did happen —
+  outside the boundary. The dispatcher now normalises both sides (unwrapping
+  `cmd /c`, `sh -c`, `powershell -Command`, `npx`, `sudo`, absolute paths and
+  quoting, nested up to four deep) and pairs them on the first two tokens of
+  intent. This required collecting successful command strings, which the parser
+  previously read and discarded.
+- **Report numbers are checked against the gate output.** Where the report and
+  the gates name the same quantity, the measurement wins. Deliberately narrow:
+  only a unit appearing on *both* sides is ever compared, since the gates cannot
+  contradict a number they never measured. It is a **warning, not a gate** — it
+  does not change the exit code — because the comparison is heuristic and a
+  checker that invents disagreements teaches the controller to ignore it. It is
+  still the only signal that catches a report describing work it did not do, so
+  `reference/protocol.md` says not to accept a task while it is showing.
+- Report freshness is now computed on every run rather than only a deferred one.
+  Only the deferred path still *fails* on it; the claims check uses it to avoid
+  measuring a report an earlier dispatch left behind.
+- Selftest coverage for both, plus the missing assertion that a red gate fails
+  the dispatch — a property nothing had pinned, and one this release's gate
+  output capture touches.
+
+#### Changed
+- The gate runner's output is teed to `<log>.gates.log` so it can be compared
+  against the report. Status is read from `PIPESTATUS[0]` rather than the
+  pipeline's, so a `tee` failure cannot fake a red gate.
+
+## agy-agents
+
 ### [1.2.0] — 2026-08-12
 
 Merges harness work done in a second project with documentation fixes made
