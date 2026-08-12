@@ -78,9 +78,19 @@ WATCHDOG  event stream silent for 300s - killing agy (pid 12345).
 WATCHDOG  the verdict now rests on the fence, the gates and the report.
 ```
 
-A killed run with no `result` event is **deferred**, not failed: the process was
-stopped, so status, response and exit code describe *how it ended* rather than
-whether the work was done, and are not judged. Nothing else is relaxed — a
+The watchdog catches the silent form. There is a **chatty** form it cannot see:
+the same `manage_task`/`schedule` loop, but emitting events the whole time, so
+the stream keeps growing and the run sits there until agy's own
+`--print-timeout` expires and it dies with `timeout waiting for response`.
+Observed at 2711s wall against 364s of thread time — on a run that had already
+committed the work and written a 303-line report.
+
+Both forms end the same way: **no `result` event.** That, and not who did the
+killing, is what the harness keys on.
+
+A run with no `result` event is **deferred**, not failed: it was stopped, so
+status, response and exit code describe *how it ended* rather than whether the
+work was done, and are not judged. Nothing else is relaxed — a
 denial, a tool error or zero tool calls still fail a deferred run, because each
 is recorded in the stream and is evidence of what actually happened. A deferred
 run is also never quota-classified, so a hang can never open the reserve bucket.
@@ -89,6 +99,11 @@ What replaces the missing result is a **report freshness check**: the report
 must exist *and* be newer than the moment this dispatch started. A stale report
 from an earlier dispatch would otherwise sail through on a clean fence and a
 green gate — which is the exact shape of a run that did nothing at all.
+
+The tool tally from a cut-off stream is printed as a **floor, not a total**, and
+says so. A stream that ends mid-run recorded only what it recorded; read as a
+run summary it says the implementer wrote nothing, next to a commit that is on
+disk.
 
 A report written by this run, plus a clean fence, plus green gates, is a pass
 regardless of how the process died. Set `AGY_IDLE_TIMEOUT=0` to disable the
@@ -222,6 +237,12 @@ dispatch, because its report will be believed.
 `run  clean, but WATCHDOG-KILLED after Ns idle` is trap 4: the run was stopped,
 not judged. Treat the fence and the gates below it as the whole verdict, and
 read the report — it had to be written during this run to get that far.
+
+`run  clean, but the SESSION DIED before its result event` is the same verdict
+arrived at the other way — the chatty form of trap 4, where agy stopped on its
+own and the watchdog never fired. Read it identically. It is deliberately not
+`PROBLEMS`: the work landing and the session dying are different facts, and a
+harness with one word for both teaches you to discount that word.
 
 ## When the dispatch refuses to start
 

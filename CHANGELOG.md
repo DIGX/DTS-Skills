@@ -9,6 +9,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.7.0] — 2026-08-12
+
+One flaw, reported by a harness on its third crashed run in a row: a run that
+did the work, committed it and wrote a 303-line report, then died at 2711s with
+`timeout waiting for response` and no result event — and was graded **PROBLEMS**
+beside a clean fence, green gates and a correct diff. The harness had no way to
+say *the work landed, the session died*.
+
+#### Fixed
+- **Deferral keys on the missing result event, not on who did the killing.** The
+  watchdog was only ever one route to a run with no `result`: agy also dies on
+  its own — its `--print-timeout` expiring, an internal error, a dropped
+  connection — and when it does the stream was still moving, so the watchdog
+  never fires. The old condition (`killed && !resultEvent`) covered our kill
+  only, so a self-inflicted death was judged on its status, its empty response
+  and its exit code. All three describe how the session ended. None is evidence
+  about the work. Nothing else is relaxed: a denial, a tool error, zero tool
+  calls or a report that is missing or stale still fails a stopped run.
+- **The verdict can say it.** `run  clean, but the SESSION DIED before its
+  result event` — the counterpart to the existing `WATCHDOG-KILLED` line. A
+  harness whose only word for this is `PROBLEMS` trains its reader to discount
+  `PROBLEMS`, which is the one word that has to keep meaning something.
+- **The tool tally is labelled a floor when the stream was cut off.** A stream
+  that ends mid-run tallies only what it recorded, and presenting that as a run
+  summary reads as proof the implementer wrote nothing — next to a commit that
+  is on disk. The reported run showed no write tools at all and made a landed
+  commit look like it had appeared from nowhere.
+- **Quota classification now keys on the watchdog rather than on deferral**, so
+  broadening deferral did not quietly close the fallback route. A run *we* killed
+  is still never classified — that is what stops a hang from spending the reserve
+  group — but a session that died on its own is, because a genuine weekly
+  exhaustion is one of the ways a run ends without a result event.
+
 ### [1.6.0] — 2026-08-12
 
 From a backlog of flaws reported by two harnesses running this skill on real

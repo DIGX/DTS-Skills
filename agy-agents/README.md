@@ -130,11 +130,25 @@ WATCHDOG  event stream silent for 300s - killing agy (pid 12345).
 WATCHDOG  the verdict now rests on the fence, the gates and the report.
 ```
 
-A killed run with no `result` event is **deferred**, not failed: the process was
-stopped, so status, response and exit code describe *how it ended* rather than
-whether the work was done, and are not judged. Nothing else is relaxed — a
-denial, a tool error or zero tool calls still fail a deferred run, because each
-is recorded in the stream and is evidence of what actually happened.
+The watchdog catches the silent form. The **chatty** form emits events the whole
+time it is stuck, so the stream keeps growing, the watchdog never fires, and the
+run dies of agy's own `--print-timeout` with `timeout waiting for response` —
+observed at 2711s wall against 364s of thread time, on a run that had already
+committed and written a 303-line report.
+
+Both end with **no `result` event**, and that, rather than who did the killing,
+is what the harness keys on:
+
+```
+  run     clean, but the SESSION DIED before its result event (agy failure 4)
+```
+
+A run with no `result` event is **deferred**, not failed: it was stopped, so
+status, response and exit code describe *how it ended* rather than whether the
+work was done, and are not judged. Nothing else is relaxed — a denial, a tool
+error or zero tool calls still fail a deferred run, because each is recorded in
+the stream and is evidence of what actually happened. The tool tally is printed
+as a **floor**, since a stream that ends mid-run recorded only part of it.
 
 What replaces the missing `result` is a **report freshness check**: the report
 must exist *and* be newer than the moment this dispatch started. A stale report
@@ -263,8 +277,9 @@ It:
   (trap 2);
 - carries `--dangerously-skip-permissions` internally, coupled to the fence, so
   the flag can never be used bare (trap 3);
-- watchdogs a stream that goes silent and falls through to on-disk evidence
-  (trap 4);
+- watchdogs a stream that goes silent, and defers on any run that ends without a
+  `result` event, however it was stopped — falling through to on-disk evidence
+  rather than grading how the session died (trap 4);
 - arms the fence before the run, re-checks it after, then runs the gates itself;
 - classifies quota exhaustion conservatively (see below);
 - prints exactly one verdict block: `run` / `fence` / `log` / `gates`.
@@ -576,6 +591,12 @@ the dispatch fails rather than passing.
 `run  clean, but WATCHDOG-KILLED after Ns idle` is trap 4: the run was stopped,
 not judged. Treat the fence and gates below it as the whole verdict, and read the
 report — it had to be written *during this run* to get that far.
+
+`run  clean, but the SESSION DIED before its result event` is the same verdict by
+the other route — agy stopped on its own and the watchdog never fired. Read it
+identically. It is deliberately not `PROBLEMS`: the work landing and the session
+dying are different facts, and a harness with one word for both teaches you to
+discount that word.
 
 ---
 

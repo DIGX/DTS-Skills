@@ -59,6 +59,11 @@ setting `AGY_ALLOW_UNFILLED=1`.
    *that* block rather than the header's — on a quota fallback the header names
    the attempt that failed, not the one that did the work.
 
+   `clean, but WATCHDOG-KILLED` and `clean, but the SESSION DIED before its
+   result event` are both trap 4 and both still pass: the run was stopped, so
+   its status and exit code describe how it ended. The fence, the gates and a
+   report written *during this run* are the whole verdict there.
+
    Two lines in that block mean the report itself is not to be trusted, rather
    than that a step failed:
 

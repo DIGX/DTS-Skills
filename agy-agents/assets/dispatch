@@ -44,6 +44,14 @@
 # a clean fence, plus a green gate, is a pass regardless of how the process
 # died.
 #
+# The watchdog catches the silent form of that. The chatty form keeps emitting
+# events while it is stuck, so the stream never goes quiet and agy's own
+# --print-timeout ends it instead: `timeout waiting for response` at 2711s wall
+# against 364s of thread time, on a run that had already committed the work.
+# Both forms end with no result event, and THAT is what the deferral keys on —
+# not on whether we did the killing. Status, an empty response and an exit code
+# from a session that died describe the death, not the work.
+#
 # ---------------------------------------------------------------------------
 # MODEL GROUPS AND FALLBACK
 #
@@ -337,12 +345,21 @@ const init = (events.find(e => e.event === 'init') || {}).init || {};
 const resultEvent = events.find(e => e.event === 'result');
 const result = (resultEvent || {}).result || {};
 
-// A watchdog kill with no result event means the process was stopped, not that
-// the work failed. Status, response and exit code are then artefacts of HOW it
-// ended and are skipped. Nothing else is relaxed: a denial, a tool error or
-// zero tool calls still fails a killed run, because each of those is recorded
-// in the stream and is evidence of what actually happened.
-const deferred = killed && !resultEvent;
+// No result event means the run was stopped, not that the work failed. Status,
+// response and exit code are then artefacts of HOW it ended and are skipped.
+//
+// The trigger is the missing result event, NOT who did the stopping. The
+// watchdog is only one way to arrive here: agy also dies on its own — its
+// --print-timeout expiring, an internal error, a dropped connection — and when
+// it does the stream was still moving, so the watchdog never fired. Keying the
+// deferral on our own kill made that second case report PROBLEMS over a landed
+// commit, a clean fence and green gates, on the strength of an exit code that
+// only describes the death.
+//
+// Nothing else is relaxed: a denial, a tool error or zero tool calls still
+// fails a stopped run, because each of those is recorded in the stream and is
+// evidence of what actually happened.
+const deferred = !resultEvent;
 
 const tools = new Map();
 const errors = [];
@@ -422,9 +439,12 @@ const response = result.response || '';
 if (response) fs.writeFileSync(responsePath, response);
 
 const status = result.status || '';
-// A deferred run never reached a result event, so it cannot have reported a
-// quota error either. Classifying it would let a hang open the reserve bucket.
-const failed = deferred ? false : (status !== 'SUCCESS' || Number(agyCode) !== 0);
+// Quota is a separate question from deferral, and keys on a different fact. A
+// run the WATCHDOG killed is never classified — that guarantee is what stops a
+// hang from spending the scarce reserve group. But a run that died on its own
+// still gets classified, because a genuine weekly exhaustion is one of the ways
+// a session dies without a result event, and the evidence for it is on stderr.
+const failed = !killed && (status !== 'SUCCESS' || Number(agyCode) !== 0);
 
 // Quota classification. Only ever consulted on a FAILED run: a successful run
 // whose report happens to discuss rate limiting must not be mistaken for an
@@ -459,7 +479,12 @@ console.log(pad('duration'), `${wall}s wall / ${result.duration_seconds ?? '?'}s
 console.log(pad('tokens'), `in ${u.input_tokens ?? '?'}  out ${u.output_tokens ?? '?'}  think ${u.thinking_tokens ?? '?'}  total ${u.total_tokens ?? '?'}`);
 console.log(pad('tools'), tools.size
 	? [...tools].map(([n, c]) => `${n}x${c}`).join('  ')
-	: 'NONE — the run touched nothing');
+	: deferred ? 'NONE recorded — but the stream was cut off; see the report and the diff'
+	           : 'NONE — the run touched nothing');
+// A stream that stops mid-flight is a floor, not a total. Presented as a run
+// summary it reads as proof the implementer wrote nothing — next to a commit
+// that is on disk. Say which of the two it is.
+if (deferred) console.log(pad(''), 'floor, not a total — the stream ended before the run did');
 if (quota !== 'none') {
 	console.log(pad('quota'), quota === 'weekly'   ? 'WEEKLY bucket exhausted'
 	                        : quota === 'fivehour' ? '5-hour window exhausted (refreshes on its own)'
@@ -486,14 +511,18 @@ if (denials.length) {
 	console.log('      The run still exited 0 with status SUCCESS. Report is unreliable.');
 }
 if (deferred) {
-	console.log(`\nNOTE  watchdog killed this run after ${idleArg}s of stream silence.`);
+	console.log(killed
+		? `\nNOTE  watchdog killed this run after ${idleArg}s of stream silence.`
+		: '\nNOTE  the session ended before its result event — agy stopped on its own.');
 	console.log('      status, response and exit code are not judged; the evidence');
 	console.log('      is now the fence, the gates and the report on disk.');
 } else if (status !== 'SUCCESS') {
 	fail('status is not SUCCESS', result.error ? [JSON.stringify(result.error)] : []);
 }
 if (errors.length) fail(`${errors.length} tool error(s)`, errors);
-if (!tools.size) fail('no tool calls recorded — the implementer answered without doing the work');
+if (!tools.size) fail(deferred
+	? 'no tool calls recorded before the stream ended — nothing evidences any work'
+	: 'no tool calls recorded — the implementer answered without doing the work');
 if (!deferred && !response.trim()) fail('empty response — the implementer produced no report');
 if (!deferred && Number(agyCode) !== 0) fail(`agy exited ${agyCode}`);
 
@@ -592,7 +621,7 @@ if [ "$DEFERRED" = "1" ] && [ -n "$REPORT" ]; then
 	printf -- '\n--- report freshness -----------------------------------------------\n'
 	if [ ! -f "$REPORT" ]; then
 		printf 'FAIL  no report at %s.\n' "$REPORT"
-		printf '      The run was killed and left no account of itself.\n'
+		printf '      The run stopped and left no account of itself.\n'
 		stream_rc=1
 	elif [ "$REPORT_FRESH" != "1" ]; then
 		printf 'FAIL  %s predates this run.\n' "$REPORT"
@@ -733,6 +762,13 @@ if [ "$stream_rc" -ne 0 ]; then
 	v run 'PROBLEMS — see run report above'
 elif [ "$WATCHDOG_KILLED" = "1" ]; then
 	v run "clean, but WATCHDOG-KILLED after ${WATCHDOG_IDLE}s idle (agy failure 4)"
+	v '' 'the work stands on the report, the fence and the gates below'
+elif [ "$DEFERRED" = "1" ]; then
+	# The other way to lose the result event: agy stopped on its own while the
+	# stream was still moving, so the watchdog never fired. Same verdict, and it
+	# has to be sayable — otherwise the only vocabulary for "the work landed,
+	# the session died" is PROBLEMS.
+	v run 'clean, but the SESSION DIED before its result event (agy failure 4)'
 	v '' 'the work stands on the report, the fence and the gates below'
 else
 	v run 'clean'
