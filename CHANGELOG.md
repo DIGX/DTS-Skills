@@ -7,14 +7,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### agy-agents
+## agy-agents
+
+### [1.2.0] — 2026-08-12
+
+Merges harness work done in a second project with documentation fixes made
+here. Neither side was a superset of the other, which is the whole argument for
+this repository existing.
 
 #### Added
-- **Fourth trap: `permissions.deny` matches the literal command string**, so
+- **Trap 4: a finished run can hang forever without emitting its `result`.**
+  `agy` can do the work, write the report, commit — then sit in an internal
+  `manage_task`/`schedule` loop until `--print-timeout` expires 45 minutes
+  later, with no error and the process alive. The only tell is that the event
+  stream stops growing. `.agy/dispatch` now watchdogs the stream
+  (`AGY_IDLE_TIMEOUT`, default 300s) and, on a kill with no result event,
+  *defers* rather than fails: status, response and exit code are not judged,
+  but a denial, a tool error or zero tool calls still fail the run, and the
+  report must be newer than the dispatch that asked for it. A deferred run is
+  never quota-classified, so a hang cannot open the reserve bucket.
+- **Trap 5: `permissions.deny` matches the literal command string**, so
   `cmd /c npm install` defeats a `npm install` denial. With trap 3 this makes
   the CLI's permission system unusable as a boundary in both directions —
   `allow` fails closed, `deny` fails open. No behaviour change: the harness
   already skipped it and fenced with `.agy/tripwire` instead.
+- **`.agy/tripwire` handles guard paths containing spaces.** A list written one
+  path per line is split on newlines instead of whitespace, and each list is
+  split independently. Previously `Acme Suite/app` fractured into several
+  nonexistent surfaces, each hashing to nothing — a fence guarding nothing,
+  reporting clean.
+- Selftest coverage for the watchdog: that a hung run is killed rather than
+  waited out, that its empty response and exit code are *not* held against it,
+  that a missing report fails it, that a report left by an earlier dispatch
+  fails it, and that a hang never burns the reserve group. Verified by
+  disabling the watchdog and watching them go red.
+
+- `agy-agents/README.md` — full documentation of the five CLI traps, the two
+  harness traps, the `.agy/` machinery, installation, adoption, configuration
+  and the task cycle.
+
+#### Changed
+- The selftest exports `AGY_IDLE_POLL=1`. The shipped 15s default cannot notice
+  a stubbed run has exited any sooner, which added ~15s to every dispatch in the
+  suite. Runtime went from ~3m to ~1m36s while gaining 11 assertions.
 
 #### Fixed
 - `dispatch-traps.md` claimed there was "no separate effort flag" for the Gemini

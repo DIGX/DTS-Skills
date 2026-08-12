@@ -5,12 +5,17 @@ Read this before debugging a run, and before ever calling `agy` by hand.
 Verified against **Antigravity CLI v1.1.12**. If your version differs, re-verify
 before trusting any of it.
 
-## The four traps
+## The five traps
 
 They share one property: **the failure is invisible from the outside.** The
 first three make a broken run report SUCCESS with exit 0. The fourth makes a
-fence you believe you have fail open silently. None was found by reading
-documentation — all four came out of probes.
+*finished* run look like a hung one for 45 minutes. The fifth makes a fence you
+believe you have fail open silently. None was found by reading documentation —
+all five came out of probes.
+
+Traps 1–4 shape `.agy/dispatch` directly, in the same order as its header
+comment. Trap 5 shapes nothing, because the harness had already abandoned the
+mechanism it breaks.
 
 ### 1. `--add-dir` is not optional
 
@@ -51,7 +56,47 @@ implementer must never touch, before and after.
 be used without the fence attached. If the fence will not arm, the dispatch
 refuses to start (exit 3). Do not work around this.
 
-### 4. `permissions.deny` matches the literal command string
+### 4. A finished run can hang forever without emitting its result
+
+`agy` can do the work, write the report, make the commit — and then never emit
+its `result` event, trapped in an internal `manage_task`/`schedule` loop. No
+error, no stderr, the process still alive. It will sit there until
+`--print-timeout` expires 45 minutes later.
+
+Observed on a run whose work was complete and committed **two minutes in**: the
+last event was a schedule call asking to be woken in 20 seconds, and the stream
+was still silent 16 minutes later.
+
+Nothing about the process distinguishes this from slow work. The one tell is
+that **the event stream stops growing.** So `.agy/dispatch` runs a watchdog: if
+the stream is silent for `AGY_IDLE_TIMEOUT` (default 300s — about six times the
+longest gap seen on a healthy run, where the slowest single tool call, the gate,
+takes ~50s), it kills `agy` and falls through to judging the evidence on disk.
+
+```
+WATCHDOG  event stream silent for 300s - killing agy (pid 12345).
+WATCHDOG  the verdict now rests on the fence, the gates and the report.
+```
+
+A killed run with no `result` event is **deferred**, not failed: the process was
+stopped, so status, response and exit code describe *how it ended* rather than
+whether the work was done, and are not judged. Nothing else is relaxed — a
+denial, a tool error or zero tool calls still fail a deferred run, because each
+is recorded in the stream and is evidence of what actually happened. A deferred
+run is also never quota-classified, so a hang can never open the reserve bucket.
+
+What replaces the missing result is a **report freshness check**: the report
+must exist *and* be newer than the moment this dispatch started. A stale report
+from an earlier dispatch would otherwise sail through on a clean fence and a
+green gate — which is the exact shape of a run that did nothing at all.
+
+A report written by this run, plus a clean fence, plus green gates, is a pass
+regardless of how the process died. Set `AGY_IDLE_TIMEOUT=0` to disable the
+watchdog; `AGY_IDLE_POLL` (default 15s) sets how often the stream is measured.
+Size is used rather than mtime: the stream is append-only so size is monotone,
+and one-second mtime granularity makes short gaps unreadable.
+
+### 5. `permissions.deny` matches the literal command string
 
 A `deny` rule is compared against the command text as written, not against the
 program the command will end up running. So a wrapper defeats it:
@@ -166,6 +211,10 @@ clean / clean / green stops the cycle.
 `gates  not run` appears only under `AGY_SKIP_GATES=1`. If `AGY_GATES` is unset
 the dispatch fails rather than passing: an unverified dispatch is worse than no
 dispatch, because its report will be believed.
+
+`run  clean, but WATCHDOG-KILLED after Ns idle` is trap 4: the run was stopped,
+not judged. Treat the fence and the gates below it as the whole verdict, and
+read the report — it had to be written during this run to get that far.
 
 ## Debugging checklist
 

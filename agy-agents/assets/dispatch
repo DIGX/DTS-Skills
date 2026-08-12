@@ -3,7 +3,7 @@
 # Dispatch one task to the implementer model through the Antigravity CLI,
 # headlessly. This is the only sanctioned way to call `agy` in this project.
 #
-# Three things about agy shape this whole script.
+# Four things about agy shape this whole script.
 #
 # First, `--add-dir` is not optional. agy's default CLI project has no
 # resources attached (projectResources is {}), so a headless run gets a scratch
@@ -30,6 +30,19 @@
 # The flag lives in here, never in a bare command, so it cannot be used without
 # the fence attached to it. If the fence will not arm, the dispatch does not
 # happen.
+#
+# Fourth, it can do the work, write the report, make the commit, and then never
+# emit its result event — trapped in an internal manage_task/schedule loop. No
+# error, no stderr, process alive, and it will sit there until --print-timeout
+# expires 45 minutes later. Observed on a run whose work was complete and
+# committed two minutes in; the last event was a schedule call asking to be
+# woken in 20 seconds, and the stream was still silent 16 minutes later.
+# Nothing about the process distinguishes this from slow work — the tell is
+# that the event stream stopped growing. Hence the watchdog: when the stream
+# goes quiet for AGY_IDLE_TIMEOUT, kill agy and fall through to the report
+# freshness check, the fence and the gates. A report written by this run, plus
+# a clean fence, plus a green gate, is a pass regardless of how the process
+# died.
 #
 # ---------------------------------------------------------------------------
 # MODEL GROUPS AND FALLBACK
@@ -98,6 +111,13 @@ cd "$ROOT" || exit 1
 : "${AGY_EFFORT:=high}"
 : "${AGY_TIMEOUT:=45m}"
 
+# Seconds of event-stream silence before a run is presumed hung (failure 4).
+# 300 is roughly six times the longest gap seen between events on a healthy
+# run, where the gate — the slowest single tool call — takes about 50 seconds.
+# 0 disables the watchdog.
+: "${AGY_IDLE_TIMEOUT:=300}"
+: "${AGY_IDLE_POLL:=15}"
+
 LOGDIR="$AGY_WORKSPACE/logs"
 
 case "$AGY_FALLBACK" in
@@ -124,12 +144,14 @@ if [ "${1:-}" = "--file" ]; then
 	[ -f "${2:-}" ] || { printf 'dispatch: no such prompt file: %s\n' "${2:-}" >&2; exit 2; }
 	PROMPT="Read ${2} and execute it in full."
 	LABEL="$(basename "$2" | sed 's/\.[^.]*$//')"
+	REPORT=""
 elif [ -n "${1:-}" ]; then
 	N="$1"
 	DISPATCH="$AGY_WORKSPACE/task-$N-dispatch.md"
 	[ -f "$DISPATCH" ] || { printf 'dispatch: no dispatch file at %s\n' "$DISPATCH" >&2; exit 2; }
 	PROMPT="Read $DISPATCH and execute it in full."
 	LABEL="task-$N"
+	REPORT="$AGY_WORKSPACE/task-$N-report.md"
 else
 	printf 'usage: .agy/dispatch [--continue] <task-number> | --file <path>\n' >&2
 	exit 2
@@ -150,7 +172,14 @@ else
 	FIRST_MODEL="$AGY_MODEL"
 	printf 'model        %s (effort %s, timeout %s)\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"
 fi
+if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
+	printf 'watchdog     kill after %ss of stream silence\n' "$AGY_IDLE_TIMEOUT"
+fi
 printf 'log          %s.ndjson\n\n' "$BASE"
+
+# For the report-freshness check on a watchdog-killed run: a report left over
+# from an earlier dispatch must not be read as this run's output.
+RUN_START="$(date +%s)"
 
 # --------------------------------------------------------------- arm the fence
 # Armed once, verified once at the end. When a fallback attempt runs, the same
@@ -183,14 +212,53 @@ run_attempt() {
 		--dangerously-skip-permissions \
 		--print-timeout "$AGY_TIMEOUT" \
 		${AGY_ARGS:-} \
-		> "$out.ndjson" 2> "$out.stderr"
+		> "$out.ndjson" 2> "$out.stderr" &
+	local agy_pid=$!
+
+	# Watchdog for failure 4. Size, not mtime: the stream is append-only so size
+	# is monotone, and a one-second mtime granularity makes short gaps
+	# unreadable. Both files count, so a run writing only to stderr still reads
+	# as alive.
+	local killed=0 idle=0
+	if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
+		local last_seen=-1 last_change now size n f
+		last_change="$(date +%s)"
+		while kill -0 "$agy_pid" 2>/dev/null; do
+			sleep "$AGY_IDLE_POLL"
+			now="$(date +%s)"
+			n=0
+			for f in "$out.ndjson" "$out.stderr"; do
+				[ -f "$f" ] && n=$(( n + $(wc -c < "$f" 2>/dev/null || echo 0) ))
+			done
+			size="$n"
+			if [ "$size" != "$last_seen" ]; then
+				last_seen="$size"; last_change="$now"; continue
+			fi
+			idle=$(( now - last_change ))
+			[ "$idle" -lt "$AGY_IDLE_TIMEOUT" ] && continue
+			killed=1
+			printf '\nWATCHDOG  event stream silent for %ss - killing agy (pid %s).\n' "$idle" "$agy_pid"
+			printf 'WATCHDOG  the verdict now rests on the fence, the gates and the report.\n'
+			kill -TERM "$agy_pid" 2>/dev/null
+			for _ in 1 2 3 4 5; do
+				kill -0 "$agy_pid" 2>/dev/null || break
+				sleep 2
+			done
+			kill -KILL "$agy_pid" 2>/dev/null
+			break
+		done
+	fi
+
+	wait "$agy_pid"
 	local rc=$?
 
 	elapsed=$(( SECONDS - started ))
 
-	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" <<'NODE'
+	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" <<'NODE'
 const fs = require('fs');
-const [ndjson, stderrPath, responsePath, agyCode, classPath, wall] = process.argv.slice(2);
+const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg] =
+	process.argv.slice(2);
+const killed = killedArg === '1';
 
 // Real event shape (verified against agy 1.1.12 — the published docs describe
 // a flattened form that does not match the wire):
@@ -205,7 +273,15 @@ const events = fs.readFileSync(ndjson, 'utf8')
 	.filter(Boolean);
 
 const init = (events.find(e => e.event === 'init') || {}).init || {};
-const result = (events.find(e => e.event === 'result') || {}).result || {};
+const resultEvent = events.find(e => e.event === 'result');
+const result = (resultEvent || {}).result || {};
+
+// A watchdog kill with no result event means the process was stopped, not that
+// the work failed. Status, response and exit code are then artefacts of HOW it
+// ended and are skipped. Nothing else is relaxed: a denial, a tool error or
+// zero tool calls still fails a killed run, because each of those is recorded
+// in the stream and is evidence of what actually happened.
+const deferred = killed && !resultEvent;
 
 const tools = new Map();
 const errors = [];
@@ -240,7 +316,9 @@ const response = result.response || '';
 if (response) fs.writeFileSync(responsePath, response);
 
 const status = result.status || '';
-const failed = status !== 'SUCCESS' || Number(agyCode) !== 0;
+// A deferred run never reached a result event, so it cannot have reported a
+// quota error either. Classifying it would let a hang open the reserve bucket.
+const failed = deferred ? false : (status !== 'SUCCESS' || Number(agyCode) !== 0);
 
 // Quota classification. Only ever consulted on a FAILED run: a successful run
 // whose report happens to discuss rate limiting must not be mistaken for an
@@ -260,7 +338,9 @@ if (failed) {
 }
 
 fs.writeFileSync(classPath,
-	`quota=${quota}\ntools=${tools.size}\nstatus=${status}\nraw=${quotaRaw.replace(/\n/g, ' ')}\n`);
+	`quota=${quota}\ntools=${tools.size}\nstatus=${status}\n` +
+	`killed=${killed ? 1 : 0}\nidle=${idleArg || 0}\ndeferred=${deferred ? 1 : 0}\n` +
+	`raw=${quotaRaw.replace(/\n/g, ' ')}\n`);
 
 const u = result.usage || {};
 const pad = s => String(s).padEnd(13);
@@ -292,13 +372,17 @@ if (denials.length) {
 	fail(`${denials.length} tool call(s) BLOCKED despite --dangerously-skip-permissions.`, denials);
 	console.log('      The run still exited 0 with status SUCCESS. Report is unreliable.');
 }
-if (status !== 'SUCCESS') {
+if (deferred) {
+	console.log(`\nNOTE  watchdog killed this run after ${idleArg}s of stream silence.`);
+	console.log('      status, response and exit code are not judged; the evidence');
+	console.log('      is now the fence, the gates and the report on disk.');
+} else if (status !== 'SUCCESS') {
 	fail('status is not SUCCESS', result.error ? [JSON.stringify(result.error)] : []);
 }
 if (errors.length) fail(`${errors.length} tool error(s)`, errors);
 if (!tools.size) fail('no tool calls recorded — the implementer answered without doing the work');
-if (!response.trim()) fail('empty response — the implementer produced no report');
-if (Number(agyCode) !== 0) fail(`agy exited ${agyCode}`);
+if (!deferred && !response.trim()) fail('empty response — the implementer produced no report');
+if (!deferred && Number(agyCode) !== 0) fail(`agy exited ${agyCode}`);
 
 process.exit(problems ? 1 : 0);
 NODE
@@ -315,6 +399,11 @@ FELL_BACK=0
 HANDOVER=""
 
 read_class() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+
+# The attempt that actually decided the outcome. A fallback overwrites nothing,
+# it writes its own class file, so the watchdog state must be read from the
+# last attempt rather than the first.
+LAST_CLASS="$BASE.class"
 
 quota_class="$(read_class "$BASE.class" quota)"
 tools_used="$(read_class "$BASE.class" tools)"
@@ -341,6 +430,7 @@ if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
 
 		run_attempt "$AGY_FALLBACK_MODEL" "$BASE.reserve" "$HANDOVER_FLAG"
 		stream_rc=$?
+		LAST_CLASS="$BASE.reserve.class"
 		USED_MODEL="$AGY_FALLBACK_MODEL"
 		FELL_BACK=1
 		;;
@@ -360,6 +450,29 @@ if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
 		printf 'AGY_FALLBACK=force — and fix the matcher in .agy/dispatch.\n'
 		;;
 	esac
+fi
+
+# ------------------------------------------------- report freshness (deferred)
+# On a deferred run the response never arrived, so the report on disk is the
+# only account of what happened. It has to be THIS run's report: a stale one
+# left by an earlier dispatch would otherwise sail through on a clean fence and
+# a green gate, which is the exact shape of a run that did nothing at all.
+WATCHDOG_KILLED="$(read_class "$LAST_CLASS" killed)"
+DEFERRED="$(read_class "$LAST_CLASS" deferred)"
+WATCHDOG_IDLE="$(read_class "$LAST_CLASS" idle)"
+if [ "$DEFERRED" = "1" ] && [ -n "$REPORT" ]; then
+	printf -- '\n--- report freshness -----------------------------------------------\n'
+	if [ ! -f "$REPORT" ]; then
+		printf 'FAIL  no report at %s.\n' "$REPORT"
+		printf '      The run was killed and left no account of itself.\n'
+		stream_rc=1
+	elif [ "$(stat -c %Y "$REPORT" 2>/dev/null || echo 0)" -lt "$RUN_START" ]; then
+		printf 'FAIL  %s predates this run.\n' "$REPORT"
+		printf '      It is a leftover from an earlier dispatch, not this one.\n'
+		stream_rc=1
+	else
+		printf 'ok    %s was written during this run.\n' "$REPORT"
+	fi
 fi
 
 # ------------------------------------------------------------- check the fence
@@ -393,7 +506,14 @@ elif [ "$AGY_FALLBACK" = "force" ]; then
 else
 	v model "$USED_MODEL"
 fi
-if [ "$stream_rc" -eq 0 ]; then v run 'clean'; else v run 'PROBLEMS — see run report above'; fi
+if [ "$stream_rc" -ne 0 ]; then
+	v run 'PROBLEMS — see run report above'
+elif [ "$WATCHDOG_KILLED" = "1" ]; then
+	v run "clean, but WATCHDOG-KILLED after ${WATCHDOG_IDLE}s idle (agy failure 4)"
+	v '' 'the work stands on the report, the fence and the gates below'
+else
+	v run 'clean'
+fi
 if [ "$trip_rc"  -eq 0 ]; then v fence 'clean — no guarded surface moved'; else v fence 'VIOLATED — see fence section above'; fi
 if   [ "$gates_rc" -eq 0 ]; then v gates 'green'
 elif [ "$gates_rc" -lt 0 ]; then v gates 'not run'

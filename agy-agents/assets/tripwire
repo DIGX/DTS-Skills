@@ -93,10 +93,26 @@ surface_name() {
 
 norm() { printf '%s' "$1" | sed -e 's#^\./##' -e 's#/*$##'; }
 
+# Guard lists are whitespace-separated, which cannot express a path containing
+# a space — and "NevaraFlow Suite app shell-handoff" is exactly the kind of
+# directory that most needs fencing. So a list that contains a newline is split
+# on newlines instead, one path per line; anything else keeps the original
+# whitespace behaviour. Without this, such a path silently splits into four
+# nonexistent surfaces, each hashes to nothing, and a fence that guards nothing
+# reports clean.
+split_list() {
+	case "$1" in
+	*"
+"*) printf '%s\n' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' ;;
+	*) printf '%s' "$1" | tr -s '[:space:]' '\n' | sed '/^$/d' ;;
+	esac
+}
+
 DIR_SURFACES=""
-for d in $AGY_GUARD_DIRS; do
+while IFS= read -r d; do
+	[ -n "$d" ] || continue
 	DIR_SURFACES="$DIR_SURFACES $(surface_name "$d")"
-done
+done <<< "$(split_list "$AGY_GUARD_DIRS")"
 SURFACES="$(printf '%s' "$DIR_SURFACES" | tr -s ' ')"
 [ -n "$AGY_GUARD_FILES$AGY_LEDGER" ] && SURFACES="$SURFACES files"
 [ -n "$AGY_GUARD_TREE" ] && SURFACES="$SURFACES tree"
@@ -105,9 +121,10 @@ SURFACES="$(printf '%s' "$SURFACES" | sed 's/^ *//')"
 # Reverse the mapping: surface name -> the configured path it came from.
 dir_for_surface() {
 	local d
-	for d in $AGY_GUARD_DIRS; do
+	while IFS= read -r d; do
+		[ -n "$d" ] || continue
 		[ "$(surface_name "$d")" = "$1" ] && { printf '%s' "$(norm "$d")"; return 0; }
-	done
+	done <<< "$(split_list "$AGY_GUARD_DIRS")"
 	return 1
 }
 
@@ -133,12 +150,20 @@ hash_dir() {
 	return 0
 }
 
+# Each list is split on its own. Concatenating them first would put a newline
+# into the combined value and force every list down the newline branch, which
+# would collapse a space-separated AGY_GUARD_FILES into one nonexistent path
+# and unguard it while still reporting clean.
 hash_files() {
-	local f resolved
-	for f in $AGY_LEDGER $AGY_GUARD_FILES; do
-		# Allow ~ and $HOME in the config for files outside the repo.
-		resolved="${f/#\~/$HOME}"
-		[ -f "$resolved" ] && "${SHA[@]}" "$resolved" 2>/dev/null | sha_to_fp
+	local f resolved src
+	for src in "$AGY_LEDGER" "$AGY_GUARD_FILES"; do
+		[ -n "$src" ] || continue
+		while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			# Allow ~ and $HOME in the config for files outside the repo.
+			resolved="${f/#\~/$HOME}"
+			[ -f "$resolved" ] && "${SHA[@]}" "$resolved" 2>/dev/null | sha_to_fp
+		done <<< "$(split_list "$src")"
 	done
 	return 0
 }

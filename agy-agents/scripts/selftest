@@ -54,6 +54,17 @@ cat > "$BIN/agy" <<'STUB'
 model=""; prev=""
 for a in "$@"; do [ "$prev" = "--model" ] && model="$a"; prev="$a"; done
 printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
+
+# Trap 4: the run does the work, writes its report, and then never emits a
+# result event. FAKE_HANG is how many seconds it sits there; FAKE_REPORT, when
+# set, is the report it claims to have written on the way.
+if [ -n "${FAKE_HANG:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
+	[ -n "${FAKE_REPORT:-}" ] && printf 'the work, as written by the run that then hung\n' > "$FAKE_REPORT"
+	sleep "$FAKE_HANG"
+	exit 0
+fi
+
 case "$model" in
 *gemini*)
 	case "${FAKE_ERROR:-weekly}" in
@@ -79,6 +90,12 @@ chmod +x "$BIN/agy"
 # That has happened; it cost ~148k tokens of live quota. Hence the assertion.
 BIN_U="$(cygpath -u "$BIN" 2>/dev/null || printf '%s' "$BIN")"
 export PATH="$BIN_U:$PATH"
+
+# The watchdog cannot notice the stub has exited any sooner than its next poll,
+# so the shipped 15s default would add ~15s to every dispatch below — about
+# three minutes of pure sleeping across the suite. The watchdog's own behaviour
+# is asserted in its own section, with its own timings.
+export AGY_IDLE_POLL=1
 case "$(command -v agy)" in
 "$BIN_U"/*) ;;
 *) printf 'selftest: ABORT — `agy` resolves to %s, not the stub at %s.\n' "$(command -v agy)" "$BIN_U" >&2
@@ -242,6 +259,55 @@ hasnt "  did not touch the reserve" "claude-opus" "$TMP/d7.log"
 
 FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d8.log" 2>&1
 has "gates run as part of a dispatch" "--- gates ---" "$TMP/d8.log"
+
+printf '\n=== watchdog (trap 4) ==============================================\n'
+# A run that finishes its work and then never emits `result` is indistinguishable
+# from a slow one except that the event stream stops growing. Killing it is the
+# easy half; the hard half is deciding what a killed run proved. With no result
+# event there is no status, no response and no meaningful exit code, so the
+# report on disk becomes the only account of the work — which is exactly why it
+# has to be THIS run's report. A leftover from an earlier dispatch would sail
+# through on a clean fence and green gates, and that is the precise shape of a
+# run that did nothing at all.
+REPORT_9="$REPO/.agy/work/m1/task-9-report.md"
+
+hang_dispatch() { # hang_dispatch <log> [report-the-stub-should-write]
+	rm -f "$REPORT_9"
+	FAKE_HANG=30 FAKE_REPORT="${2:-}" FAKE_ERROR=none \
+	AGY_IDLE_TIMEOUT=3 AGY_IDLE_POLL=1 AGY_SKIP_GATES=1 \
+		bash .agy/dispatch 9 >"$1" 2>&1
+}
+
+hang_dispatch "$TMP/w1.log" "$REPORT_9"
+want "a hung run is killed, not waited out" 0 $?
+has  "  says the watchdog fired"    "WATCHDOG" "$TMP/w1.log"
+has  "  labels the verdict"         "WATCHDOG-KILLED" "$TMP/w1.log"
+has  "  accepts this run's report"  "written during this run" "$TMP/w1.log"
+# The deferred path exists to stop these two from failing a run that was merely
+# stopped. If either fires, the kill is being read as a failure of the work.
+hasnt "  does not judge the empty response" "empty response" "$TMP/w1.log"
+hasnt "  does not judge the exit code"      "agy exited"     "$TMP/w1.log"
+
+hang_dispatch "$TMP/w2.log"
+want "a hung run with no report FAILS" 1 $?
+has  "  says the report is missing" "no report at" "$TMP/w2.log"
+
+# The dangerous case: evidence that looks complete but belongs to a previous run.
+rm -f "$REPORT_9"
+mkdir -p "$(dirname "$REPORT_9")"
+printf 'a report from some earlier dispatch\n' > "$REPORT_9"
+touch -d '2 hours ago' "$REPORT_9" 2>/dev/null || touch -t 200001010000 "$REPORT_9"
+FAKE_HANG=30 FAKE_REPORT="" FAKE_ERROR=none \
+AGY_IDLE_TIMEOUT=3 AGY_IDLE_POLL=1 AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/w3.log" 2>&1
+want "a hung run reusing a STALE report FAILS" 1 $?
+has  "  names it as a leftover" "predates this run" "$TMP/w3.log"
+
+# A hang must never be read as an exhausted bucket: there is no result event to
+# classify, so classifying one would let a hang spend the scarce reserve group.
+hasnt "  a hang never burns the reserve" "RESERVE GROUP BURNED" "$TMP/w1.log"
+
+rm -f "$REPORT_9"
 
 printf '\n=== idempotency ====================================================\n'
 printf '\n# EDITED BY THE USER\n' >> .agy/config

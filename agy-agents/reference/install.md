@@ -92,6 +92,8 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_FALLBACK` | `auto` \| `force` \| `off` |
 | `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |
+| `AGY_IDLE_TIMEOUT` | seconds of event-stream silence before a run is presumed hung (`300`; `0` disables) |
+| `AGY_IDLE_POLL` | how often the stream is measured (`15`) |
 | `AGY_GUARD_DIRS` | directories fenced by content hash |
 | `AGY_GUARD_FILES` | individual files fenced by content hash; `~` expands |
 | `AGY_GUARD_TREE` | external tree fenced by size+mtime, not content |
@@ -102,6 +104,23 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 itself are pruned from every hash, so a run's own logs never trip its own fence
 — but the ledger stays guarded as a *file*, which is why you must not write to
 it mid-dispatch.
+
+### Paths containing spaces
+
+Guard lists are whitespace-separated, which cannot express `Acme Suite/app`.
+Write **one path per line** instead and the list is split on newlines:
+
+```bash
+AGY_GUARD_DIRS='.agy
+.claude
+Acme Suite/app'
+```
+
+Each list is split independently, so a newline in one does not change how the
+others are read. This matters more than it sounds: without it such a path
+silently splits into several nonexistent surfaces, each hashes to nothing, and
+a fence guarding nothing reports **clean**. Put the path in `AGY_REQUIRE` too
+and the fence refuses to arm instead of lying.
 
 ### Why a tree is fingerprinted by metadata
 

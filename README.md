@@ -40,9 +40,10 @@ reports *green* — and "it said it worked" stops being information.
 
 `/agy-agents` installs the machinery that makes those states distinguishable:
 
-- **`.agy/dispatch`** — the only sanctioned way to call `agy`. Handles all four
-  traps, parses the NDJSON event stream and judges the run itself rather
-  than reading `$?`, and prints one verdict block: `run` / `fence` / `gates`.
+- **`.agy/dispatch`** — the only sanctioned way to call `agy`. Handles the four
+  traps that can wreck a run, parses the NDJSON event stream and judges the run
+  itself rather than reading `$?`, watchdogs a stream that goes silent, and
+  prints one verdict block: `run` / `fence` / `gates`.
 - **`.agy/tripwire`** — an integrity fence you control, since the CLI's own
   permission system cannot be trusted headlessly. Fingerprints the surfaces the
   implementer must never touch, before and after every run. **Refuses to arm if
