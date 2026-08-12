@@ -233,6 +233,10 @@ if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
 	printf 'watchdog     kill after %ss of stream silence\n' "$AGY_IDLE_TIMEOUT"
 fi
 printf 'log          %s.ndjson\n\n' "$BASE"
+# Provisional. A fallback attempt writes to its own base, so the authoritative
+# path is printed again in the verdict block once the run is over; $LOG_BASE is
+# what tracks which one that turned out to be.
+LOG_BASE="$BASE"
 
 # For the report-freshness check on a watchdog-killed run: a report left over
 # from an earlier dispatch must not be read as this run's output.
@@ -542,6 +546,11 @@ if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
 		LAST_CLASS="$BASE.reserve.class"
 		USED_MODEL="$AGY_FALLBACK_MODEL"
 		FELL_BACK=1
+		# The header's log line named the attempt that hit the wall. Everything
+		# from here — the event stream and the implementer's own narrative —
+		# lives under a different base, and the path already on screen now
+		# points at a failed run.
+		LOG_BASE="$BASE.reserve"
 		;;
 	fivehour)
 		printf -- '\n--- holding --------------------------------------------------------\n'
@@ -729,6 +738,11 @@ else
 	v run 'clean'
 fi
 if [ "$trip_rc"  -eq 0 ]; then v fence 'clean — no guarded surface moved'; else v fence 'VIOLATED — see fence section above'; fi
+# Printed here as well as in the header because the header's copy was written
+# before any attempt ran. On a fallback the two differ, and this is the one a
+# reader acts on: it names the attempt that produced the work rather than the
+# attempt that hit the wall.
+v log "$LOG_BASE.ndjson"
 if   [ "$gates_rc" -eq 0 ]; then v gates 'green'
 elif [ "$gates_rc" -lt 0 ]; then v gates 'not run'
 else v gates "$gates_rc FAILING"

@@ -353,6 +353,13 @@ run_dispatch() { # run_dispatch <label> <FAKE_ERROR> <AGY_FALLBACK> <expected-rc
 run_dispatch "weekly exhaustion falls back to the reserve" weekly auto 0 "$TMP/d2.log"
 has   "  names the burn"        "RESERVE GROUP BURNED" "$TMP/d2.log"
 has   "  used the reserve model" "claude-opus-4-6-thinking" "$TMP/d2.log"
+# The header prints its log path before any attempt runs, so on a fallback it
+# names the attempt that hit the wall — the reserve attempt writes to a
+# different base entirely. A reader following the advertised path then grades a
+# failed run's artefacts believing they are the work, which is the failure
+# family this whole script exists to prevent, reintroduced by the script itself.
+# The verdict block is what a reader acts on, so the real path belongs there.
+has   "  the verdict names the reserve log" ".reserve.ndjson" "$TMP/d2.log"
 
 run_dispatch "a spent 5-hour window HOLDS" fivehour auto 1 "$TMP/d3.log"
 hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d3.log"
