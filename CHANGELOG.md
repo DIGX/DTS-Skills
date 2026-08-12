@@ -9,6 +9,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.6.0] — 2026-08-12
+
+From a backlog of flaws reported by two harnesses running this skill on real
+projects. Three of the six were already fixed here and stale only in the
+installed copy; the rest share one shape — **a check that exists but can be
+walked around by something ordinary**: a space in a path, a template nobody
+filled, a `PATH` entry the shell quietly ignores.
+
+#### Added
+- **A guarded path that is not on disk makes the fence refuse to arm** — dir,
+  file or tree, whether or not it is named in `AGY_REQUIRE`. Nobody configures
+  a guard for a directory they do not have, so absence is always a config
+  error. This is what makes the space-split guard list *loud*: the fragments do
+  not exist, so instead of fingerprinting nothing and reporting `clean`, the
+  fence stops. The reported case was
+  `AGY_GUARD_TREE=NevaraFlow Suite app shell-handoff/` — the project's primary
+  guarded surface, silently unguarded, reporting clean on every run.
+- **`.agy/dispatch` refuses to run against an unfilled brief.** The installer
+  writes `dispatch-context.md` from a stub full of `{{markers}}` and cannot
+  fill them — only the controller knows what goes in. Nothing checked that
+  anyone had, and that file is read by *every* implementer and *every*
+  reviewer: told the language floor is `{{Language/runtime floor}}`, they read
+  no floor at all, and a gate cannot enforce a rule that was never written
+  down. The task's own brief is checked the same way. `AGY_ALLOW_UNFILLED=1`
+  overrides it for text that genuinely needs `{{...}}`.
+- **The installer reports both in its own checks**, so the first dispatch is
+  not the messenger — unfilled context lines, and a Windows-form `PATH` entry
+  on MSYS.
+- **`.agy/dispatch` prints the `agy` binary that resolved.** Git Bash accepts a
+  `C:\...` `PATH` entry and then never searches it, so an exported stub can be
+  skipped in silence and the real, quota-spending CLI answers instead. That
+  happened during a watchdog drill and re-dispatched a completed brief. An
+  absolute path on screen cannot be misread. Documented in `setup.md`.
+
+#### Fixed
+- **The installer writes guard lists one path per line**, the form the tripwire
+  splits on newlines, rather than teaching the whitespace-separated shape that
+  cannot express a path with a space in it. `$HOME` alone is enough to hit this
+  on Windows (`C:\Users\Firstname Lastname`).
+- **`hash_surface` no longer swallows its fingerprinter's exit code.** A bare
+  `return 0` discarded every failure the surfaces report, including the
+  PowerShell tree walk exiting 4, leaving the empty-surface check as the only
+  thing between a broken fingerprinter and the word `clean`.
+
 ### [1.5.0] — 2026-08-12
 
 From a run where the implementer's fault-injection output was hand-trimmed to

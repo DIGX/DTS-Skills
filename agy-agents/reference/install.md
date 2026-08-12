@@ -28,6 +28,24 @@ The four scripts are **the skill's to own** — they are refreshed on every
 install. `config`, `gates` and the templates are **yours**, and are never
 overwritten without `--force`.
 
+## Fill the context before the first dispatch
+
+`dispatch-context.md` and `task-dispatch.template.md` land full of
+`{{markers}}`, because only you know what belongs in them. `dispatch-context.md`
+is read by **every** implementer and **every** reviewer on the plan, so anything
+left unfilled there is inherited by all of them — an agent told the language
+floor is `{{Language/runtime floor}}` reads that as no constraint at all, and
+the gates cannot enforce what was never written down. The run then passes every
+check the harness has.
+
+So `.agy/dispatch` **refuses to run** while any `{{marker}}` — or the "delete
+this quote block" note at the top — survives in the shared context or in the
+task's own brief. The installer's final checks report it too, rather than
+letting the first dispatch be the messenger.
+
+If a brief genuinely needs literal `{{...}}` in its text, `AGY_ALLOW_UNFILLED=1`
+overrides the refusal for that run.
+
 ## Options
 
 | Flag | Effect |
@@ -99,6 +117,14 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_GUARD_TREE` | external tree fenced by size+mtime, not content |
 | `AGY_GUARD_TREE_SKIP` | patterns excluded from that tree |
 | `AGY_REQUIRE` | surfaces that must be non-empty or the fence refuses to arm |
+| `AGY_CONTEXT` | the shared context every agent reads (`$AGY_WORKSPACE/dispatch-context.md`) |
+
+Environment-only, never written to the config:
+
+| Key | Meaning |
+|---|---|
+| `AGY_SKIP_GATES=1` | report only; do not run the gates |
+| `AGY_ALLOW_UNFILLED=1` | dispatch against a brief that still contains `{{...}}` |
 
 `AGY_GUARD_DIRS` always includes `.agy` and `.claude`. `.git` and the workspace
 itself are pruned from every hash, so a run's own logs never trip its own fence
@@ -107,8 +133,9 @@ it mid-dispatch.
 
 ### Paths containing spaces
 
-Guard lists are whitespace-separated, which cannot express `Acme Suite/app`.
-Write **one path per line** instead and the list is split on newlines:
+A whitespace-separated list cannot express `Acme Suite/app`. Write **one path
+per line** instead and the list is split on newlines — which is the form the
+installer now writes, so an edited config inherits the right shape by example:
 
 ```bash
 AGY_GUARD_DIRS='.agy
@@ -117,10 +144,16 @@ Acme Suite/app'
 ```
 
 Each list is split independently, so a newline in one does not change how the
-others are read. This matters more than it sounds: without it such a path
-silently splits into several nonexistent surfaces, each hashes to nothing, and
-a fence guarding nothing reports **clean**. Put the path in `AGY_REQUIRE` too
-and the fence refuses to arm instead of lying.
+others are read.
+
+This matters more than it sounds: written on one line, such a path splits into
+several nonexistent surfaces, each hashes to nothing, and a fence guarding
+nothing reports **clean**. So the second half of the fix is that **a guarded
+path that is not on disk makes the fence refuse to arm** — dir, file or tree,
+whether or not it is named in `AGY_REQUIRE`. Nobody configures a guard for a
+directory they do not have, so absence is always a config error, and the split
+fragments above are exactly that error. `$HOME` alone is enough to hit this on
+Windows: `C:\Users\Firstname Lastname`.
 
 ### Why a tree is fingerprinted by metadata
 

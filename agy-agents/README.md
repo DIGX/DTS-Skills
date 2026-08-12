@@ -21,7 +21,7 @@ to solve.
 
 - [Why this exists](#why-this-exists)
 - [The five CLI traps](#the-five-cli-traps)
-- [The two harness traps](#the-two-harness-traps)
+- [The three harness traps](#the-three-harness-traps)
 - [The `.agy/` machinery](#the-agy-machinery)
 - [Installing](#installing)
 - [Configuration](#configuration)
@@ -184,10 +184,10 @@ first five.
 
 ---
 
-## The two harness traps
+## The three harness traps
 
 These come from the verification harness rather than from the CLI, and they are
-the reason two scripts here refuse to run rather than pass.
+the reason the scripts here refuse to run rather than pass.
 
 **An empty fingerprint reports clean.** If a guard pattern matches zero files —
 a typo'd path, a directory that moved, a path containing a space that split into
@@ -197,13 +197,26 @@ two nonexistent ones — the differ compares nothing against nothing and prints
 **An empty gate suite reports green.** A runner that executed zero gates exits
 `0`. Every downstream check that trusts it is now trusting nothing.
 
-Both are handled by refusing to proceed:
+**An unfilled brief reads as no constraint.** The installer writes
+`dispatch-context.md` from a stub full of `{{markers}}` and cannot fill them —
+only you know what goes in. That file is read by *every* implementer and *every*
+reviewer, so one left unfilled is inherited by all of them: told the language
+floor is `{{Language/runtime floor}}`, they read no floor. Nothing in a gate can
+enforce a rule that was never written down, so the run passes everything.
+
+All three are handled by refusing to proceed:
 
 - `AGY_REQUIRE` lists the surfaces that must fingerprint a non-zero number of
   files. Any of them coming back empty makes `snapshot` **refuse to arm** — and
-  a dispatch with no fence refuses to run.
+  a dispatch with no fence refuses to run. A guarded path that is not on disk
+  at all does the same, listed in `AGY_REQUIRE` or not: nobody guards a
+  directory they do not have, so absence is a config error every time.
 - An unset `AGY_GATES` is a **hard failure**, not a pass. An unverified dispatch
   is worse than no dispatch, because its report will be believed.
+- A surviving `{{marker}}` in the shared context or in the task's own brief
+  **stops the dispatch** (`AGY_ALLOW_UNFILLED=1` if the text genuinely needs
+  one). The installer reports it in its own checks, so the first dispatch is not
+  the messenger.
 
 > **"It said it worked" is not evidence.** Neither is exit `0`. The only things
 > this protocol treats as evidence are: the parsed event stream, the diff, the
@@ -217,8 +230,8 @@ Both are handled by refusing to proceed:
 ```
 .agy/
 ├── config                     the only file that differs between projects
-├── dispatch                   the sanctioned way to call agy  (~530 lines)
-├── tripwire                   the integrity fence             (~400 lines)
+├── dispatch                   the sanctioned way to call agy  (~760 lines)
+├── tripwire                   the integrity fence             (~430 lines)
 ├── gates                      your verification suite — a starter; make it real
 ├── review-pkg                 builds a review package from a diff range
 ├── fingerprint-tree.ps1       fast metadata fingerprints (Windows)
@@ -242,6 +255,8 @@ traps 1–4 in order, because each one shaped a specific part of it.
 
 It:
 
+- refuses to start against a brief or a shared context that still contains
+  `{{markers}}`, and prints which `agy` binary resolved before it uses it;
 - passes `--add-dir` with the correct native path form (trap 1);
 - streams and parses the nested NDJSON event log with Node, counting tool calls,
   denials and tool errors, and judges the run from that rather than from `$?`

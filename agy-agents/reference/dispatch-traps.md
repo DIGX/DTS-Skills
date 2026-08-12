@@ -216,6 +216,24 @@ dispatch, because its report will be believed.
 not judged. Treat the fence and the gates below it as the whole verdict, and
 read the report — it had to be written during this run to get that far.
 
+## When the dispatch refuses to start
+
+Three refusals happen before `agy` is ever called. All three are the harness
+telling you it cannot produce a trustworthy verdict — none is a bug to work
+around.
+
+| Message | Exit | Why |
+|---|---|---|
+| `is still a template — N unfilled line(s)` | 2 | A `{{marker}}` survives in the shared context or the task brief. Every agent inherits that file; an unfilled constraint reads as no constraint, and no gate can catch what was never specified. Fill it, or `AGY_ALLOW_UNFILLED=1` if the text genuinely needs `{{...}}`. |
+| `guarded directory does not exist` / `guarded file does not exist` | 3 | A path in `AGY_GUARD_DIRS`/`AGY_GUARD_FILES`/`AGY_GUARD_TREE` is not on disk, so it would fingerprint nothing and the fence would report clean. Usually a moved path — or a path with a space written on one line, which splits into fragments that do not exist. Write guard lists **one path per line**. |
+| `surface X came back EMPTY` | 3 | The path exists but fingerprinted zero files, and `AGY_REQUIRE` says it must not. The fingerprinter broke; a broken fence that says "clean" is worse than no fence. |
+
+The `binary` line in the dispatch header exists for a fourth, quieter version of
+the same problem: on MSYS a Windows-form `PATH` entry (`C:\...`) is accepted and
+then never searched, so the `agy` you added can be skipped in silence and the
+next one on `PATH` answers instead. Read that line before believing a run came
+from the binary you intended. See `setup.md`.
+
 ## Debugging checklist
 
 1. Read `<workspace>/logs/task-N-<stamp>.events.ndjson` — the raw stream. It

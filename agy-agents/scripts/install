@@ -108,9 +108,20 @@ printf '\n'
 # the guard there.
 # .agy and .claude are unconditional: this installer is about to populate both,
 # so "does it exist yet" is the wrong question for them.
-GUARD_DIRS=".agy .claude"
+#
+# Both lists are built ONE PATH PER LINE, and written into the config that way.
+# A whitespace-separated list cannot express a path containing a space, and the
+# way it fails is silent: "Client Site app" becomes three nonexistent surfaces,
+# each fingerprints nothing, and the fence reports clean while guarding nothing.
+# $HOME alone is enough to hit this on Windows ("C:\Users\Firstname Lastname").
+# The newline form is what the tripwire's split_list reads as one path per line,
+# so writing it here is both the fix and the worked example for anyone editing
+# the config later.
+GUARD_DIRS=".agy
+.claude"
 for d in docs spec specs .github; do
-	[ -d "$d" ] && GUARD_DIRS="$GUARD_DIRS $d"
+	[ -d "$d" ] && GUARD_DIRS="$GUARD_DIRS
+$d"
 done
 
 # Config files outside the repo that a run must not rewrite.
@@ -118,20 +129,22 @@ GUARD_FILES=""
 for f in "$HOME/.gemini/antigravity-cli/settings.json" \
 	"$HOME/.gemini/config/config.json" \
 	"$HOME/.claude/settings.json"; do
-	[ -f "$f" ] && GUARD_FILES="$GUARD_FILES ${f/#$HOME/\~}"
+	[ -f "$f" ] && GUARD_FILES="${GUARD_FILES:+$GUARD_FILES
+}${f/#$HOME/\~}"
 done
 
 # A surface that must never legitimately come back empty. Computed now, from
 # what is actually on disk, so the fence can tell "nothing changed" apart from
 # "the fingerprinter broke".
 REQUIRE=""
-for d in $GUARD_DIRS; do
+while IFS= read -r d; do
+	[ -n "$d" ] || continue
 	name="$(printf '%s' "$d" | sed -e 's#^\.##' -e 's#[/ ]#-#g')"
 	# .agy and .claude are about to be populated; count them regardless.
 	if [ "$d" = ".agy" ] || [ "$d" = ".claude" ] || [ -n "$(find "$d" -type f -print -quit 2>/dev/null)" ]; then
 		REQUIRE="$REQUIRE $name"
 	fi
-done
+done <<< "$GUARD_DIRS"
 [ -n "$GUARD_TREE" ] && REQUIRE="$REQUIRE tree"
 REQUIRE="${REQUIRE# }"
 
@@ -282,6 +295,12 @@ else
 # Note that .agy guards the harness against itself. The workspace inside it is
 # pruned automatically (every dispatch writes logs there), but the ledger is
 # guarded as a file — so do not edit progress.md while a dispatch is running.
+#
+# ONE PATH PER LINE. A list containing a newline is split on newlines, so a
+# path with a space in it stays one path. Written on a single line instead, it
+# splits on spaces into fragments that do not exist — and a surface that
+# fingerprints nothing reports clean. Adding a path? Give it its own line.
+# A path listed here that is not on disk makes the fence refuse to arm.
 : "\${AGY_GUARD_DIRS:=$GUARD_DIRS}"
 : "\${AGY_GUARD_FILES:=$GUARD_FILES}"
 
@@ -377,6 +396,35 @@ else
 	problems=$((problems + 1))
 fi
 
+# A Windows-form PATH entry is accepted by the shell and then never searched, so
+# whatever you put there is skipped without a word and the next match on PATH
+# answers instead. That is how a drill against a stubbed `agy` dispatched the
+# real one and spent live quota. Cheap to detect, invisible otherwise.
+case "$(uname -s 2>/dev/null)" in
+MINGW*|MSYS*|CYGWIN*)
+	if printf '%s' "$PATH" | grep -qE '(^|:)[A-Za-z]:[\\/]'; then
+		say path 'a Windows-form entry (C:\...) is on PATH — MSYS ignores those'
+		say ''   'silently. Convert it with `cygpath -u` or the binary you think'
+		say ''   'is being used will not be the one that runs.'
+		problems=$((problems + 1))
+	fi
+	;;
+esac
+
+# The templates ship unfilled on purpose — only you know what goes in them — but
+# nothing used to check that they were ever filled, and dispatch-context.md is
+# the file every implementer and reviewer inherits. `.agy/dispatch` now refuses
+# on it; say so here rather than letting the first dispatch be the messenger.
+CTX="$WORKSPACE/dispatch-context.md"
+unfilled="$(grep -c -e '{{[^}]*}}' -e 'Delete this quote block' "$CTX" 2>/dev/null || true)"
+if [ "${unfilled:-0}" -gt 0 ]; then
+	say context "$unfilled unfilled line(s) in $CTX"
+	say ''      '.agy/dispatch REFUSES to run until they are filled — see step 1.'
+	problems=$((problems + 1))
+else
+	say context "$CTX is filled in"
+fi
+
 printf '\n'
 if bash .agy/tripwire check >/dev/null 2>&1; then
 	say fence 'arms and verifies clean'
@@ -399,8 +447,10 @@ fi
 
 printf '\n--- next -----------------------------------------------------------\n'
 cat <<NEXT
-  1. Fill in $WORKSPACE/dispatch-context.md. Every agent reads it,
-     so an omission there is inherited by all of them.
+  1. Fill in $WORKSPACE/dispatch-context.md — every {{marker}} in it,
+     and delete the quoted note at the top. Every agent reads this file, so an
+     omission there is inherited by all of them; .agy/dispatch refuses to run
+     while any marker is left.
   2. Make $GATES real, and confirm it fails when the tree is broken.
      A gate you have never seen go red is not yet a gate.
   3. Review the fence: bash .agy/tripwire surfaces

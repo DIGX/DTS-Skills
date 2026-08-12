@@ -98,6 +98,26 @@ Then verify the harness itself, which needs no quota at all:
 bash ~/.claude/skills/agy-agents/scripts/selftest
 ```
 
+### On MSYS, a Windows-form `PATH` entry is ignored in silence
+
+Git Bash searches `PATH` in POSIX form. A `C:\...` or `C:/...` entry is accepted
+by `export` without complaint and then **never searched** — so the directory you
+just put first is skipped, and the next match answers instead.
+
+This is not theoretical. During a watchdog drill a stub `agy` was exported that
+way; `command -v agy` walked straight past it, resolved the **real** CLI, and
+re-dispatched an already-completed brief against live quota.
+
+```bash
+export PATH="$(cygpath -u '/c/tools/bin'):$PATH"   # convert, always
+command -v agy                                     # then assert what answered
+```
+
+Two things now make it visible rather than silent: `.agy/dispatch` prints
+`binary <path>` in its header on every run, and the installer's checks flag a
+Windows-form entry on `PATH`. The selftest refuses to run at all if `agy`
+resolves to anything but its stub.
+
 ## 5. Where things live
 
 | Path | What |

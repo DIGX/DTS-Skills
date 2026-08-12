@@ -111,6 +111,11 @@ cd "$ROOT" || exit 1
 : "${AGY_EFFORT:=high}"
 : "${AGY_TIMEOUT:=45m}"
 
+# The file every implementer and reviewer reads before anything else. Defaulted
+# rather than required in .agy/config, so a config written by an older installer
+# still finds it.
+: "${AGY_CONTEXT:=$AGY_WORKSPACE/dispatch-context.md}"
+
 # Seconds of event-stream silence before a run is presumed hung (failure 4).
 # 300 is roughly six times the longest gap seen between events on a healthy
 # run, where the gate — the slowest single tool call — takes about 50 seconds.
@@ -143,6 +148,7 @@ fi
 if [ "${1:-}" = "--file" ]; then
 	[ -f "${2:-}" ] || { printf 'dispatch: no such prompt file: %s\n' "${2:-}" >&2; exit 2; }
 	PROMPT="Read ${2} and execute it in full."
+	PROMPT_FILE="$2"
 	LABEL="$(basename "$2" | sed 's/\.[^.]*$//')"
 	REPORT=""
 elif [ -n "${1:-}" ]; then
@@ -150,10 +156,55 @@ elif [ -n "${1:-}" ]; then
 	DISPATCH="$AGY_WORKSPACE/task-$N-dispatch.md"
 	[ -f "$DISPATCH" ] || { printf 'dispatch: no dispatch file at %s\n' "$DISPATCH" >&2; exit 2; }
 	PROMPT="Read $DISPATCH and execute it in full."
+	PROMPT_FILE="$DISPATCH"
 	LABEL="task-$N"
 	REPORT="$AGY_WORKSPACE/task-$N-report.md"
 else
 	printf 'usage: .agy/dispatch [--continue] <task-number> | --file <path>\n' >&2
+	exit 2
+fi
+
+# ------------------------------------------------------- the brief must be real
+# The installer writes dispatch-context.md and the task template from stubs full
+# of {{PLACEHOLDER}} markers, and it cannot fill them — only the controller knows
+# what goes in. Nothing used to check that it had. dispatch-context.md is the one
+# file EVERY implementer and reviewer reads, so an unfilled one is inherited by
+# every agent in the plan: they are told the language floor is
+# "{{Language/runtime floor}}", read that as no constraint, and the gates cannot
+# catch what was never specified.
+#
+# This refuses rather than warns. A warning on the noisiest line of a dispatch is
+# a warning nobody reads, and the failure it guards against is silent by
+# construction — the run will look perfect. Cost of the refusal is a minute of
+# typing; cost of missing it is a milestone built against a brief that said
+# PLACEHOLDER.
+check_unfilled() { # <path> <what-it-is>
+	local f="$1" what="$2" hits n
+	if [ ! -f "$f" ]; then
+		printf 'dispatch: no %s at %s\n' "$what" "$f" >&2
+		printf '          Every agent on this plan reads it. Run the installer, or\n' >&2
+		printf '          point AGY_CONTEXT at the file you use instead.\n' >&2
+		return 1
+	fi
+	# Both shapes the templates leave behind: {{...}} markers, and the quoted
+	# "fill this in" note the controller is told to delete once it is real.
+	hits="$(grep -n -e '{{[^}]*}}' -e 'Delete this quote block' "$f" 2>/dev/null)"
+	[ -n "$hits" ] || return 0
+	n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
+	printf 'dispatch: %s is still a template — %s unfilled line(s) in %s\n' "$what" "$n" "$f" >&2
+	printf '%s\n' "$hits" | head -8 | sed 's/^/          /' >&2
+	[ "$n" -gt 8 ] && printf '          … and %s more\n' "$((n - 8))" >&2
+	return 1
+}
+
+unfilled=0
+check_unfilled "$AGY_CONTEXT" 'the shared dispatch context' || unfilled=1
+check_unfilled "$PROMPT_FILE" "this task's brief" || unfilled=1
+if [ "$unfilled" -ne 0 ] && [ "${AGY_ALLOW_UNFILLED:-0}" != "1" ]; then
+	printf '\ndispatch: REFUSING TO DISPATCH against an unfilled brief. The run would\n' >&2
+	printf 'succeed, the gates would pass, and the constraint you meant to impose\n' >&2
+	printf 'would simply not exist. Fill the lines above first.\n' >&2
+	printf 'Deliberate — a real {{...}} in the text? AGY_ALLOW_UNFILLED=1.\n' >&2
 	exit 2
 fi
 
@@ -165,6 +216,12 @@ SNAP="$BASE.fence"
 REPO_WIN="$(cygpath -w "$PWD" 2>/dev/null)" || REPO_WIN="$PWD"
 
 printf 'dispatching  %s\n' "$LABEL"
+# Which binary this resolved to, always, because on MSYS it is not always the
+# one you think: a Windows-form PATH entry (C:\...) is accepted by `export` and
+# then never searched, so the entry you added is skipped in silence and the next
+# `agy` on PATH — the real, quota-spending one — answers instead. Printing the
+# resolved path is the whole fix; you cannot misread an absolute path.
+printf 'binary       %s\n' "$AGY"
 if [ "$AGY_FALLBACK" = "force" ]; then
 	FIRST_MODEL="$AGY_FALLBACK_MODEL"
 	printf 'model        %s (RESERVE, forced) effort %s, timeout %s\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"

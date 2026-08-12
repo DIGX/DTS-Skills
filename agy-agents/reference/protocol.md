@@ -29,6 +29,13 @@ runs with `--dangerously-skip-permissions`, which is only tolerable because the
 tripwire fences the run. If the fence will not arm, the dispatch refuses to
 start. Do not work around that.
 
+It refuses on one more thing before it starts: a `{{marker}}` left in the shared
+context or in the brief you just wrote. Both are copied from templates, and an
+unfilled line in `dispatch-context.md` is inherited by every implementer and
+every reviewer on the plan — they read `{{Language/runtime floor}}` as no floor
+at all, and no gate can enforce a rule nobody wrote down. Fill it rather than
+setting `AGY_ALLOW_UNFILLED=1`.
+
 ## The cycle
 
 1. **Record BASE** — `git rev-parse HEAD`. The review package needs it. Never

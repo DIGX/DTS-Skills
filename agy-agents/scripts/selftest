@@ -218,6 +218,50 @@ want "refuses to arm on an empty required surface" 1 $?
 has  "  says why" "would guard nothing" "$TMP/f6.log"
 rmdir hollow
 
+printf '\n=== guard lists ====================================================\n'
+# The original silent failure: a guard list is whitespace-separated, so a path
+# containing a space becomes several nonexistent paths, each fingerprints
+# nothing, and the fence reports CLEAN while guarding nothing at all. Both
+# halves are asserted — that the newline form keeps such a path whole, and that
+# the split form is now loud instead of clean.
+mkdir -p "$REPO/guarded dir"
+printf 'x\n' > "$REPO/guarded dir/f.txt"
+
+n="$(AGY_GUARD_DIRS=".agy
+.claude
+guarded dir" bash .agy/tripwire surface "guarded-dir" 2>/dev/null | wc -l)"
+[ "${n:-0}" -eq 1 ] \
+	&& ok "a newline-separated list keeps a path with a space whole" \
+	|| bad "a newline-separated list keeps a path with a space whole" "fingerprinted $n file(s), wanted 1"
+
+AGY_GUARD_DIRS=".agy .claude guarded dir" \
+	bash .agy/tripwire snapshot "$TMP/snap3" >"$TMP/f7.log" 2>&1
+want "a space-split path REFUSES to arm rather than guarding nothing" 1 $?
+has  "  names the fragment"   "does not exist" "$TMP/f7.log"
+has  "  says how to write it" "one path per line" "$TMP/f7.log"
+
+# Same rule, reached the ordinary way: a guarded path that was moved or typo'd.
+# Without it the surface is simply absent from the comparison, and absence is
+# indistinguishable from "nothing changed".
+AGY_GUARD_DIRS=".agy .claude docs-that-moved" \
+	bash .agy/tripwire snapshot "$TMP/snap4" >"$TMP/f8.log" 2>&1
+want "a guarded dir that is not on disk REFUSES to arm" 1 $?
+
+# Via AGY_LEDGER, because this suite pins AGY_GUARD_FILES empty for hermeticity
+# with a plain assignment, which beats the environment. The ledger is the file
+# that most needs this: a dispatch grades itself against a ledger that has to
+# be there, and "not there" used to read the same as "unchanged".
+AGY_LEDGER="$REPO/never-existed.md" \
+	bash .agy/tripwire snapshot "$TMP/snap5" >"$TMP/f9.log" 2>&1
+want "a guarded file that is not on disk REFUSES to arm" 1 $?
+has  "  names it" "never-existed.md" "$TMP/f9.log"
+
+# The installer must not be the one teaching the broken shape. Its own output is
+# what every project's config is copied from and edited by hand thereafter.
+has "the installer writes AGY_GUARD_DIRS one path per line" "ONE PATH PER LINE" .agy/config
+
+rm -rf "$REPO/guarded dir"
+
 printf '\n=== gates ==========================================================\n'
 cp .agy/gates "$TMP/gates.bak"
 # Strip gate CALLS only. A bare `^gate` also deletes `gate() {` and
@@ -243,12 +287,57 @@ bash .agy/gates >"$TMP/g2.log" 2>&1
 [ $? -gt 0 ] && ok "a failing gate is counted" || bad "a failing gate is counted" "exited 0"
 cp "$TMP/gates.bak" .agy/gates
 
-printf '\n=== dispatch =======================================================\n'
+printf '\n=== unfilled brief =================================================\n'
+# The installer ships dispatch-context.md and the task template full of
+# {{markers}} it cannot fill — only the controller knows what goes in them —
+# and nothing checked that anyone had. That file is read by every implementer
+# and every reviewer on the plan, so an unfilled one is inherited by all of
+# them: told the language floor is "{{Language/runtime floor}}", they read no
+# constraint, and the gates cannot enforce what was never written down. The run
+# then passes on every check the harness has.
 mkdir -p .agy/work/m1
 printf '# task 9\nDo the thing.\n' > .agy/work/m1/task-9-dispatch.md
+CTX=".agy/work/m1/dispatch-context.md"
 
+has "the installer ships the context unfilled" "{{" "$CTX"
+grep -q 'unfilled line(s)' "$TMP/install.log" \
+	&& ok "the installer says so in its own checks" \
+	|| bad "the installer says so in its own checks" "no unfilled-context line in install.log"
+
+bash .agy/dispatch 9 >"$TMP/c1.log" 2>&1
+want "refuses to dispatch against an unfilled context" 2 $?
+has  "  names the file"        "dispatch-context.md" "$TMP/c1.log"
+has  "  refuses out loud"      "REFUSING TO DISPATCH" "$TMP/c1.log"
+has  "  offers the escape"     "AGY_ALLOW_UNFILLED" "$TMP/c1.log"
+
+# Deliberate {{...}} in a real brief has to stay possible, or the check becomes
+# something people work around by deleting it.
+AGY_ALLOW_UNFILLED=1 FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/c2.log" 2>&1
+want "AGY_ALLOW_UNFILLED=1 overrides it" 0 $?
+
+# Fill it the way a controller would, so every dispatch below runs against a
+# real context — and so the suite proves the filled form actually passes.
+sed -e 's/{{[^}]*}}/filled-in/g' -e '/Delete this quote block/d' "$CTX" > "$TMP/ctx.filled"
+cp "$TMP/ctx.filled" "$CTX"
+
+# The task's own brief is checked too: the template is copied per task, and a
+# marker left in one is the same failure scoped to one dispatch.
+printf '# task 8\nImplement {{THE THING}}.\n' > .agy/work/m1/task-8-dispatch.md
+bash .agy/dispatch 8 >"$TMP/c3.log" 2>&1
+want "refuses a task brief with a marker left in it" 2 $?
+has  "  names the brief" "task-8-dispatch.md" "$TMP/c3.log"
+rm -f .agy/work/m1/task-8-dispatch.md
+
+printf '\n=== dispatch =======================================================\n'
 bash .agy/dispatch 404 >"$TMP/d0.log" 2>&1
 want "refuses a missing dispatch file" 2 $?
+
+# The binary that answered, printed on every run. A Windows-form PATH entry is
+# accepted and then never searched on MSYS, so the stub you exported can be
+# skipped in silence and the real, quota-spending CLI answers instead. That has
+# happened here; the resolved path on screen is what makes it visible.
+has "the header names the binary that resolved" "binary" "$TMP/c2.log"
 
 AGY_GUARD_DIRS=".agy .claude docs hollow2" AGY_REQUIRE="hollow2" \
 	bash .agy/dispatch 9 >"$TMP/d1.log" 2>&1

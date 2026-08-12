@@ -137,7 +137,20 @@ dir_for_surface() {
 hash_dir() {
 	local d
 	d="$(norm "$1")"
-	[ -d "$d" ] || return 0
+	# A configured surface that is not on disk is the flaw this whole fence
+	# exists to prevent: it hashes nothing, the differ compares nothing against
+	# nothing, and the run reports clean. AGY_REQUIRE catches it only for the
+	# surfaces someone remembered to list — but nobody configures a guard for a
+	# directory they do not have, so absence is always a config error and always
+	# worth failing on. This is also what turns a space-split path loud: the
+	# fragments do not exist, so the fence refuses to arm instead of guarding air.
+	if [ ! -d "$d" ]; then
+		printf 'tripwire: guarded directory does not exist: %s\n' "$d" >&2
+		printf '          Configured in AGY_GUARD_DIRS but not on disk. If the path\n' >&2
+		printf '          contains a space, write the list one path per line — a list\n' >&2
+		printf '          containing a newline is split on newlines, not on spaces.\n' >&2
+		return 3
+	fi
 
 	local -a expr=()
 	local p
@@ -155,22 +168,35 @@ hash_dir() {
 # would collapse a space-separated AGY_GUARD_FILES into one nonexistent path
 # and unguard it while still reporting clean.
 hash_files() {
-	local f resolved src
+	local f resolved src rc=0
 	for src in "$AGY_LEDGER" "$AGY_GUARD_FILES"; do
 		[ -n "$src" ] || continue
 		while IFS= read -r f; do
 			[ -n "$f" ] || continue
 			# Allow ~ and $HOME in the config for files outside the repo.
 			resolved="${f/#\~/$HOME}"
-			[ -f "$resolved" ] && "${SHA[@]}" "$resolved" 2>/dev/null | sha_to_fp
+			if [ -f "$resolved" ]; then
+				"${SHA[@]}" "$resolved" 2>/dev/null | sha_to_fp
+			else
+				# Same reasoning as hash_dir: a guarded file that is not there is
+				# a guard over nothing, and the files surface is one bucket — a
+				# missing entry among present ones would otherwise be invisible,
+				# because the surface is still comfortably non-empty.
+				printf 'tripwire: guarded file does not exist: %s\n' "$f" >&2
+				rc=3
+			fi
 		done <<< "$(split_list "$src")"
 	done
-	return 0
+	[ "$rc" -eq 0 ] || printf '          Listed in AGY_GUARD_FILES/AGY_LEDGER but not on disk.\n' >&2
+	return "$rc"
 }
 
 tree_fingerprint() {
 	local root="${AGY_GUARD_TREE/#\~/$HOME}"
-	[ -d "$root" ] || return 0
+	if [ ! -d "$root" ]; then
+		printf 'tripwire: AGY_GUARD_TREE does not exist: %s\n' "$root" >&2
+		return 3
+	fi
 
 	if command -v powershell.exe >/dev/null 2>&1 && [ -f .agy/fingerprint-tree.ps1 ]; then
 		local win ps_win skip
@@ -199,21 +225,28 @@ tree_fingerprint() {
 
 # One definition per surface, shared by snapshot and verify, so the two can
 # never drift apart and quietly compare different things.
+#
+# The exit status of the fingerprinter is the return value, deliberately. An
+# earlier version ended with a bare `return 0`, which threw away every failure
+# the surfaces had just been taught to report — including the PowerShell walk
+# exiting 4 — and left the empty-surface check in AGY_REQUIRE as the only thing
+# standing between a broken fingerprinter and the word "clean".
 hash_surface() {
+	local rc
 	case "$1" in
-	files) hash_files ;;
-	tree)  tree_fingerprint ;;
+	files) hash_files; rc=$? ;;
+	tree)  tree_fingerprint; rc=$? ;;
 	*)
 		local d
 		if d="$(dir_for_surface "$1")"; then
-			hash_dir "$d"
+			hash_dir "$d"; rc=$?
 		else
 			printf 'tripwire: unknown surface: %s\n' "$1" >&2
 			return 2
 		fi
 		;;
 	esac
-	return 0
+	return "$rc"
 }
 
 git_state() {

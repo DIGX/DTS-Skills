@@ -1,7 +1,7 @@
 ---
 name: agy-agents
 description: Use when setting up or adopting a repository where Claude plans and the Antigravity CLI (`agy`, Gemini) implements; when the user asks to delegate implementation to Gemini or Antigravity; when installing or authenticating `agy` itself; when an `agy` run reports SUCCESS but nothing changed, hangs without ever finishing, hits RESOURCE_EXHAUSTED or a rate limit, or writes outside its scope; or when a fence, tripwire, or gate check fails in a repo using this harness.
-version: 1.5.0
+version: 1.6.0
 user-invocable: true
 argument-hint: "[setup|install|adopt|status|doctor|protocol] — omit to route automatically"
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, TodoWrite
@@ -55,10 +55,15 @@ Adoption is the same command: it finds an existing SDD workspace and an
 existing gate runner and binds to them rather than duplicating them. Details,
 flags and the full config reference: `reference/install.md`.
 
-**Then do the one thing the installer cannot do: write the real gates.** It
-emits a starter from whatever toolchain it detected. A generated gate suite is
-a guess, and gates are the only thing standing between a confident report and a
-broken tree.
+**Then do the two things the installer cannot do.**
+
+1. **Write the real gates.** It emits a starter from whatever toolchain it
+   detected. A generated gate suite is a guess, and gates are the only thing
+   standing between a confident report and a broken tree.
+2. **Fill every `{{marker}}` in `dispatch-context.md`.** Only you know what goes
+   in them, and that file is read by every implementer and every reviewer on the
+   plan — an unfilled constraint is inherited by all of them and reads as no
+   constraint. `.agy/dispatch` refuses to run until they are gone.
 
 ## Running a task
 
