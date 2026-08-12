@@ -9,6 +9,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.5.0] — 2026-08-12
+
+From a run where the implementer's fault-injection output was hand-trimmed to
+drop the main suite that had already run. Nothing was fabricated and every
+count was real. The gate passed, the fence was clean, the run reported
+`SUCCESS` — none of those can see inside a report. It surfaced only because the
+reviewer re-ran the script itself.
+
+#### Added
+- **The reviewer re-executes pasted proof rather than reading it.** Pasted
+  output is a claim shaped like evidence: a suite quietly reduced to the cases
+  that pass leaves every number in the block true and the block itself a lie
+  about what ran. The gate suite is the stated exception — `.agy/dispatch`
+  runs it and keeps its own copy at `<log>.gates.log`, so it is already
+  independently evidenced and the claims check already compares against it.
+  Every *other* cited command has no such capture. This replaces the old "do
+  not ask it to re-run gates the report already evidences", which was true of
+  gates and quietly wrong about everything else.
+- **Implementers must name the exact command line above any pasted block, and
+  paste it whole.** Stated so the reviewer's re-run is possible at all: proof
+  you cannot reproduce the invocation for is not proof.
+- **The harness fails a report missing a required section.** `## Observations`
+  was required by the contract and enforced by nothing. An absent section reads
+  identically whether there was nothing to observe or the implementer never
+  looked. Sections come from `AGY_REPORT_SECTIONS` (default `## Observations`);
+  `None.` is a valid body. This is a gate, not a warning, because unlike the
+  claims comparison it is deterministic — a heading is present or it is not.
+
+  Known limit: it only checks a report this run actually wrote. A run that
+  writes no report at all is still caught only on the deferred path.
+
 ### [1.4.0] — 2026-08-12
 
 #### Added

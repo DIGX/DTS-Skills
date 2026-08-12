@@ -83,3 +83,21 @@ neighbouring code, upgrade dependencies, or improve something you noticed in
 passing. Write those under `## Observations` at the end of your report; the
 controller decides whether they become part of this task, a later task, a
 recorded issue, or nothing.
+
+**Every report ends with an `## Observations` heading**, even when you noticed
+nothing — write `None.` under it. The harness fails a report without one. An
+absent section reads exactly the same whether there was nothing to say or you
+never looked, and only one of those is fine.
+
+## Pasted output is a claim, not proof
+
+Where your report shows the output of a command, it must be that command's
+complete output, unedited. Do not trim it to the part you consider relevant, do
+not merge two runs into one block, do not retype it from memory.
+
+Name the exact command line above every block you paste, so it can be run
+again. It will be: the reviewer re-executes pasted proof rather than reading
+it, which takes seconds and is the only check that can tell real output from
+output that was tidied. Trimmed output is the failure this rule exists for —
+every number in it can be true while the block as a whole is a lie about what
+ran.

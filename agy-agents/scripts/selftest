@@ -74,7 +74,9 @@ fi
 # set, is the report it claims to have written on the way.
 if [ -n "${FAKE_HANG:-}" ]; then
 	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
-	[ -n "${FAKE_REPORT:-}" ] && printf 'the work, as written by the run that then hung\n' > "$FAKE_REPORT"
+	# Contract-shaped, so the watchdog tests exercise the watchdog rather than
+	# tripping the report-contract check on a fixture no implementer would write.
+	[ -n "${FAKE_REPORT:-}" ] && printf 'the work, as written by the run that then hung\n\n## Observations\nNone.\n' > "$FAKE_REPORT"
 	sleep "$FAKE_HANG"
 	exit 0
 fi
@@ -384,6 +386,25 @@ FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Took 12 minutes across
 hasnt "an unmeasured quantity is not flagged" "CLAIM" "$TMP/b4.log"
 
 cp "$TMP/gates.claims.bak" .agy/gates
+rm -f "$REPORT_9"
+
+printf '\n=== report contract ================================================\n'
+# The contract requires an `## Observations` section and nothing enforced it, so
+# a report could simply omit it. An absent section is ambiguous in the worst
+# direction: it reads identically whether there was nothing to observe or the
+# implementer never looked. This is a deterministic check, so it is a gate.
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Done. Everything green.' \
+	AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/s1.log" 2>&1
+want "a report missing a required section FAILS" 1 $?
+has  "  names the section" "## Observations" "$TMP/s1.log"
+
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" \
+	FAKE_REPORT_TEXT='Done.
+
+## Observations
+None.' \
+	AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/s2.log" 2>&1
+want "a report carrying it passes" 0 $?
 rm -f "$REPORT_9"
 
 printf '\n=== idempotency ====================================================\n'

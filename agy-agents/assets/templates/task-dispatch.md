@@ -48,7 +48,10 @@ Omit if none.}}
 
 **Report:** write `{{WORKSPACE}}/task-{{N}}-report.md` **incrementally** —
 append a section as you finish each step, not all at once at the end. Include
-the verbatim gate output, not a summary of it.
+the verbatim gate output, not a summary of it. Any other command you run as
+proof: name its exact command line above the output, and paste the output
+whole. It will be re-run. End the report with an `## Observations` heading —
+`None.` if you noticed nothing.
 
 **Definition of done:** every acceptance criterion satisfied, all gates green,
 committed as `{{feat: task N — <what>}}`. If a blocker or a genuine ambiguity

@@ -537,6 +537,37 @@ if [ "$DEFERRED" = "1" ] && [ -n "$REPORT" ]; then
 	fi
 fi
 
+# ------------------------------------------------------------ report contract
+# The contract asks for sections the harness can check for, and nothing checked.
+# An absent `## Observations` is ambiguous in the worst direction: it reads
+# identically whether there was nothing to observe or the implementer never
+# looked, and the second is the case you need to know about.
+#
+# Unlike the claims comparison below this is deterministic — a heading is there
+# or it is not — so it fails the run rather than warning. Warnings are for
+# checks that can be wrong. The fix is one `--continue` away.
+if [ "$REPORT_FRESH" = "1" ]; then
+	printf -- '\n--- report contract ------------------------------------------------\n'
+	missing_section=0
+	while IFS= read -r sec; do
+		[ -n "$sec" ] || continue
+		if grep -qF -- "$sec" "$REPORT"; then
+			printf 'ok    %s\n' "$sec"
+		else
+			printf 'FAIL  the report has no `%s` section.\n' "$sec"
+			missing_section=1
+		fi
+	done <<EOF
+${AGY_REPORT_SECTIONS:-## Observations}
+EOF
+	if [ "$missing_section" = "1" ]; then
+		printf '      "None." is a valid body. A section left out is not the same as\n'
+		printf '      one saying there was nothing — only one of them tells you the\n'
+		printf '      implementer looked.\n'
+		stream_rc=1
+	fi
+fi
+
 # ------------------------------------------------------------- check the fence
 printf -- '\n--- fence ----------------------------------------------------------\n'
 bash .agy/tripwire verify "$SNAP"

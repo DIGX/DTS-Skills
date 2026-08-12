@@ -111,7 +111,18 @@ review package. Then:
 - Do **not** pre-judge. If the prompt you are writing contains "do not flag",
   "at most Minor", or "the plan chose" — stop. Let the reviewer raise it, then
   adjudicate it in the loop.
-- Do not ask it to re-run gates the report already evidences.
+- **Re-execute any output the report pastes as proof; do not read it.** This
+  costs seconds and is the only check that distinguishes real output from
+  output that was tidied. Every number in a hand-trimmed block can be true
+  while the block lies about what ran — a suite quietly reduced to the cases
+  that pass leaves a green gate, a clean fence, a `SUCCESS` verdict and a
+  report full of accurate figures. Nothing else in this harness looks inside a
+  report.
+- The exception is the gate suite itself: `.agy/dispatch` runs it and keeps its
+  own copy at `<log>.gates.log`, so that output is already independently
+  evidenced and the claims check already compares the report against it. Every
+  *other* command a report cites — a one-off script, a fault injection, a
+  targeted test run — has no such capture. Re-run those.
 
 ### When the reviewer cannot run
 
