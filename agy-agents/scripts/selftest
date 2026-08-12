@@ -145,6 +145,15 @@ proto="$(sed -n 's/^`\(.*protocol\.md\)`$/\1/p' .claude/skills/agy-task-cycle/SK
 	&& ok "the project skill's protocol path resolves" \
 	|| bad "the project skill's protocol path resolves" "got '${proto:-<unsubstituted>}'"
 
+# A reviewer that cannot run is the one failure whose cheapest resolution — the
+# controller grading work against its own brief — silently removes the only
+# independent check in the loop, and leaves a task that looks fully reviewed.
+# The protocol has to name a state to park the task in: a prohibition with no
+# exit is a deadlock, and a deadlock is what gets negotiated away under pressure.
+has "the protocol names a HELD state for an unavailable reviewer" "HELD" "$proto"
+has "  and forbids the controller reviewing its own work" \
+	"substitute yourself for the reviewer" "$proto"
+
 # Hermetic: the fence must not depend on this machine's ~/.claude or ~/.gemini,
 # which can change under a running session and make the suite flaky.
 cat >> .agy/config <<'CFG'

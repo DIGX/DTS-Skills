@@ -113,6 +113,28 @@ review package. Then:
   adjudicate it in the loop.
 - Do not ask it to re-run gates the report already evidences.
 
+### When the reviewer cannot run
+
+A subagent may be unavailable: the harness forbids it, the session budget will
+not carry another one, it dies on dispatch. The cheapest way out is to read the
+diff carefully yourself and call it reviewed.
+**Never substitute yourself for the reviewer.**
+You wrote the brief; grading work against your own brief is not
+review, and the result is worse than no review because the ledger will record
+one that never happened.
+
+The task is **HELD** instead:
+
+1. Leave the task open. Do not close it, do not start the next one.
+2. Record it: `Task N: HELD — reviewed by nobody; <why the reviewer could not
+   run>`. A held task is a visible state, not a quiet gap.
+3. Tell the user what is on disk — commits, gate results, whether the diff
+   stayed in scope — and that it is unreviewed.
+4. Wait for a reviewer to become available. That is the only exit.
+
+You may state your own reading of the diff while it is held. Label it as the
+controller's opinion and never let it stand in the ledger where a verdict goes.
+
 ## Fix loop
 
 Five rounds maximum.
@@ -171,9 +193,16 @@ failure:
 
 1. Check what is on disk: `git status --short`, and whether the review exists.
 2. Run `.agy/gates` yourself.
-3. **Decide before resuming.** Resuming reloads the agent's full transcript
-   (~120–150k tokens). Resume only when what remains needs judgment the agent
-   holds. When what remains is mechanical, finish it yourself.
+3. **Decide before resuming.** A killed subagent is not lost — it can be
+   resumed from its own transcript, which still holds everything it read.
+   Resuming reloads that transcript (~120–150k tokens), so resume when what
+   remains needs the judgment it is carrying.
+
+   What you may finish yourself is *mechanical remainder of a review that
+   already reached its verdicts* — writing up findings it had already stated,
+   filing them, packaging the fix. Producing a verdict is never mechanical,
+   however obvious the diff looks. If it died before verdicts, the choice is
+   resume or HELD.
 4. If you do resume, send exactly what you verified — gate output, file list,
    HEAD sha — and tell it explicitly not to re-run any of it.
 

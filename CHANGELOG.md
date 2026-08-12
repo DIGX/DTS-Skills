@@ -9,6 +9,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.4.0] — 2026-08-12
+
+#### Added
+- **A reviewer that cannot run now has a state to park the task in: `HELD`.**
+  The protocol said the reviewer must be a fresh subagent and said nothing
+  about the subagent being unavailable, which left the controller one cheap
+  move — read the diff itself and call it reviewed. That removes the only
+  independent check in the loop and, worse, leaves a ledger recording a review
+  that never happened. A held task stays open, is recorded as reviewed by
+  nobody with the reason, and its only exit is a reviewer becoming available.
+  Written as a state rather than a bare prohibition on purpose: a prohibition
+  with no exit is a deadlock, and a deadlock is what gets negotiated away
+  under pressure.
+
+#### Fixed
+- **"When what remains is mechanical, finish it yourself" read as licence to
+  produce a verdict.** It was written for a reviewer that died mid-write-up
+  after reaching its verdicts. Now says so, adds that a killed subagent can be
+  resumed from its own transcript, and states that producing a verdict is
+  never mechanical however obvious the diff looks.
+
 ### [1.3.0] — 2026-08-12
 
 Both additions come from a real run in another project that reported success,
