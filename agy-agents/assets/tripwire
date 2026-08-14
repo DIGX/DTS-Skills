@@ -337,6 +337,43 @@ verify() {
 		return 2
 	fi
 
+	# A baseline records which surfaces it was armed for, in its .fp filenames.
+	# Until this check existed, verify walked the *current* config's surface
+	# list and never looked at what the baseline actually held, which failed
+	# in both directions at once:
+	#
+	#   A surface the baseline never recorded reads as an empty "before", so
+	#   every file under it is reported `added` — a fully populated VIOLATION
+	#   report, exit 1, for a tree in which nothing moved. Verifying a fence
+	#   armed by one harness with a differently-named baseline from another is
+	#   enough to produce it, and it names the source bundle among the
+	#   casualties: the one violation that invalidates the whole task.
+	#
+	#   A surface the baseline recorded but the config no longer lists is
+	#   simply never visited. Tampering under it is reported clean, exit 0.
+	#
+	# One is a false alarm and the other a false all-clear, and a fence that
+	# can do either is not a fence. Neither is drift, so neither may return 1:
+	# this is a config error, like a guarded path that is not on disk, and it
+	# exits 2 — the fence could not judge, as distinct from it judged and
+	# found something.
+	local want have missing extra
+	want="$(printf '%s\n' $SURFACES | sed '/^$/d' | sort)"
+	have="$(ls "$dir" 2>/dev/null | sed -n 's/\.fp$//p' | sort)"
+	missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d')"
+	extra="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$have") | sed '/^$/d')"
+	if [ -n "$missing" ] || [ -n "$extra" ]; then
+		printf '\ntripwire: BASELINE DOES NOT MATCH THIS CONFIG — cannot judge this run.\n' >&2
+		[ -n "$missing" ] && printf '  armed for nothing here: %s\n' "$(printf '%s' "$missing" | tr '\n' ' ')" >&2
+		[ -n "$extra" ]   && printf '  no longer configured:   %s\n' "$(printf '%s' "$extra" | tr '\n' ' ')" >&2
+		printf '          The baseline at %s was armed for a different set of\n' "$dir" >&2
+		printf '          surfaces than AGY_GUARD_DIRS now asks for — either it was\n' >&2
+		printf '          written by a different harness, or the config changed after\n' >&2
+		printf '          it was armed. Re-arm the fence. Do not read this as drift,\n' >&2
+		printf '          and do not read a clean result from a mismatched pair at all.\n' >&2
+		return 2
+	fi
+
 	local violations=0 s now rc n
 	now="$(mktemp -d)"
 

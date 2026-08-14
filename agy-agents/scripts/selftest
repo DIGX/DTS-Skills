@@ -266,6 +266,31 @@ want "refuses to arm on an empty required surface" 1 $?
 has  "  says why" "would guard nothing" "$TMP/f6.log"
 rmdir hollow
 
+# A baseline is only evidence about the config it was armed for, and verify
+# used to walk the current surface list without ever looking at what the
+# baseline held. That was wrong in both directions at once: a surface the
+# baseline never recorded read as an empty "before" and reported every file
+# under it as `added` — a fully populated VIOLATION for a tree in which
+# nothing moved — while a surface the baseline held but the config no longer
+# lists was never visited, so tampering under it reported clean. Both halves
+# are asserted, and both must exit 2: this is a config fault, not drift, and
+# the exit code is what tells a controller which one to go and look at.
+mkdir -p "$TMP/alien"
+cp "$SNAP/git.txt" "$TMP/alien/" && cp "$SNAP/docs.fp" "$TMP/alien/tokens.fp"
+bash .agy/tripwire verify "$TMP/alien" >"$TMP/f10.log" 2>&1
+want  "a baseline armed for other surfaces REFUSES to judge" 2 $?
+has   "  says it could not judge" "cannot judge" "$TMP/f10.log"
+hasnt "  does not report it as drift" "VIOLATION" "$TMP/f10.log"
+
+mkdir -p extra-guarded && printf 'x\n' > extra-guarded/f.txt
+AGY_GUARD_DIRS=".agy .claude docs extra-guarded" \
+	bash .agy/tripwire snapshot "$TMP/snap6" >/dev/null 2>&1
+printf 'tampered\n' >> extra-guarded/f.txt
+bash .agy/tripwire verify "$TMP/snap6" >"$TMP/f11.log" 2>&1
+want "a surface dropped from the config REFUSES to judge rather than reporting clean" 2 $?
+has  "  names the dropped surface" "extra-guarded" "$TMP/f11.log"
+rm -rf extra-guarded
+
 printf '\n=== guard lists ====================================================\n'
 # The original silent failure: a guard list is whitespace-separated, so a path
 # containing a space becomes several nonexistent paths, each fingerprints

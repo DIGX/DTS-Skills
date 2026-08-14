@@ -9,6 +9,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.1] — 2026-08-14
+
+One report, from a repo that has its own `scripts/tripwire` alongside
+`.agy/tripwire`. It is the mirror of the flaw fixed in 1.7.x, where a guard
+path that was not on disk fingerprinted nothing and the fence reported clean:
+this time the control does not silently pass, it confidently fails — against
+the wrong target.
+
+#### Fixed
+- **`tripwire verify` compares the baseline's surface set against the config
+  before judging anything.** It used to walk the *current* config's surfaces
+  and never look at what the baseline actually held, which was wrong in both
+  directions at once. A surface the baseline never recorded loaded as an empty
+  "before", so every file under it was reported `added` — a fully populated
+  VIOLATION report, exit 1, for a tree in which nothing had moved, naming the
+  source bundle among the casualties. And a surface the baseline *did* record
+  but the config no longer lists was never visited at all, so a file tampered
+  with under it was reported `clean`, exit 0.
+
+  The two harnesses in that repo name their baselines differently — ours after
+  the guarded **path** (`src/styles` → `src-styles.fp`), theirs after the
+  surface (`tokens.fp`) — so verifying one fence with the other runner was
+  enough to produce the first. A config edited between arming and verifying is
+  enough to produce the second.
+
+  A mismatched pair now prints `BASELINE DOES NOT MATCH THIS CONFIG`, names
+  the surfaces on each side, and **exits 2, not 1**. This is the same ruling
+  as a guard path that is not on disk: a config fault, not drift. The exit
+  code is what tells a controller which thing to go and look at, so the two
+  must not share one.
+
+- **The verdict block's `fence` line has three outcomes rather than two.**
+  `COULD NOT JUDGE — the baseline does not match this config` sends the reader
+  to the config; `VIOLATED` sends them to the implementer's diff. Collapsing
+  them meant a run that touched nothing could read as a compromised one.
+  Neither is a pass: both still exit 4.
+
 ### [1.8.0] — 2026-08-13
 
 Two reports from a project three milestones past its install date. Both are the

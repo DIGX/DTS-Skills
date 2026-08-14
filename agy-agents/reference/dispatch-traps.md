@@ -220,7 +220,7 @@ behind them. Anything other than clean / clean / green stops the cycle.
 | Line | Means |
 |---|---|
 | `run` | the harness's own reading of the event stream, not `$?` |
-| `fence` | guarded surfaces before vs after — a violation names the files |
+| `fence` | guarded surfaces before vs after — a violation names the files, and `COULD NOT JUDGE` means the baseline and the config disagree |
 | `landed` | what the run put in the tree: commits, uncommitted changes, or nothing |
 | `log` | the event stream of the attempt that produced this verdict |
 | `gates` | the project's verification suite, run by the harness |
@@ -305,6 +305,7 @@ work. When you do want the status, run the dispatch unpiped — or read
 | `is still a template — N unfilled line(s)` | 2 | A `{{marker}}` survives in the shared context or the task brief. Every agent inherits that file; an unfilled constraint reads as no constraint, and no gate can catch what was never specified. Fill it, or `AGY_ALLOW_UNFILLED=1` if the text genuinely needs `{{...}}`. |
 | `guarded directory does not exist` / `guarded file does not exist` | 3 | A path in `AGY_GUARD_DIRS`/`AGY_GUARD_FILES`/`AGY_GUARD_TREE` is not on disk, so it would fingerprint nothing and the fence would report clean. Usually a moved path — or a path with a space written on one line, which splits into fragments that do not exist. Write guard lists **one path per line**. |
 | `surface X came back EMPTY` | 3 | The path exists but fingerprinted zero files, and `AGY_REQUIRE` says it must not. The fingerprinter broke; a broken fence that says "clean" is worse than no fence. |
+| `BASELINE DOES NOT MATCH THIS CONFIG` | 2 | `verify` was handed a baseline armed for a different set of surfaces than `AGY_GUARD_DIRS` now asks for. Either the config changed after the fence was armed, or the baseline was written by a different harness — a repo with its own `scripts/tripwire` alongside `.agy/tripwire` is the usual way this happens, since the two name their `.fp` files differently (ours after the **path**, `src/styles` → `src-styles.fp`). Re-arm; do not read the result either way. |
 
 The `binary` line in the dispatch header exists for a fourth, quieter version of
 the same problem: on MSYS a Windows-form `PATH` entry (`C:\...`) is accepted and

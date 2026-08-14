@@ -833,7 +833,16 @@ elif [ "$DEFERRED" = "1" ]; then
 else
 	v run 'clean'
 fi
-if [ "$trip_rc"  -eq 0 ]; then v fence 'clean — no guarded surface moved'; else v fence 'VIOLATED — see fence section above'; fi
+# Three outcomes, not two. `VIOLATED` sends the reader to the implementer's
+# diff; a baseline that does not pair with this config sends them to the
+# config instead. Collapsing the two means a run that nothing touched can
+# read as a compromised one — the same confident wrongness in the opposite
+# direction from the fence that guards nothing and reports clean.
+if   [ "$trip_rc" -eq 0 ]; then v fence 'clean — no guarded surface moved'
+elif [ "$trip_rc" -eq 2 ]; then v fence 'COULD NOT JUDGE — the baseline does not match this config'
+                                v '' 'not drift: re-arm the fence and re-run before reading the tree'
+else v fence 'VIOLATED — see fence section above'
+fi
 if [ "${LANDED_COMMITS:-0}" -gt 0 ]; then
 	v landed "$LANDED_COMMITS commit(s) — $LANDED_SUBJECT"
 	[ "${LANDED_DIRTY:-0}" -gt 0 ] && v '' "$LANDED_DIRTY uncommitted change(s) also in the tree"
@@ -859,7 +868,13 @@ if [ "$CLAIMS_RC" -ne 0 ]; then
 fi
 printf '\n  fence snapshot kept at %s\n' "$SNAP"
 
-if [ "$trip_rc" -ne 0 ]; then
+if [ "$trip_rc" -eq 2 ]; then
+	printf '\nThe fence could not judge this run: its baseline was armed for a different\n'
+	printf 'set of surfaces than .agy/config now asks for. That is a configuration\n'
+	printf 'fault, not evidence about the implementer — read the fence section above,\n'
+	printf 'fix the pairing, and re-run. Nothing here says the tree is clean.\n'
+	exit 4
+elif [ "$trip_rc" -ne 0 ]; then
 	printf '\nA guarded surface moved. Investigate that before reading anything else.\n'
 	exit 4
 fi
