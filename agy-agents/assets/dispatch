@@ -136,7 +136,7 @@ cd "$ROOT" || die 2 "cannot cd to the repository root ($ROOT)"
 
 : "${AGY_WORKSPACE:=.agy/work}"
 : "${AGY_GATES:=}"
-: "${AGY_MODEL:=gemini-3.6-flash-high}"
+: "${AGY_MODEL:=gemini-3.7-flash-high}"
 : "${AGY_FALLBACK_MODEL:=claude-opus-4-6-thinking}"
 : "${AGY_FALLBACK:=auto}"
 : "${AGY_EFFORT:=high}"

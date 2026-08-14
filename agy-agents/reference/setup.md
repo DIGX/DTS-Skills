@@ -81,7 +81,7 @@ mkdir -p /tmp/agy-smoke && cd /tmp/agy-smoke && git init -q .
 agy --print "Create a file called hello.txt containing the word ok." \
     --add-dir "$PWD" \
     --output-format stream-json \
-    --model gemini-3.6-flash-high \
+    --model gemini-3.7-flash-high \
     --mode accept-edits \
     --print-timeout 5m | tail -3
 cat hello.txt

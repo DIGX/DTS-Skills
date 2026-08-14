@@ -141,6 +141,15 @@ review package. Then:
   A finding here is **adjudicated by the controller, not fixed by the
   implementer**: correct the brief, record the correction as a ruling in the
   ledger, and re-dispatch if the landed work is now wrong.
+- **Grade the acceptance criteria as claims to falsify, not as work to
+  summarise.** Left to itself an implementer fills that table in as a report of
+  what it did: every row restates the action it took, so a row reads ✅ because
+  the work happened, not because the criterion holds. The reviewer must take
+  each criterion and try to break it — name the input or state under which it
+  would fail, then check whether the code survives that. A criterion nobody
+  attempted to falsify is not satisfied, it is **unverified**, and it is
+  reported ❌ with what a test of it would take. This is the same rule the rest
+  of the harness runs on: an absent measurement is never a pass.
 - Tell it to write the full review to `<workspace>/task-N-review.md` and reply
   with only the verdicts, counts, and one line per Critical/Important finding.
 - **Declare authorship honestly** — say which code came from the implementer and
@@ -148,8 +157,12 @@ review package. Then:
   Controller-authored code fails review at a similar rate; hiding it wastes the
   reviewer.
 - Do **not** pre-judge. If the prompt you are writing contains "do not flag",
-  "at most Minor", or "the plan chose" — stop. Let the reviewer raise it, then
-  adjudicate it in the loop.
+  "at most Minor", "the plan chose", "is NOT a defect", or "flag only if" —
+  stop. Let the reviewer raise it, then adjudicate it in the loop. The last two
+  are the ones that get written by accident: they arrive dressed as helpful
+  context about deliberately preserved behaviour, and a conditional licence to
+  flag ("only if undocumented") is still a verdict the controller reached before
+  the reviewer looked.
 - **Re-execute any output the report pastes as proof; do not read it.** This
   costs seconds and is the only check that distinguishes real output from
   output that was tidied. Every number in a hand-trimmed block can be true

@@ -321,7 +321,7 @@ else
 # Gemini is primary. The Claude/GPT group is a separate quota bucket that
 # drains much faster for the same work, so it is a reserve, entered only on a
 # clear *weekly* Gemini exhaustion. See .agy/dispatch's header.
-: "\${AGY_MODEL:=gemini-3.6-flash-high}"
+: "\${AGY_MODEL:=gemini-3.7-flash-high}"
 : "\${AGY_FALLBACK_MODEL:=claude-opus-4-6-thinking}"
 : "\${AGY_FALLBACK:=auto}"
 : "\${AGY_EFFORT:=high}"
@@ -408,7 +408,7 @@ subst() {
 		-e "s#{{GATES}}#$GATES#g" \
 		-e "s#{{PLAN_PATH}}#${PLAN:-<no plan recorded>}#g" \
 		-e "s#{{PROTOCOL}}#$SKILL_DIR/reference/protocol.md#g" \
-		-e "s#{{MODEL}}#gemini-3.6-flash-high#g" \
+		-e "s#{{MODEL}}#gemini-3.7-flash-high#g" \
 		-e "s#{{FALLBACK_MODEL}}#claude-opus-4-6-thinking#g" \
 		"$1"
 }

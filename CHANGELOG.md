@@ -11,11 +11,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### [1.8.1] — 2026-08-14
 
-One report, from a repo that has its own `scripts/tripwire` alongside
-`.agy/tripwire`. It is the mirror of the flaw fixed in 1.7.x, where a guard
-path that was not on disk fingerprinted nothing and the fence reported clean:
-this time the control does not silently pass, it confidently fails — against
-the wrong target.
+Three reports from one day of field use. The first is the mirror of the flaw
+fixed in 1.7.x, where a guard path that was not on disk fingerprinted nothing
+and the fence reported clean: this time the control does not silently pass, it
+confidently fails — against the wrong target. The other two are both the
+reviewer being told, in one way or another, what to conclude before it looked.
 
 #### Fixed
 - **`tripwire verify` compares the baseline's surface set against the config
@@ -45,6 +45,27 @@ the wrong target.
   to the config; `VIOLATED` sends them to the implementer's diff. Collapsing
   them meant a run that touched nothing could read as a compromised one.
   Neither is a pass: both still exit 4.
+
+- **The reviewer grades acceptance criteria as claims to falsify, not as work
+  to summarise.** Reported often enough to stop being a per-brief problem: left
+  to itself, an implementer fills that table in as a report of what it did.
+  Every row restates the action taken, so a row reads ✅ because the work
+  happened rather than because the criterion holds — and the reviewer, handed a
+  completed table, confirms it. The contract now tells the reviewer to take each
+  criterion and try to break it: name the input or state under which it would
+  fail, then check whether the code survives. A criterion nobody attempted to
+  falsify is not satisfied, it is **unverified**, and it is reported ❌. This is
+  the rule the rest of the harness already runs on, applied where it was
+  missing: an absent measurement is never a pass. It lives in the reviewer
+  contract now, so it stops having to be written into every brief by hand.
+
+- **The pre-judging ban names the phrasings that actually get written.** It
+  listed "do not flag", "at most Minor" and "the plan chose" — the shapes a
+  controller writes deliberately. The one that gets written by accident looks
+  like helpful context about behaviour that was preserved on purpose: *"these
+  are NOT a defect — flag only if undocumented."* That is a verdict the
+  controller reached before the reviewer looked, and a conditional licence to
+  flag is still a verdict. Both phrasings are now in the list.
 
 ### [1.8.0] — 2026-08-13
 

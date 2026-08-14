@@ -147,7 +147,7 @@ The documented flat shape is wrong. Real `--output-format stream-json` events
 are **nested** under a key matching `event`:
 
 ```json
-{"event":"init","init":{"model":"gemini-3.6-flash-high","cwd":"..."}}
+{"event":"init","init":{"model":"gemini-3.7-flash-high","cwd":"..."}}
 {"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"..."}}
 {"event":"result","result":{"status":"SUCCESS","response":"...","num_turns":2}}
 ```
@@ -195,7 +195,21 @@ AGY_FALLBACK=off   .agy/dispatch 4    # never touch the reserve
 
 ### Model IDs
 
+Do not copy this list on faith — read it off the CLI:
+
+```bash
+agy models < /dev/null        # <id><TAB><display name>
 ```
+
+**`agy models` hangs if it inherits an open stdin.** It produces no output and
+no error; it simply sits there until something kills it. Redirect stdin and it
+answers in about a second. Worth knowing beyond this one subcommand: a headless
+`agy` invocation should never be handed a stdin it might read from.
+
+As of v1.1.12 (`gemini-3.7-flash-high` is the harness default):
+
+```
+gemini-3.7-flash-high | -medium | -low
 gemini-3.6-flash-high | -medium | -low
 gemini-3.5-flash-high | -medium | -low
 gemini-3.1-pro-high   | -low
@@ -204,12 +218,16 @@ claude-opus-4-6-thinking
 gpt-oss-120b-medium
 ```
 
+The 1.1.12 release notes advertise `--output-format json` on `models` and
+`agents`. The 1.1.12 binary rejects it (`flags provided but not defined`), so
+parse the tab-separated form above.
+
 Effort appears in two places: as a suffix on the Gemini IDs, and as a real
 session flag — `agy --help` lists `--effort (low|medium|high)`. `.agy/dispatch`
 passes `--effort "$AGY_EFFORT"` on **every** model, including the suffixed ones.
 
 Which one wins when they disagree is not something this project has pinned down,
-so keep them consistent: if you set `AGY_MODEL=gemini-3.6-flash-low`, set
+so keep them consistent: if you set `AGY_MODEL=gemini-3.7-flash-low`, set
 `AGY_EFFORT=low` too rather than relying on one to override the other.
 
 ## Reading a verdict block

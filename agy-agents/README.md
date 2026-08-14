@@ -187,7 +187,7 @@ The documented flat shape is wrong. Real `--output-format stream-json` events
 are **nested** under a key matching `event`:
 
 ```json
-{"event":"init","init":{"model":"gemini-3.6-flash-high","cwd":"..."}}
+{"event":"init","init":{"model":"gemini-3.7-flash-high","cwd":"..."}}
 {"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"..."}}
 {"event":"result","result":{"status":"SUCCESS","response":"...","num_turns":2}}
 ```
@@ -488,7 +488,7 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_WORKSPACE` | where briefs, dispatches, reports and logs live |
 | `AGY_LEDGER` | the progress file; guarded as a file surface |
 | `AGY_GATES` | path to the gate runner. **Empty is a hard failure**, not a pass |
-| `AGY_MODEL` | primary implementer (`gemini-3.6-flash-high`) |
+| `AGY_MODEL` | primary implementer (`gemini-3.7-flash-high`) |
 | `AGY_FALLBACK_MODEL` | reserve, weekly exhaustion only (`claude-opus-4-6-thinking`) |
 | `AGY_FALLBACK` | `auto` \| `force` \| `off` |
 | `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
@@ -525,7 +525,7 @@ nothing, and a fence guarding nothing reports **clean**. Put the path in
 ### Model IDs
 
 ```
-gemini-3.6-flash-high | -medium | -low
+gemini-3.7-flash-high | -medium | -low
 gemini-3.5-flash-high | -medium | -low
 gemini-3.1-pro-high   | -low
 claude-sonnet-4-6
