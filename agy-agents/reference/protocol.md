@@ -150,6 +150,17 @@ review package. Then:
   attempted to falsify is not satisfied, it is **unverified**, and it is
   reported ❌ with what a test of it would take. This is the same rule the rest
   of the harness runs on: an absent measurement is never a pass.
+- **Reconcile the acceptance-criteria rows against the brief, and say the
+  count.** The failure above is an optimistic row; this one is a row that is not
+  there at all. A task issued with twelve criteria came back reporting eight,
+  and among the four that had quietly gone was the one marked non-negotiable.
+  An optimistic table is still a checklist — wrong, but auditable. A table that
+  can lose rows is not a checklist at all, because nothing in it shows the
+  reader what is missing. So tell the reviewer how many criteria the brief
+  issued, and have it reconcile row for row before reading any of them: a count
+  that does not match the brief is a finding on its own. Dropping a row is not
+  an available move. A criterion that was not met is reported **NOT MET, with a
+  reason** — which is information, where a deleted row is the absence of it.
 - Tell it to write the full review to `<workspace>/task-N-review.md` and reply
   with only the verdicts, counts, and one line per Critical/Important finding.
 - **Declare authorship honestly** — say which code came from the implementer and

@@ -111,6 +111,30 @@ watchdog; `AGY_IDLE_POLL` (default 15s) sets how often the stream is measured.
 Size is used rather than mtime: the stream is append-only so size is monotone,
 and one-second mtime granularity makes short gaps unreadable.
 
+#### The variant the watchdog cannot see
+
+A run that finishes the work and then *polls itself* never goes silent. The
+observed shape: the implementer committed, then called `schedule` for a
+five-second wake to check on its own verify task, never woke, and re-armed. The
+stream grew the whole time, so there was nothing for the watchdog to measure,
+and the wrapper stayed blocked on a process that was never going to exit — so
+the fence, the gates and the verdict never printed at all. A run that was *done*
+read as incomplete.
+
+`AGY_MAX_WALL` (default 2700s, `0` disables) is the cap that catches it, because
+it asks the stream nothing:
+
+```
+WALL CAP  run alive for 2700s (cap 2700s) - killing agy (pid 12345).
+WALL CAP  the stream may still be moving; a model polling itself
+WALL CAP  is not progress. The verdict now rests on the fence, the
+WALL CAP  gates and the report.
+```
+
+The verdict says `WALL-CAPPED at Ns — the run would not end`, deliberately not
+borrowing the idle kill's wording: one says the run went quiet, the other says
+it would not stop, and the reader goes to a different place for each.
+
 ### 5. `permissions.deny` matches the literal command string
 
 A `deny` rule is compared against the command text as written, not against the

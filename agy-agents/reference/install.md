@@ -150,6 +150,7 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |
 | `AGY_IDLE_TIMEOUT` | seconds of event-stream silence before a run is presumed hung (`300`; `0` disables) |
+| `AGY_MAX_WALL` | seconds of total run time before a livelocked run is capped, silent or not (`2700`; `0` disables) |
 | `AGY_IDLE_POLL` | how often the stream is measured (`15`) |
 | `AGY_GUARD_DIRS` | directories fenced by content hash |
 | `AGY_GUARD_FILES` | individual files fenced by content hash; `~` expands |

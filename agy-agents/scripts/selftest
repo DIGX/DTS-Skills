@@ -92,6 +92,20 @@ if [ -n "${FAKE_HANG:-}" ]; then
 	exit 0
 fi
 
+# Trap 4, livelock variant: the run does the work, writes its report, and then
+# parks itself in a poll loop — scheduling a short wake to check on its own
+# task, and re-arming when it fires. Observed twice on the same tool call. The
+# stream never goes quiet, so the idle watchdog has nothing to measure; only a
+# cap on total elapsed time can tell this apart from a run still working.
+if [ -n "${FAKE_LIVELOCK:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
+	[ -n "${FAKE_REPORT:-}" ] && printf 'the work, as written by the run that then would not stop\n\n## Observations\nNone.\n' > "$FAKE_REPORT"
+	while :; do
+		printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"schedule","tool_info":{"name":"schedule","parameters":{"DurationSeconds":5,"Prompt":"Check on verify task"}}}}'
+		sleep 1
+	done
+fi
+
 # Trap 4, chatty variant: the run does the work and writes its report, and then
 # the session dies on its own — agy's own --print-timeout expiring, an internal
 # error, a dropped connection — without ever emitting `result`. The watchdog
@@ -525,6 +539,26 @@ has  "  names it as a leftover" "predates this run" "$TMP/w3.log"
 # A hang must never be read as an exhausted bucket: there is no result event to
 # classify, so classifying one would let a hang spend the scarce reserve group.
 hasnt "  a hang never burns the reserve" "RESERVE GROUP BURNED" "$TMP/w1.log"
+
+# The livelock. Both caps are armed, and the idle watchdog is given the tighter
+# deadline (3s against the cap's 5s) — it still never fires, because the stub
+# emits an event every second for as long as it is allowed to live. That is the
+# whole point of the test: if the wall cap is removed, this run does not fail,
+# it never returns at all.
+rm -f "$REPORT_9"
+FAKE_LIVELOCK=1 FAKE_REPORT="$REPORT_9" FAKE_ERROR=none \
+AGY_MAX_WALL=5 AGY_IDLE_TIMEOUT=3 AGY_IDLE_POLL=1 AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/c1.log" 2>&1
+want "a livelocked run is capped, not waited out" 0 $?
+has  "  says the wall cap fired"        "WALL CAP" "$TMP/c1.log"
+has  "  labels the verdict"             "WALL-CAPPED" "$TMP/c1.log"
+has  "  still prints the fence"         "fence" "$TMP/c1.log"
+# The two kills send a reader to different places, so the verdict must not
+# borrow the other's vocabulary: a stream that never went quiet was not idle.
+hasnt "  does not blame the idle watchdog" "WATCHDOG-KILLED" "$TMP/c1.log"
+# Same reasoning as the hang: no result event means nothing to classify, and
+# classifying one would let a livelock spend the scarce reserve group.
+hasnt "  a livelock never burns the reserve" "RESERVE GROUP BURNED" "$TMP/c1.log"
 
 rm -f "$REPORT_9"
 

@@ -9,6 +9,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.2] — 2026-08-14
+
+Two more from the same day. Both are about a control that cannot see the thing
+it is supposed to catch — one because it measures the wrong quantity, one
+because it reads a table that the run being graded is allowed to edit.
+
+#### Added
+- **`AGY_MAX_WALL` — a cap on total elapsed time, default 2700s.** The idle
+  watchdog measures *silence*, so it cannot see a run that finished the work and
+  then parked itself in a poll loop: one observed failure committed at 13:28,
+  scheduled a five-second wake to check on its own verify task, never woke, and
+  was still alive when it was killed by hand eleven minutes later. The stream
+  kept growing the whole time, so the watchdog had nothing to measure, and
+  because the wrapper was still waiting on the process the fence, the gates and
+  the verdict never printed — a run that was *done* looked incomplete. This has
+  now happened twice on the same tool call, which is what moved it from a
+  curiosity to a cap.
+
+  The cap is tested before the stream is read, because the run it exists to
+  catch is one whose stream looks perfectly healthy. It is deliberately not the
+  same verdict as the idle kill: `WALL-CAPPED at Ns — the run would not end`
+  against `WATCHDOG-KILLED after Ns idle`. One says the run went quiet, the
+  other says it would not stop, and they send a reader to different places. As
+  with the idle kill, neither is a judgement on the work: the fence, the gates
+  and the report are all computable without the model's cooperation, and that is
+  what the verdict then rests on.
+
+#### Fixed
+- **The reviewer reconciles the acceptance-criteria table row for row against
+  the brief.** 1.8.1 stopped the rows being filled in optimistically. This is the
+  stronger version of the same failure: a task issued with twelve criteria came
+  back reporting eight, and among the four that had silently gone was a
+  regression tripwire marked non-negotiable. An optimistic table is at least
+  auditable — it is wrong in a way you can see. A table that can lose rows is
+  not a checklist at all, because nothing in it shows the reader what is
+  missing. The reviewer is now told how many criteria the brief issued and
+  reconciles the count before reading any row; a mismatch is a finding on its
+  own. The brief template says the same thing to the implementer: a criterion
+  that was not met is reported NOT MET with a reason, and rewording a criterion
+  to match what was built is not available either.
+
 ### [1.8.1] — 2026-08-14
 
 Three reports from one day of field use. The first is the mirror of the flaw

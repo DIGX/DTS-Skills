@@ -130,6 +130,14 @@ WATCHDOG  event stream silent for 300s - killing agy (pid 12345).
 WATCHDOG  the verdict now rests on the fence, the gates and the report.
 ```
 
+The same `schedule` call has a second failure mode, and it is the one the
+watchdog cannot see: the run wakes, finds its task unfinished, and re-arms. The
+stream keeps growing, so nothing reads as idle, and the wrapper waits on a
+process that will never exit — the fence, the gates and the verdict never print.
+`AGY_MAX_WALL` (default 2700s) caps total elapsed time regardless of what the
+stream is doing, and reports `WALL-CAPPED` rather than `WATCHDOG-KILLED`,
+because "it went quiet" and "it would not stop" are different problems.
+
 The watchdog catches the silent form. The **chatty** form emits events the whole
 time it is stuck, so the stream keeps growing, the watchdog never fires, and the
 run dies of agy's own `--print-timeout` with `timeout waiting for response` —
@@ -494,6 +502,7 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |
 | `AGY_IDLE_TIMEOUT` | seconds of stream silence before a run is presumed hung (`300`; `0` disables) |
+| `AGY_MAX_WALL` | seconds of total run time before a livelocked run is capped, silent or not (`2700`; `0` disables) |
 | `AGY_IDLE_POLL` | how often the stream is measured (`15`) |
 | `AGY_GUARD_DIRS` | directories fenced by content hash |
 | `AGY_GUARD_FILES` | individual files fenced by content hash; `~` expands |

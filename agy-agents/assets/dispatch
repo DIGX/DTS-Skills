@@ -154,6 +154,21 @@ cd "$ROOT" || die 2 "cannot cd to the repository root ($ROOT)"
 : "${AGY_IDLE_TIMEOUT:=300}"
 : "${AGY_IDLE_POLL:=15}"
 
+# Total wall seconds before the run is presumed livelocked, whatever the stream
+# is doing. The idle watchdog above measures *silence*, so it cannot see a model
+# that has finished the work and then parked itself in a poll loop — one
+# observed failure scheduled a 5-second wake to check its own verify task, never
+# woke, and re-armed: the stream kept growing, the run stayed alive, and the
+# fence, gates and verdict never printed because the wrapper was still waiting.
+# The work had been committed eleven minutes earlier. A cap on elapsed time is
+# the only control that sees this, because it asks nothing of the stream.
+#
+# 2700 is well past any healthy run observed (the longest legitimate implement
+# phase measured under 20 minutes) and well short of an afternoon. Neither cap
+# is a verdict: both hand the judgement to the fence, the gates and the report,
+# all three of which are computable without the model's cooperation. 0 disables.
+: "${AGY_MAX_WALL:=2700}"
+
 LOGDIR="$AGY_WORKSPACE/logs"
 
 case "$AGY_FALLBACK" in
@@ -264,6 +279,9 @@ fi
 if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
 	printf 'watchdog     kill after %ss of stream silence\n' "$AGY_IDLE_TIMEOUT"
 fi
+if [ "$AGY_MAX_WALL" -gt 0 ]; then
+	printf 'wall cap     kill after %ss total, silent or not\n' "$AGY_MAX_WALL"
+fi
 printf 'log          %s.ndjson\n\n' "$BASE"
 # Provisional. A fallback attempt writes to its own base, so the authoritative
 # path is printed again in the verdict block once the run is over; $LOG_BASE is
@@ -312,26 +330,42 @@ run_attempt() {
 	# is monotone, and a one-second mtime granularity makes short gaps
 	# unreadable. Both files count, so a run writing only to stderr still reads
 	# as alive.
-	local killed=0 idle=0
-	if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
-		local last_seen=-1 last_change now size n f
-		last_change="$(date +%s)"
+	local killed=0 idle=0 capped=0
+	if [ "$AGY_IDLE_TIMEOUT" -gt 0 ] || [ "$AGY_MAX_WALL" -gt 0 ]; then
+		local last_seen=-1 last_change now size n f began wall
+		began="$(date +%s)"
+		last_change="$began"
 		while kill -0 "$agy_pid" 2>/dev/null; do
 			sleep "$AGY_IDLE_POLL"
 			now="$(date +%s)"
-			n=0
-			for f in "$out.ndjson" "$out.stderr"; do
-				[ -f "$f" ] && n=$(( n + $(wc -c < "$f" 2>/dev/null || echo 0) ))
-			done
-			size="$n"
-			if [ "$size" != "$last_seen" ]; then
-				last_seen="$size"; last_change="$now"; continue
+
+			# The wall cap is tested before the stream is read, because the run
+			# it exists to catch is one whose stream looks perfectly healthy.
+			wall=$(( now - began ))
+			if [ "$AGY_MAX_WALL" -gt 0 ] && [ "$wall" -ge "$AGY_MAX_WALL" ]; then
+				capped=1
+				printf '\nWALL CAP  run alive for %ss (cap %ss) - killing agy (pid %s).\n' \
+					"$wall" "$AGY_MAX_WALL" "$agy_pid"
+				printf 'WALL CAP  the stream may still be moving; a model polling itself\n'
+				printf 'WALL CAP  is not progress. The verdict now rests on the fence, the\n'
+				printf 'WALL CAP  gates and the report.\n'
+			else
+				n=0
+				for f in "$out.ndjson" "$out.stderr"; do
+					[ -f "$f" ] && n=$(( n + $(wc -c < "$f" 2>/dev/null || echo 0) ))
+				done
+				size="$n"
+				if [ "$size" != "$last_seen" ]; then
+					last_seen="$size"; last_change="$now"; continue
+				fi
+				[ "$AGY_IDLE_TIMEOUT" -gt 0 ] || continue
+				idle=$(( now - last_change ))
+				[ "$idle" -lt "$AGY_IDLE_TIMEOUT" ] && continue
+				killed=1
+				printf '\nWATCHDOG  event stream silent for %ss - killing agy (pid %s).\n' "$idle" "$agy_pid"
+				printf 'WATCHDOG  the verdict now rests on the fence, the gates and the report.\n'
 			fi
-			idle=$(( now - last_change ))
-			[ "$idle" -lt "$AGY_IDLE_TIMEOUT" ] && continue
-			killed=1
-			printf '\nWATCHDOG  event stream silent for %ss - killing agy (pid %s).\n' "$idle" "$agy_pid"
-			printf 'WATCHDOG  the verdict now rests on the fence, the gates and the report.\n'
+
 			kill -TERM "$agy_pid" 2>/dev/null
 			for _ in 1 2 3 4 5; do
 				kill -0 "$agy_pid" 2>/dev/null || break
@@ -347,11 +381,12 @@ run_attempt() {
 
 	elapsed=$(( SECONDS - started ))
 
-	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" <<'NODE'
+	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" "$capped" <<'NODE'
 const fs = require('fs');
-const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg] =
+const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg, cappedArg] =
 	process.argv.slice(2);
 const killed = killedArg === '1';
+const capped = cappedArg === '1';
 
 // Real event shape (verified against agy 1.1.12 — the published docs describe
 // a flattened form that does not match the wire):
@@ -489,7 +524,8 @@ if (failed) {
 
 fs.writeFileSync(classPath,
 	`quota=${quota}\ntools=${tools.size}\nstatus=${status}\n` +
-	`killed=${killed ? 1 : 0}\nidle=${idleArg || 0}\ndeferred=${deferred ? 1 : 0}\n` +
+	`killed=${killed ? 1 : 0}\nidle=${idleArg || 0}\ncapped=${capped ? 1 : 0}\n` +
+	`deferred=${deferred ? 1 : 0}\n` +
 	`raw=${quotaRaw.replace(/\n/g, ' ')}\n`);
 
 const u = result.usage || {};
@@ -542,7 +578,11 @@ if (denials.length) {
 	console.log('      The run still exited 0 with status SUCCESS. Report is unreliable.');
 }
 if (deferred) {
-	console.log(killed
+	console.log(capped
+		? `\nNOTE  the wall cap killed this run after ${wall}s. The stream was still`
+			+ '\n      moving, so the idle watchdog had nothing to see — a model that'
+			+ '\n      finishes and then polls itself looks identical to one working.'
+		: killed
 		? `\nNOTE  watchdog killed this run after ${idleArg}s of stream silence.`
 		: '\nNOTE  the session ended before its result event — agy stopped on its own.');
 	console.log('      status, response and exit code are not judged; the evidence');
@@ -638,6 +678,7 @@ fi
 WATCHDOG_KILLED="$(read_class "$LAST_CLASS" killed)"
 DEFERRED="$(read_class "$LAST_CLASS" deferred)"
 WATCHDOG_IDLE="$(read_class "$LAST_CLASS" idle)"
+WALL_CAPPED="$(read_class "$LAST_CLASS" capped)"
 
 # Freshness is computed on every run, not just a deferred one: a report is only
 # evidence about THIS dispatch if this dispatch wrote it. Only the deferred path
@@ -820,6 +861,13 @@ else
 fi
 if [ "$stream_rc" -ne 0 ]; then
 	v run 'PROBLEMS — see run report above'
+elif [ "$WALL_CAPPED" = "1" ]; then
+	# Distinct from the idle kill on purpose. WATCHDOG-KILLED says the run went
+	# quiet; WALL-CAPPED says it would not stop, which is where a model that has
+	# already committed its work parks itself in a poll loop. The two send the
+	# reader to different places, so they must not share a line.
+	v run "clean, but WALL-CAPPED at ${AGY_MAX_WALL}s — the run would not end"
+	v '' 'the work stands on the report, the fence and the gates below'
 elif [ "$WATCHDOG_KILLED" = "1" ]; then
 	v run "clean, but WATCHDOG-KILLED after ${WATCHDOG_IDLE}s idle (agy failure 4)"
 	v '' 'the work stands on the report, the fence and the gates below'
