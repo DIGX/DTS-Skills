@@ -101,13 +101,36 @@
 
 set -uo pipefail
 
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-	printf 'dispatch: not a git repository.\n' >&2
-	exit 2
+# Every refusal below ends here, and it prints a verdict block to do it.
+#
+# The exit status was always right — a missing dispatch file has exited 2 since
+# the first version — but the status is the half of the signal that does not
+# survive the way the harness actually gets run. `.agy/dispatch 3 | tee log`
+# hands the caller tee's 0; so does a backgrounded wrapper that reports whether
+# it managed to start the job. What reaches the reader is then one line of prose
+# in a log that is otherwise shaped exactly like a clean run, and a controller
+# scanning for the verdict block finds nothing wrong because it finds nothing.
+#
+# So a refusal produces the same block a finished run produces, and its first
+# line is the one a controller reads first. Prose and status agree, and the
+# prose is the copy that cannot be swallowed by a pipe.
+die() { # die <exit-code> <headline> [extra lines...]
+	code="$1"; headline="$2"; shift 2
+	{
+		printf -- '\n--- verdict --------------------------------------------------------\n'
+		printf '  %-7s %s\n' run "DID NOT RUN — $headline"
+		while [ $# -gt 0 ]; do printf '  %-7s %s\n' '' "$1"; shift; done
+		printf '  %-7s %s\n' exit "$code"
+		printf '\n  Nothing was dispatched: no model was called and the tree is untouched.\n'
+	} >&2
+	exit "$code"
 }
-cd "$ROOT" || exit 1
 
-[ -f .agy/config ] || { printf 'dispatch: no .agy/config — run the agy-agents installer\n' >&2; exit 2; }
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || \
+	die 2 'not a git repository'
+cd "$ROOT" || die 2 "cannot cd to the repository root ($ROOT)"
+
+[ -f .agy/config ] || die 2 'no .agy/config' 'run the agy-agents installer in this repository'
 # shellcheck disable=SC1091
 . .agy/config
 
@@ -135,14 +158,14 @@ LOGDIR="$AGY_WORKSPACE/logs"
 
 case "$AGY_FALLBACK" in
 	auto|force|off) ;;
-	*) printf 'dispatch: AGY_FALLBACK must be auto, force or off (got %s)\n' "$AGY_FALLBACK" >&2; exit 2 ;;
+	*) die 2 "AGY_FALLBACK must be auto, force or off (got '$AGY_FALLBACK')" ;;
 esac
 
 AGY="$(command -v agy 2>/dev/null)"
 [ -n "$AGY" ] || AGY="$HOME/AppData/Local/agy/bin/agy.exe"
 if [ ! -x "$AGY" ]; then
-	printf 'dispatch: agy not found (looked for %s)\n' "$AGY" >&2
-	exit 127
+	die 127 "agy not found (looked for $AGY)" \
+		'read reference/setup.md — the CLI is not installed or not on PATH'
 fi
 
 CONTINUE=""
@@ -154,7 +177,7 @@ fi
 # The prompt stays one line on purpose: the implementer reads the same disk you
 # do, so a dispatch points at a file rather than quoting it.
 if [ "${1:-}" = "--file" ]; then
-	[ -f "${2:-}" ] || { printf 'dispatch: no such prompt file: %s\n' "${2:-}" >&2; exit 2; }
+	[ -f "${2:-}" ] || die 2 "no such prompt file: ${2:-(none given)}"
 	PROMPT="Read ${2} and execute it in full."
 	PROMPT_FILE="$2"
 	LABEL="$(basename "$2" | sed 's/\.[^.]*$//')"
@@ -162,14 +185,15 @@ if [ "${1:-}" = "--file" ]; then
 elif [ -n "${1:-}" ]; then
 	N="$1"
 	DISPATCH="$AGY_WORKSPACE/task-$N-dispatch.md"
-	[ -f "$DISPATCH" ] || { printf 'dispatch: no dispatch file at %s\n' "$DISPATCH" >&2; exit 2; }
+	[ -f "$DISPATCH" ] || die 2 "no dispatch file at $DISPATCH" \
+		'write the brief there first — the implementer is told to read it'
 	PROMPT="Read $DISPATCH and execute it in full."
 	PROMPT_FILE="$DISPATCH"
 	LABEL="task-$N"
 	REPORT="$AGY_WORKSPACE/task-$N-report.md"
 else
-	printf 'usage: .agy/dispatch [--continue] <task-number> | --file <path>\n' >&2
-	exit 2
+	die 2 'no task given' \
+		'usage: .agy/dispatch [--continue] <task-number> | --file <path>'
 fi
 
 # ------------------------------------------------------- the brief must be real
@@ -213,7 +237,7 @@ if [ "$unfilled" -ne 0 ] && [ "${AGY_ALLOW_UNFILLED:-0}" != "1" ]; then
 	printf 'succeed, the gates would pass, and the constraint you meant to impose\n' >&2
 	printf 'would simply not exist. Fill the lines above first.\n' >&2
 	printf 'Deliberate — a real {{...}} in the text? AGY_ALLOW_UNFILLED=1.\n' >&2
-	exit 2
+	die 2 'the brief is still a template' 'see the unfilled lines listed above'
 fi
 
 mkdir -p "$LOGDIR"
@@ -258,7 +282,7 @@ printf -- '--- arming fence ---------------------------------------------------\
 if ! bash .agy/tripwire snapshot "$SNAP"; then
 	printf '\ndispatch: REFUSING TO DISPATCH. The fence would not arm, and this run\n' >&2
 	printf 'auto-approves every tool call. Fix .agy/tripwire first.\n' >&2
-	exit 3
+	die 3 'the fence would not arm' 'the run auto-approves every tool call — unfenced is not an option'
 fi
 
 # ------------------------------------------------------------------ one attempt
@@ -475,10 +499,17 @@ console.log(pad('model'), init.model || '(unknown)');
 // Wall clock is measured by the caller. result.duration_seconds is NOT the run:
 // on a --continue it reports time since the *thread* started, which read
 // 21286s for a 246s run. Keep both, clearly labelled.
-console.log(pad('duration'), `${wall}s wall / ${result.duration_seconds ?? '?'}s thread-elapsed / ${result.num_turns ?? '?'} turns`);
+console.log(pad('duration'), `${wall}s wall / ${result.duration_seconds ?? '?'}s thread-elapsed`);
+// num_turns is agy's own bookkeeping and is not a count of what the run did:
+// runs reporting `1 turns` have carried two dozen recorded tool calls. Printed
+// alone it reads as a one-shot answer, which is the opposite of what happened,
+// so it never shares a line with a measurement again. The tool total beside it
+// is ours, counted off the stream.
+const toolCalls = [...tools.values()].reduce((a, b) => a + b, 0);
+console.log(pad('turns'), `${result.num_turns ?? '?'} (agy's own count — not a measure of the work; the tool total is)`);
 console.log(pad('tokens'), `in ${u.input_tokens ?? '?'}  out ${u.output_tokens ?? '?'}  think ${u.thinking_tokens ?? '?'}  total ${u.total_tokens ?? '?'}`);
 console.log(pad('tools'), tools.size
-	? [...tools].map(([n, c]) => `${n}x${c}`).join('  ')
+	? `${toolCalls} call(s) — ` + [...tools].map(([n, c]) => `${n}x${c}`).join('  ')
 	: deferred ? 'NONE recorded — but the stream was cut off; see the report and the diff'
 	           : 'NONE — the run touched nothing');
 // A stream that stops mid-flight is a floor, not a total. Presented as a run
@@ -668,6 +699,35 @@ printf -- '\n--- fence ---------------------------------------------------------
 bash .agy/tripwire verify "$SNAP"
 trip_rc=$?
 
+# ------------------------------------------------------------- what landed
+# `run clean` says the session behaved, not that it produced anything — and a
+# run that wrote no code reads exactly like one that implemented the task:
+# clean run, clean fence, green gates, a confident report. The tree is the only
+# thing that tells them apart, and until now nothing measured it.
+#
+# The workspace is excluded for the same reason the fence prunes it: it holds
+# the harness's own paper trail — the brief, the report, the logs — and a report
+# saying the work happened is not the work.
+LANDED_COMMITS=0
+LANDED_SUBJECT=""
+WAS_HEAD="$(awk -F'\t' '$1=="head"{print $2}' "$SNAP/git.txt" 2>/dev/null)"
+IS_HEAD="$(git rev-parse HEAD 2>/dev/null)"
+if [ -n "$WAS_HEAD" ] && [ -n "$IS_HEAD" ] && [ "$WAS_HEAD" != "$IS_HEAD" ] \
+	&& git merge-base --is-ancestor "$WAS_HEAD" "$IS_HEAD" 2>/dev/null; then
+	LANDED_COMMITS="$(git rev-list --count "$WAS_HEAD..$IS_HEAD" 2>/dev/null || printf 0)"
+	LANDED_SUBJECT="$(git --no-pager log -1 --format=%s "$IS_HEAD" 2>/dev/null)"
+fi
+LANDED_DIRTY="$(git status --porcelain -- . ":(exclude)$AGY_WORKSPACE" 2>/dev/null | grep -c . || true)"
+# Work on disk and nothing in history is not a judgement call: the brief's own
+# definition of done requires the commit, so the run did not finish. Observed
+# twice running with the harness reporting SUCCESS both times and the controller
+# committing by hand — which also means the next run starts on a dirty tree and
+# inherits work it never made. Whether a task *should* commit stays unknowable
+# (an investigation legitimately produces none), but that case leaves nothing
+# outside the workspace, so it never reaches here.
+LANDED_RC=0
+[ "${LANDED_COMMITS:-0}" -eq 0 ] && [ "${LANDED_DIRTY:-0}" -gt 0 ] && LANDED_RC=1
+
 # ------------------------------------------------------------------- run gates
 printf -- '\n--- gates ----------------------------------------------------------\n'
 if [ "${AGY_SKIP_GATES:-0}" = "1" ]; then
@@ -774,6 +834,16 @@ else
 	v run 'clean'
 fi
 if [ "$trip_rc"  -eq 0 ]; then v fence 'clean — no guarded surface moved'; else v fence 'VIOLATED — see fence section above'; fi
+if [ "${LANDED_COMMITS:-0}" -gt 0 ]; then
+	v landed "$LANDED_COMMITS commit(s) — $LANDED_SUBJECT"
+	[ "${LANDED_DIRTY:-0}" -gt 0 ] && v '' "$LANDED_DIRTY uncommitted change(s) also in the tree"
+elif [ "${LANDED_DIRTY:-0}" -gt 0 ]; then
+	v landed "NOT COMMITTED — $LANDED_DIRTY change(s) outside the workspace, 0 commits"
+	v '' 'the definition of done was not met; the next run inherits a dirty tree'
+else
+	v landed 'NOTHING — no commit, and nothing changed outside the workspace'
+	v '' 'a report is not the work. Read the diff before accepting the task.'
+fi
 # Printed here as well as in the header because the header's copy was written
 # before any attempt ran. On a fallback the two differ, and this is the one a
 # reader acts on: it names the attempt that produced the work rather than the
@@ -793,7 +863,12 @@ if [ "$trip_rc" -ne 0 ]; then
 	printf '\nA guarded surface moved. Investigate that before reading anything else.\n'
 	exit 4
 fi
-if [ "$stream_rc" -ne 0 ] || [ "$gates_rc" -gt 0 ]; then
+if [ "$LANDED_RC" -ne 0 ]; then
+	printf '\nThe implementer changed the tree and committed nothing. Read the diff\n'
+	printf 'before anything else: the report describes work that is not in history,\n'
+	printf 'and committing it yourself makes the next run start on your commit.\n'
+fi
+if [ "$stream_rc" -ne 0 ] || [ "$gates_rc" -gt 0 ] || [ "$LANDED_RC" -ne 0 ]; then
 	exit 1
 fi
 exit 0

@@ -60,6 +60,17 @@ if [ -n "${FAKE_REPORT:-}" ] && [ -n "${FAKE_REPORT_TEXT:-}" ]; then
 	printf '%s\n' "$FAKE_REPORT_TEXT" > "$FAKE_REPORT"
 fi
 
+# What the run leaves on the tree, which is the only evidence that separates a
+# run that implemented the task from one that only described it. FAKE_TOUCH
+# writes a file; FAKE_COMMIT commits it the way the protocol expects.
+if [ -n "${FAKE_TOUCH:-}" ]; then
+	printf 'implemented\n' > "$FAKE_TOUCH"
+	if [ -n "${FAKE_COMMIT:-}" ]; then
+		git add -A >/dev/null 2>&1
+		git commit -qm "task work: $FAKE_TOUCH" >/dev/null 2>&1
+	fi
+fi
+
 # A blocked call, followed by the same call wearing a wrapper the deny rule
 # does not recognise. Both lines are in the stream; only the pair means anything.
 if [ -n "${FAKE_BYPASS:-}" ]; then
@@ -167,6 +178,28 @@ proto="$(sed -n 's/^`\(.*protocol\.md\)`$/\1/p' .claude/skills/agy-task-cycle/SK
 # independent check in the loop, and leaves a task that looks fully reviewed.
 # The protocol has to name a state to park the task in: a prohibition with no
 # exit is a deadlock, and a deadlock is what gets negotiated away under pressure.
+# The project skill is written once, at install, and then survives every
+# milestone the project goes through. Anything the installer failed to render
+# stays on screen forever as a literal marker, and the "Local rulings" section —
+# the one place designed to survive a /clear — is where that had happened.
+hasnt "the installed project skill renders every marker" "{{" \
+	.claude/skills/agy-task-cycle/SKILL.md
+# And it must not restate the workspace: the path carries the milestone slug, so
+# a copy of it here is a binding that goes stale silently while every script
+# keeps using the real one from .agy/config.
+hasnt "the project skill does not hard-code the milestone workspace" ".agy/work/m" \
+	.claude/skills/agy-task-cycle/SKILL.md
+
+# The one defect the loop cannot otherwise see: a brief whose invariants do not
+# follow from its rules produces exact compliance, a clean review and green
+# gates. The controller wrote the brief, so the reviewer is the last agent that
+# can catch it — and it will not unless it is asked.
+has "the reviewer is asked to grade the brief itself" "Brief integrity" "$proto"
+has "  and told the invariants must follow from the rules" \
+	"stated invariants actually follow from" "$proto"
+has "  and that a brief defect is the controller's to adjudicate" \
+	"adjudicated by the controller" "$proto"
+
 has "the protocol names a HELD state for an unavailable reviewer" "HELD" "$proto"
 has "  and forbids the controller reviewing its own work" \
 	"substitute yourself for the reviewer" "$proto"
@@ -347,6 +380,19 @@ rm -f .agy/work/m1/task-8-dispatch.md
 printf '\n=== dispatch =======================================================\n'
 bash .agy/dispatch 404 >"$TMP/d0.log" 2>&1
 want "refuses a missing dispatch file" 2 $?
+# The status was always right; it is the half of the signal a pipe eats.
+# `.agy/dispatch 3 | tee log` hands the caller tee's 0, and what is left in the
+# log has to say by itself that nothing ran — otherwise a refusal reads like a
+# clean run to anything that only reads the output.
+has "  a refusal prints a verdict block of its own" "--- verdict" "$TMP/d0.log"
+has "  whose first line is the one a controller reads" "run     DID NOT RUN" "$TMP/d0.log"
+has "  carrying the exit code in the text"            "exit    2"  "$TMP/d0.log"
+has "  and saying the tree is untouched"              "no model was called" "$TMP/d0.log"
+
+bash .agy/dispatch >"$TMP/d0b.log" 2>&1
+want "refuses with no task at all" 2 $?
+has  "  in the same shape"  "DID NOT RUN — no task given" "$TMP/d0b.log"
+has  "  and still shows the usage" "usage: .agy/dispatch" "$TMP/d0b.log"
 
 # The binary that answered, printed on every run. A Windows-form PATH entry is
 # accepted and then never searched on MSYS, so the stub you exported can be
@@ -358,6 +404,7 @@ AGY_GUARD_DIRS=".agy .claude docs hollow2" AGY_REQUIRE="hollow2" \
 	bash .agy/dispatch 9 >"$TMP/d1.log" 2>&1
 want "refuses to dispatch when the fence will not arm" 3 $?
 has  "  says why" "REFUSING TO DISPATCH" "$TMP/d1.log"
+has  "  and reports it as a run that never happened" "DID NOT RUN" "$TMP/d1.log"
 
 run_dispatch() { # run_dispatch <label> <FAKE_ERROR> <AGY_FALLBACK> <expected-rc> <log>
 	FAKE_ERROR="$2" AGY_FALLBACK="$3" AGY_SKIP_GATES=1 \
@@ -549,6 +596,69 @@ None.' \
 want "a report carrying it passes" 0 $?
 rm -f "$REPORT_9"
 
+printf '\n=== what landed ====================================================\n'
+# `run clean` describes the session, not its output. A run that wrote no code at
+# all produces the same four lines as one that implemented the task — clean run,
+# clean fence, green gates — and the verdict is the line a controller reads
+# first. The tree is what separates them, so the verdict has to name it.
+REPORT_OK='Done.
+
+## Observations
+None.'
+
+landing() { # landing <log> [FAKE_TOUCH] [FAKE_COMMIT]
+	rm -f "$REPORT_9"
+	FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+	FAKE_TOUCH="${2:-}" FAKE_COMMIT="${3:-}" AGY_SKIP_GATES=1 \
+		bash .agy/dispatch 9 >"$1" 2>&1
+}
+
+landing "$TMP/l1.log"
+want "a run that produced nothing still exits 0" 0 $?
+has  "  the verdict says NOTHING landed" "landed  NOTHING" "$TMP/l1.log"
+has  "  and says why that matters"       "a report is not the work" "$TMP/l1.log"
+
+# The report is written into the workspace on every run. If the workspace
+# counted, every run would look productive — which is the failure restated.
+hasnt "  the workspace's own paper trail does not count as work" \
+	"uncommitted change(s) outside" "$TMP/l1.log"
+
+landing "$TMP/l2.log" "src/landed.txt"
+want "work left uncommitted FAILS the run"  1 $?
+has "  and is named as such"                "NOT COMMITTED" "$TMP/l2.log"
+has "  counts the changes"                  "1 change(s) outside the workspace" "$TMP/l2.log"
+has "  and says what to do about it"        "committing it yourself" "$TMP/l2.log"
+rm -f src/landed.txt   # not `git checkout -- .`: the filled context is uncommitted
+
+landing "$TMP/l3.log" "src/committed.txt" 1
+has   "a committed run reports the commit" "landed  1 commit(s)" "$TMP/l3.log"
+has   "  quotes its subject"               "task work: src/committed.txt" "$TMP/l3.log"
+hasnt "  does not claim nothing landed"    "landed  NOTHING" "$TMP/l3.log"
+
+# agy reports `1 turns` on runs carrying two dozen recorded tool calls. On one
+# line with the durations it reads as a one-shot answer; the count that means
+# something is the one measured off the stream.
+has "the turn count is labelled agy's own" "agy's own count" "$TMP/l3.log"
+has "the tool line totals the calls"       "call(s) —"       "$TMP/l3.log"
+hasnt "the duration line no longer carries turns" "thread-elapsed / " "$TMP/l3.log"
+
+rm -f "$REPORT_9"
+
+printf '\n=== review package =================================================\n'
+# The reviewer's contract lives in protocol.md, which a reviewer subagent may
+# never read. The package is the one file it is guaranteed to open, so the three
+# verdicts have to be printed into it — brief integrity first, because a
+# reviewer asked only "does the diff match the brief" confirms a faithful
+# implementation of a wrong rule.
+PKG_OUT="$(bash .agy/review-pkg HEAD~1 task-9 2>&1)"
+want "review-pkg builds a package" 0 $?
+PKG="$(printf '%s' "$PKG_OUT" | awk '{print $1}')"
+has "  it demands three verdicts"          "Three verdicts are required" "$PKG"
+has "  brief integrity is the first"       "1. **Brief integrity**"      "$PKG"
+has "  asked as a question about the rules" "actually follow from its stated rules" "$PKG"
+has "  and routed to the controller"       "controller to adjudicate"    "$PKG"
+has "  the diff is still there"            "## Diff (-U10)"              "$PKG"
+
 printf '\n=== idempotency ====================================================\n'
 printf '\n# EDITED BY THE USER\n' >> .agy/config
 printf '\n# EDITED BY THE USER\n' >> .agy/gates
@@ -585,6 +695,52 @@ has "the dispatch template names the adopted runner" "scripts/gates" \
 [ -f "$ADOPT/.agy/gates" ] \
 	&& bad "adoption does not write a competing runner" "wrote .agy/gates anyway" \
 	|| ok "adoption does not write a competing runner"
+
+printf '\n=== milestone advance ==============================================\n'
+# A project outlives the milestone it was installed on. Passing --milestone used
+# to scaffold the new workspace and change nothing else: the adoption scan
+# ignored the flag whenever any workspace was already on disk, and a config that
+# exists is kept. So .agy/work/m6 appeared, AGY_WORKSPACE still said m5, and the
+# only file that named a milestone out loud — the project skill — kept naming
+# the one from install day. Everything still ran; it ran on the old milestone.
+cd "$REPO" || exit 1
+printf '\n# EDITED BY THE USER\n' >> .agy/config
+bash "$SKILL_DIR/scripts/install" --milestone m2 >"$TMP/m1.log" 2>&1
+want "installing a new milestone exits 0" 0 $?
+
+[ -f .agy/work/m2/progress.md ] \
+	&& ok "scaffolds the new workspace" \
+	|| bad "scaffolds the new workspace" "no .agy/work/m2/progress.md"
+
+ws="$(unset AGY_WORKSPACE; . ./.agy/config >/dev/null 2>&1; printf '%s' "${AGY_WORKSPACE:-}")"
+[ "$ws" = ".agy/work/m2" ] \
+	&& ok "repoints AGY_WORKSPACE at it" \
+	|| bad "repoints AGY_WORKSPACE at it" "config still resolves to '${ws:-<empty>}'"
+has "  says so out loud"           "repoint"            "$TMP/m1.log"
+has "  offers the context carry-over" "dispatch-context.md" "$TMP/m1.log"
+
+# The repoint edits one line. If it regenerated the config instead it would take
+# the gates, the models and the project environment with it — which is exactly
+# why --force was never an acceptable way to advance a milestone.
+has "  keeps the rest of an edited config" "EDITED BY THE USER" .agy/config
+[ -f .agy/work/m1/progress.md ] \
+	&& ok "  leaves the finished milestone on disk" \
+	|| bad "  leaves the finished milestone on disk" "m1 was removed"
+
+# With two milestones on disk, a bare re-run must not wander back to the older
+# one. The glob would have: m1 sorts first.
+bash "$SKILL_DIR/scripts/install" >"$TMP/m2.log" 2>&1
+ws="$(unset AGY_WORKSPACE; . ./.agy/config >/dev/null 2>&1; printf '%s' "${AGY_WORKSPACE:-}")"
+[ "$ws" = ".agy/work/m2" ] \
+	&& ok "a later bare re-install stays on the current milestone" \
+	|| bad "a later bare re-install stays on the current milestone" "rebound to '$ws'"
+
+# A repoint that cannot find the line it is meant to rewrite must say so rather
+# than report a move it did not make.
+printf 'AGY_WORKSPACE=.agy/work/mX\n' >> .agy/config
+bash "$SKILL_DIR/scripts/install" --milestone m3 >"$TMP/m3.log" 2>&1
+has "an unmatched binding fails loudly" "COULD NOT REPOINT" "$TMP/m3.log"
+has "  and counts as a problem" "need attention" "$TMP/m3.log"
 
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"

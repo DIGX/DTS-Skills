@@ -214,15 +214,41 @@ so keep them consistent: if you set `AGY_MODEL=gemini-3.6-flash-low`, set
 
 ## Reading a verdict block
 
-Every dispatch ends with three judgements and the path to the evidence behind
-them. Anything other than clean / clean / green stops the cycle.
+Every dispatch ends with the harness's judgements and the path to the evidence
+behind them. Anything other than clean / clean / green stops the cycle.
 
 | Line | Means |
 |---|---|
 | `run` | the harness's own reading of the event stream, not `$?` |
 | `fence` | guarded surfaces before vs after — a violation names the files |
+| `landed` | what the run put in the tree: commits, uncommitted changes, or nothing |
 | `log` | the event stream of the attempt that produced this verdict |
 | `gates` | the project's verification suite, run by the harness |
+
+`landed` exists because every other line in the block describes how the session
+behaved, and a run that produced no code behaves perfectly: clean run, clean
+fence, green gates, and a report describing work that is not on disk. Three
+forms:
+
+- `landed  N commit(s) — <subject>` — history moved. The normal outcome.
+- `landed  NOT COMMITTED — N change(s) outside the workspace, 0 commits` —
+  **the run fails on this** (exit 1). The brief's definition of done requires
+  the commit, so a tree full of changes and an empty history is an unfinished
+  task, not a style question. Read the diff before doing anything with it: the
+  next run starts on top of whatever is sitting there, and if you commit it
+  yourself the ledger records your commit for the implementer's work.
+- `landed  NOTHING — no commit, and nothing changed outside the workspace` —
+  reports, does not fail: an investigation task legitimately produces no code.
+  Read the diff before accepting anything in the report.
+
+The workspace is excluded from the count for the same reason the fence prunes
+it: the brief, the report and the logs are the harness's own paper trail, and
+every run writes them. Counting them would make every run look productive,
+which is the failure restated rather than fixed.
+
+`turns` is agy's own count and is printed on its own line for that reason: runs
+reporting `1 turns` have carried two dozen recorded tool calls. The measured
+number is the tool total beside it, counted off the event stream.
 
 The header prints a `log` line too, but it does so before any attempt runs, so
 it is provisional. On a quota fallback the reserve attempt writes to
@@ -246,12 +272,36 @@ harness with one word for both teaches you to discount that word.
 
 ## When the dispatch refuses to start
 
-Three refusals happen before `agy` is ever called. All three are the harness
-telling you it cannot produce a trustworthy verdict — none is a bug to work
-around.
+Refusals happen before `agy` is ever called. Each is the harness telling you it
+cannot produce a trustworthy verdict — none is a bug to work around.
+
+Every one of them prints a verdict block of its own, headed
+`run  DID NOT RUN — <reason>` and carrying its own exit code as text:
+
+```
+--- verdict --------------------------------------------------------
+  run     DID NOT RUN — no dispatch file at .agy/work/m6/task-7-dispatch.md
+          write the brief there first — the implementer is told to read it
+  exit    2
+
+  Nothing was dispatched: no model was called and the tree is untouched.
+```
+
+The exit code was always correct, but it is the half of the signal that does not
+survive how the harness gets run: `.agy/dispatch 3 | tee run.log` returns
+**tee's** `0`, and so does a wrapper that reports whether it managed to start
+the job in the background. What is left is a log otherwise shaped like a clean
+run. So the refusal says it in the output too, in the same block a finished run
+prints, and a reader that only ever sees stdout still cannot mistake it for
+work. When you do want the status, run the dispatch unpiped — or read
+`${PIPESTATUS[0]}` rather than `$?`.
 
 | Message | Exit | Why |
 |---|---|---|
+| `no dispatch file at <path>` | 2 | The brief does not exist. The implementer is told to read that path, so there is nothing to run. |
+| `no task given` | 2 | Called with no arguments. |
+| `no .agy/config` | 2 | Not an installed repo. |
+| `agy not found` | 127 | The CLI is not on `PATH` — see `setup.md`. |
 | `is still a template — N unfilled line(s)` | 2 | A `{{marker}}` survives in the shared context or the task brief. Every agent inherits that file; an unfilled constraint reads as no constraint, and no gate can catch what was never specified. Fill it, or `AGY_ALLOW_UNFILLED=1` if the text genuinely needs `{{...}}`. |
 | `guarded directory does not exist` / `guarded file does not exist` | 3 | A path in `AGY_GUARD_DIRS`/`AGY_GUARD_FILES`/`AGY_GUARD_TREE` is not on disk, so it would fingerprint nothing and the fence would report clean. Usually a moved path — or a path with a space written on one line, which splits into fragments that do not exist. Write guard lists **one path per line**. |
 | `surface X came back EMPTY` | 3 | The path exists but fingerprinted zero files, and `AGY_REQUIRE` says it must not. The fingerprinter broke; a broken fence that says "clean" is worse than no fence. |

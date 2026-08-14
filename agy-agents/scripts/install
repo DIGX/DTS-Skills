@@ -6,7 +6,7 @@
 #
 #   --root <path>        project root (default: git root of the cwd)
 #   --project <name>     display name (default: the root directory's name)
-#   --milestone <slug>   workspace slug (default: m1)
+#   --milestone <slug>   workspace slug (default: m1, or the one already bound)
 #   --workspace <path>   use an existing workspace instead of .agy/work/<slug>
 #   --gates <path>       use an existing gate runner instead of writing .agy/gates
 #   --guard-tree <path>  an external read-only tree to fence (a dev site, a
@@ -24,7 +24,7 @@ set -uo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETS="$SKILL_DIR/assets"
 
-ROOT=""; PROJECT=""; MILESTONE="m1"; WORKSPACE=""; GATES=""; GUARD_TREE=""
+ROOT=""; PROJECT=""; MILESTONE=""; WORKSPACE=""; GATES=""; GUARD_TREE=""
 PLAN=""; FORCE=0; DRY=0
 
 while [ $# -gt 0 ]; do
@@ -69,17 +69,50 @@ printf '\n'
 
 # ---------------------------------------------------------------- adoption scan
 # Anything already here that this protocol should use rather than duplicate.
+#
+# The config's own AGY_WORKSPACE, read the way every .agy script reads it, so an
+# edited config (a bare assignment, a different default) resolves the same here.
+# AGY_WORKSPACE is unset first: the file uses `:=`, so an installer inherited it
+# from the environment would read back its own environment, not the project's.
+cfg_workspace() {
+	[ -f .agy/config ] || return 0
+	( unset AGY_WORKSPACE; . ./.agy/config >/dev/null 2>&1
+	  printf '%s' "${AGY_WORKSPACE:-}" )
+}
+CONFIG_WORKSPACE="$(cfg_workspace)"
+CONFIG_WORKSPACE="${CONFIG_WORKSPACE#./}"
+
+# Where the work lives, in order of authority:
+#   1. --workspace / --milestone — you said so, on this run
+#   2. .agy/config — the live binding every dispatch, fence and gate run reads
+#   3. a workspace found on disk (first adoption; newest ledger wins)
+#   4. .agy/work/m1
+#
+# 2 sits above 3 because a project past its first milestone has several
+# `.agy/work/*/progress.md` on disk and only the config knows which one is
+# current. A glob picking the alphabetically-first one would silently rebind an
+# established repo to a finished milestone.
 ADOPTED=""
+if [ -z "$WORKSPACE" ] && [ -n "$MILESTONE" ]; then
+	WORKSPACE=".agy/work/$MILESTONE"
+fi
+if [ -z "$WORKSPACE" ] && [ -n "$CONFIG_WORKSPACE" ]; then
+	WORKSPACE="$CONFIG_WORKSPACE"
+	ADOPTED="$ADOPTED config"
+fi
 if [ -z "$WORKSPACE" ]; then
+	newest=""
 	for candidate in .superpowers/sdd/*/ .agy/work/*/; do
 		[ -d "$candidate" ] || continue
 		[ -f "${candidate}progress.md" ] || continue
-		WORKSPACE="${candidate%/}"
-		ADOPTED="$ADOPTED workspace"
-		break
+		if [ -z "$newest" ] || [ "${candidate}progress.md" -nt "$newest" ]; then
+			newest="${candidate}progress.md"
+			WORKSPACE="${candidate%/}"
+		fi
 	done
+	[ -n "$WORKSPACE" ] && ADOPTED="$ADOPTED workspace"
 fi
-[ -n "$WORKSPACE" ] || WORKSPACE=".agy/work/$MILESTONE"
+[ -n "$WORKSPACE" ] || WORKSPACE=".agy/work/${MILESTONE:-m1}"
 WORKSPACE="${WORKSPACE#./}"
 
 if [ -z "$GATES" ]; then
@@ -95,6 +128,9 @@ fi
 
 printf -- '--- plan -----------------------------------------------------------\n'
 say workspace "$WORKSPACE"
+if [ -n "$CONFIG_WORKSPACE" ] && [ "$CONFIG_WORKSPACE" != "$WORKSPACE" ]; then
+	say milestone "moving: $CONFIG_WORKSPACE -> $WORKSPACE (AGY_WORKSPACE is repointed)"
+fi
 say gates     "$GATES"
 say branch    "$BRANCH"
 [ -n "$GUARD_TREE" ] && say tree "$GUARD_TREE (size+mtime fence)"
@@ -260,7 +296,10 @@ else
 fi
 
 # Config: the one file that is genuinely the project's. Never silently rewritten.
+CONFIG_KEPT=0
+REPOINT_FAILED=0
 if [ -f .agy/config ] && [ "$FORCE" -eq 0 ]; then
+	CONFIG_KEPT=1
 	say keep '.agy/config (already present — pass --force to regenerate)'
 else
 	if do_it; then
@@ -326,6 +365,39 @@ CONFIG
 	say write '.agy/config'
 fi
 
+# Advancing a milestone. `--milestone m6` used to scaffold .agy/work/m6 and then
+# leave AGY_WORKSPACE pointing at m5, because a config that exists is kept and
+# --force (the only way to rewrite it) also clobbers the gates. Every script
+# kept using m5 while the new workspace sat there looking adopted. So the one
+# line that binds the milestone is repointed on its own, and the rest of the
+# config — gates, models, guard lists, project environment — is left untouched.
+if [ "$CONFIG_KEPT" -eq 1 ] && [ -n "$CONFIG_WORKSPACE" ] && [ "$CONFIG_WORKSPACE" != "$WORKSPACE" ]; then
+	if do_it; then
+		tmp_cfg=".agy/config.repoint.$$"
+		awk -v new="$WORKSPACE" '
+			/^[[:space:]]*:[[:space:]]*"\$\{AGY_WORKSPACE:=/ {
+				print ": \"${AGY_WORKSPACE:=" new "}\""; next
+			}
+			{ print }
+		' .agy/config > "$tmp_cfg" && mv "$tmp_cfg" .agy/config
+		rm -f "$tmp_cfg"
+		# Verified by re-reading, not assumed: a hand-edited config may hold the
+		# binding in a form the rewrite above does not match, and a repoint that
+		# silently did nothing is the exact failure this is here to end.
+		now="$(cfg_workspace)"
+		if [ "${now#./}" = "$WORKSPACE" ]; then
+			say repoint "AGY_WORKSPACE: $CONFIG_WORKSPACE -> $WORKSPACE"
+		else
+			say repoint "COULD NOT REPOINT — AGY_WORKSPACE still resolves to '${now:-<empty>}'"
+			say ''      "Edit .agy/config by hand. Dispatch, fence and gates all read"
+			say ''      "that value; nothing reads this run's --milestone."
+			REPOINT_FAILED=1
+		fi
+	else
+		say repoint "AGY_WORKSPACE: $CONFIG_WORKSPACE -> $WORKSPACE"
+	fi
+fi
+
 # Workspace scaffolding.
 subst() {
 	sed -e "s#{{PROJECT}}#$PROJECT#g" \
@@ -382,6 +454,10 @@ fi
 
 problems=0
 
+# A config still bound to the previous milestone is worse than an obvious
+# failure: the new workspace exists, looks live, and nothing writes to it.
+[ "$REPOINT_FAILED" -eq 1 ] && problems=$((problems + 1))
+
 if command -v agy >/dev/null 2>&1 || [ -x "$HOME/AppData/Local/agy/bin/agy.exe" ]; then
 	say agy 'found'
 else
@@ -420,6 +496,13 @@ unfilled="$(grep -c -e '{{[^}]*}}' -e 'Delete this quote block' "$CTX" 2>/dev/nu
 if [ "${unfilled:-0}" -gt 0 ]; then
 	say context "$unfilled unfilled line(s) in $CTX"
 	say ''      '.agy/dispatch REFUSES to run until they are filled — see step 1.'
+	# The shared context describes the project, not the milestone, so on a move
+	# it is almost always the previous one you want rather than a blank template.
+	if [ -n "$CONFIG_WORKSPACE" ] && [ "$CONFIG_WORKSPACE" != "$WORKSPACE" ] \
+		&& [ -f "$CONFIG_WORKSPACE/dispatch-context.md" ]; then
+		say '' "the previous milestone has one — carry it over rather than refill:"
+		say '' "cp '$CONFIG_WORKSPACE/dispatch-context.md' '$CTX'"
+	fi
 	problems=$((problems + 1))
 else
 	say context "$CTX is filled in"

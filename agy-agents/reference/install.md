@@ -52,7 +52,7 @@ overrides the refusal for that run.
 |---|---|
 | `--root <path>` | project root (default: git root of the cwd) |
 | `--project <name>` | display name (default: the root directory's name) |
-| `--milestone <slug>` | workspace slug (default `m1`) |
+| `--milestone <slug>` | workspace slug; also **moves** an installed project to it (default: the one already bound, else `m1`) |
 | `--workspace <path>` | bind to an existing workspace instead of `.agy/work/<slug>` |
 | `--gates <path>` | bind to an existing gate runner instead of writing one |
 | `--guard-tree <path>` | fence an external read-only tree (a dev site, a data dir) |
@@ -60,14 +60,48 @@ overrides the refusal for that run.
 | `--force` | overwrite config, gates and templates |
 | `--dry-run` | print, change nothing |
 
+## Advancing to the next milestone
+
+Same command, new slug:
+
+```bash
+bash ~/.claude/skills/agy-agents/scripts/install --milestone m6 --dry-run
+bash ~/.claude/skills/agy-agents/scripts/install --milestone m6
+```
+
+It scaffolds `.agy/work/m6/` and **repoints `AGY_WORKSPACE` at it**, rewriting
+that one line and leaving the rest of your config — gates, models, guard lists,
+project environment — exactly as it is. Never use `--force` to advance a
+milestone: it regenerates the gates and the templates too.
+
+The ledger and the shared context do not travel on their own. The old
+milestone's directory is left where it is, with its history intact, and the new
+one starts from the templates — so the installer's final checks flag the fresh
+`dispatch-context.md` as unfilled and print the `cp` that carries the previous
+one over. The context describes the project, not the milestone; it is almost
+always the file you want.
+
+Because the workspace path carries the slug, **nothing installed restates it**.
+`.agy/config` holds the binding and every script reads it from there, including
+the project skill, which resolves it at the top of a session:
+
+```bash
+( . .agy/config; printf '%s\n' "$AGY_WORKSPACE" )
+```
+
+If a hand-edited config holds the binding in a shape the rewrite cannot find,
+the installer says `COULD NOT REPOINT` and counts it as a problem rather than
+reporting a move it did not make.
+
 ## Adopting an existing project
 
 Adoption is the same command. Before writing anything it scans for work already
 in progress and binds to it rather than duplicating it:
 
 - **An existing workspace** — any `.superpowers/sdd/*/` or `.agy/work/*/`
-  containing a `progress.md`. Found → `AGY_WORKSPACE` points at it, and your
-  ledger keeps its history. Nothing is moved.
+  containing a `progress.md`, most recently written first. Found →
+  `AGY_WORKSPACE` points at it, and your ledger keeps its history. Nothing is
+  moved.
 - **An existing gate runner** — `scripts/gates`, `bin/gates`, or `./gates`.
   Found → `AGY_GATES` points at it and no starter is written. Your suite is
   almost certainly better than the generated one.
@@ -75,6 +109,11 @@ in progress and binds to it rather than duplicating it:
   the `scripts` block of `package.json`), Cargo, Go and Python, and writes a
   starter suite from what it finds. If it detects nothing it writes a commented
   TODO block, and the gate runner then **fails** until you fill it in.
+
+An `.agy/config` that already exists outranks that scan: a project past its
+first milestone has several `progress.md` on disk and only the config knows
+which one is current. `--workspace` and `--milestone` outrank both — they are
+you saying so on this run.
 
 Order of operations when adopting a repo mid-flight:
 

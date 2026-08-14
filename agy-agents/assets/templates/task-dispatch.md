@@ -54,5 +54,8 @@ whole. It will be re-run. End the report with an `## Observations` heading —
 `None.` if you noticed nothing.
 
 **Definition of done:** every acceptance criterion satisfied, all gates green,
-committed as `{{feat: task N — <what>}}`. If a blocker or a genuine ambiguity
-stops you, STOP and write it to the report rather than guessing.
+and the work **committed** as `{{feat: task N — <what>}}`. The commit is part
+of the task, not cleanup after it: changes left in the working tree fail the
+run, because the next task starts on top of them and nothing records what they
+were for. Do not stop at "the files are written." If a blocker or a genuine
+ambiguity stops you, STOP and write it to the report rather than guessing.

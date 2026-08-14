@@ -9,6 +9,93 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.0] — 2026-08-13
+
+Two reports from a project three milestones past its install date. Both are the
+same shape: a number that was true once, or a line that describes the session
+rather than the work, sitting where a controller reads it as fact.
+
+#### Fixed
+- **The project skill no longer pins the milestone.** Its bindings table was
+  rendered at install time and still read `.agy/work/m5` three milestones later.
+  Every script had been reading the real path out of `.agy/config` the whole
+  time; only the one document meant to be authoritative about where the ledger
+  lives was reading a memory of it. The workspace, the ledger and the shared
+  context are now resolved from the config at the top of a session, and the
+  table names the config instead of copying it.
+- **`--milestone` moves an installed project.** It used to be ignored outright
+  whenever any workspace was already on disk, and a config that exists is kept,
+  so `--milestone m6` scaffolded `.agy/work/m6/` and left `AGY_WORKSPACE`
+  pointing at m5 — a new workspace that nothing wrote to. It now repoints that
+  one line and leaves the rest of the config alone (`--force` was never an
+  acceptable way to advance a milestone: it takes the gates with it). A config
+  whose binding the rewrite cannot find reports `COULD NOT REPOINT` and counts
+  as a problem, rather than claiming a move it did not make. The installer also
+  prints the `cp` that carries the shared context to the new milestone.
+- **The workspace resolution order is written down and enforced:**
+  `--workspace`/`--milestone`, then `.agy/config`, then a scan of the disk
+  (newest ledger first), then `.agy/work/m1`. The config outranks the scan
+  because a project past its first milestone has several `progress.md` on disk
+  and only the config knows which is current — the old glob would rebind an
+  established repo to whichever milestone sorted first.
+- **The `{{date}} — {{ruling}}` placeholder in "Local rulings" is gone.** Its
+  markers were lowercase, so the installer never substituted them and the one
+  section designed to survive a `/clear` shipped as a literal template line that
+  nobody wrote in. The selftest now asserts the installed project skill contains
+  no unrendered marker at all, and names no milestone workspace.
+
+#### Added
+- **`landed` in the verdict block.** Every other line grades how the session
+  behaved, and a run that produced no code behaves impeccably: clean run, clean
+  fence, green gates, a confident report. The tree was the only thing that told
+  the two apart and nothing measured it. Now: `N commit(s) — <subject>`,
+  `NOT COMMITTED — N change(s) outside the workspace, 0 commits`, or `NOTHING`.
+  The workspace is excluded for the same reason the fence prunes it — every run
+  writes a report there, and counting it would make every run look productive.
+
+- **Work left uncommitted fails the dispatch.** Reported twice on consecutive
+  runs: the implementer wrote the code, committed none of it, the harness
+  printed `SUCCESS`, and the controller committed by hand both times. That is
+  not a judgement call the harness has to duck — the brief's own definition of
+  done names the commit, so a tree full of changes against an empty history is
+  an unfinished task, and the next dispatch would start on top of it carrying
+  work no ledger entry explains. `NOTHING` still only reports, because an
+  investigation task legitimately produces no code — and that case leaves
+  nothing outside the workspace, so it never reaches the failing branch. The
+  brief template now says the commit is part of the task rather than cleanup
+  after it.
+
+- **The reviewer now grades the brief before the diff.** Two rounds running, the
+  most valuable finding was against the brief rather than the implementation —
+  and the contract had no place to put it. A brief whose stated invariants do
+  not follow from its stated rules produces an implementer that complies
+  exactly, a reviewer that confirms compliance, green gates and a clean fence:
+  every check passes and the defect sits in the specification everything else
+  was graded against. The controller wrote the brief, so the controller cannot
+  be the agent that catches it. Brief integrity is now the first of three
+  demanded verdicts, and a finding there is adjudicated by the controller and
+  recorded as a ruling rather than sent to the implementer as a fix. The three
+  verdicts are printed into the review package itself, not just documented in
+  `reference/protocol.md`: the package is the one file the reviewer subagent is
+  guaranteed to open, and a contract it never reads is a contract it never has.
+
+- **A refusal prints a verdict block.** Reported as "the missing-brief path exits
+  0"; it exits 2, and has since the first release. What made it look like a
+  success was the pipe: `.agy/dispatch 3 | tee run.log` returns tee's `0`, and a
+  backgrounded wrapper reports whether it managed to start the job. The status
+  is the half of the signal the caller can lose, so it can no longer be the only
+  half — every pre-run refusal now prints the same block a finished run prints,
+  headed `run  DID NOT RUN — <reason>` and carrying its own exit code as text.
+  A reader that only sees the output reaches the same conclusion as a caller
+  that reads `$?`.
+
+#### Changed
+- **`turns` is on its own line, labelled as agy's own count.** Runs reporting
+  `1 turns` have carried two dozen recorded tool calls; printed beside the
+  durations it read as a one-shot answer. The tool line now leads with the total
+  the harness counted off the event stream, which is the number that was
+  measured rather than reported.
+
 ### [1.7.0] — 2026-08-12
 
 One flaw, reported by a harness on its third crashed run in a row: a run that

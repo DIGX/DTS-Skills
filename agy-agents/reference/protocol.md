@@ -54,10 +54,18 @@ setting `AGY_ALLOW_UNFILLED=1`.
 
 4. **Dispatch** — `.agy/dispatch N`. It arms the fence, runs the implementer,
    parses the event stream, re-checks the fence and runs the gates, then prints
-   one verdict block: `run` / `fence` / `log` / `gates`. Anything other than
-   clean/clean/green stops the cycle here. Read logs from the `log` line in
-   *that* block rather than the header's — on a quota fallback the header names
-   the attempt that failed, not the one that did the work.
+   one verdict block: `run` / `fence` / `landed` / `log` / `gates`. Anything
+   other than clean/clean/green stops the cycle here. Read logs from the `log`
+   line in *that* block rather than the header's — on a quota fallback the
+   header names the attempt that failed, not the one that did the work.
+
+   `landed` is the line that says whether anything was produced. `run clean`
+   grades the session; a run that wrote no code grades identically to one that
+   implemented the task. `landed NOTHING` beside a confident report means read
+   the diff before you believe a word of it. `landed NOT COMMITTED` fails the
+   run: the brief requires the commit, so changes left in the tree are an
+   unfinished task — re-dispatch it rather than committing them yourself, or
+   the ledger records your commit for the implementer's work.
 
    `clean, but WATCHDOG-KILLED` and `clean, but the SESSION DIED before its
    result event` are both trap 4 and both still pass: the run was stopped, so
@@ -113,9 +121,26 @@ gate stayed green, which would have quietly broken every later task.
 Dispatch it pointing at the shared context, the brief, the report and the
 review package. Then:
 
-- Demand **both** verdicts: spec compliance (✅/❌, walked requirement by
-  requirement with `file:line` citations) and code quality (Approved / Changes
-  requested, findings as Critical / Important / Minor).
+- Demand **three** verdicts, in this order:
+  1. **Brief integrity** — do the brief's stated invariants actually follow from
+     its stated rules? Not "is the brief clear", but: take the rules it lays
+     down, follow them, and see whether they produce the property it claims.
+  2. **Spec compliance** — ✅/❌, walked requirement by requirement with
+     `file:line` citations.
+  3. **Code quality** — Approved / Changes requested, findings as Critical /
+     Important / Minor.
+- **Brief integrity comes first because it is the one defect this loop cannot
+  otherwise see.** A brief whose invariants do not follow from its rules
+  produces an implementer that complies exactly, a reviewer that confirms
+  compliance, green gates and a clean fence — every check passes and the defect
+  is in the specification the whole task was graded against. The controller
+  wrote that brief, so the controller is the last agent who can catch it, which
+  is another way of saying nobody can. Ask the reviewer explicitly, every time:
+  a reviewer told only to check the diff against the brief will read the brief
+  as ground truth, because from where it sits that is exactly what it is.
+  A finding here is **adjudicated by the controller, not fixed by the
+  implementer**: correct the brief, record the correction as a ruling in the
+  ledger, and re-dispatch if the landed work is now wrong.
 - Tell it to write the full review to `<workspace>/task-N-review.md` and reply
   with only the verdicts, counts, and one line per Critical/Important finding.
 - **Declare authorship honestly** — say which code came from the implementer and

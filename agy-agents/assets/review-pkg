@@ -55,6 +55,26 @@ fi
 	echo "Lockfiles are excluded from the diff below; the manifests they lock"
 	echo "(composer.json, package.json, Cargo.toml, …) are present in full."
 	echo
+	# Printed into the package itself because this is the one file the reviewer
+	# is guaranteed to read. Brief integrity leads: twice running, the real
+	# defect was in the brief's reasoning, and a reviewer asked only "does the
+	# diff match the brief" confirms a faithful implementation of a wrong rule.
+	echo "## Three verdicts are required of this review, in this order"
+	echo
+	echo "1. **Brief integrity** — read the brief before the diff. Do its stated"
+	echo "   invariants actually follow from its stated rules? Name any rule that"
+	echo "   does not produce the property it claims, or any invariant with no"
+	echo "   rule behind it. This is the one defect the loop cannot otherwise"
+	echo "   see: a compliant implementer, a confirming reviewer and green gates"
+	echo "   all agree over a defective specification. A finding here is for the"
+	echo "   controller to adjudicate — it is not sent back to the implementer."
+	echo "2. **Spec compliance** — does the diff do what the brief asked, all of"
+	echo "   it, and nothing else?"
+	echo "3. **Code quality** — correctness, edge cases, and fit with the code"
+	echo "   around it."
+	echo
+	echo "Answer all three explicitly, even when the answer is 'no findings'."
+	echo
 	echo "## Commits"
 	git log --oneline "$base..$head"
 	echo

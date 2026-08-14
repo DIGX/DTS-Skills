@@ -282,7 +282,7 @@ It:
   rather than grading how the session died (trap 4);
 - arms the fence before the run, re-checks it after, then runs the gates itself;
 - classifies quota exhaustion conservatively (see below);
-- prints exactly one verdict block: `run` / `fence` / `log` / `gates`.
+- prints exactly one verdict block: `run` / `fence` / `landed` / `log` / `gates`.
 
 Supports `--continue --file <path>` to resume the implementer's existing thread
 for a correction round, which is far cheaper than starting cold.
@@ -421,7 +421,7 @@ bash ~/.claude/skills/agy-agents/scripts/install --project NAME --milestone m1
 |---|---|
 | `--root <path>` | project root (default: git root of the cwd) |
 | `--project <name>` | display name (default: the root directory's name) |
-| `--milestone <slug>` | workspace slug (default `m1`) |
+| `--milestone <slug>` | workspace slug; also **moves** an installed project to it (default: the one already bound, else `m1`) |
 | `--workspace <path>` | bind to an existing workspace instead of `.agy/work/<slug>` |
 | `--gates <path>` | bind to an existing gate runner instead of writing one |
 | `--guard-tree <path>` | fence an external read-only tree |
@@ -438,8 +438,10 @@ Adoption is the same command. Before writing anything it scans for work already
 in progress and **binds to it rather than duplicating it**:
 
 - **An existing workspace** — any `.superpowers/sdd/*/` or `.agy/work/*/`
-  containing a `progress.md`. Found → `AGY_WORKSPACE` points at it and your
-  ledger keeps its history. Nothing is moved.
+  containing a `progress.md`, most recently written first. Found →
+  `AGY_WORKSPACE` points at it and your ledger keeps its history. Nothing is
+  moved. An `.agy/config` that already exists outranks the scan; `--workspace`
+  and `--milestone` outrank both.
 - **An existing gate runner** — `scripts/gates`, `bin/gates` or `./gates`.
   Found → `AGY_GATES` points at it and no starter is written. Your suite is
   almost certainly better than a generated one.
@@ -453,6 +455,21 @@ Nothing is deleted, moved or rewritten. Order of operations:
    non-zero number of files.
 5. Move project-specific task-cycle knowledge into
    `.claude/skills/agy-task-cycle/SKILL.md` under *Local rulings*.
+
+### Advancing to the next milestone
+
+```bash
+bash ~/.claude/skills/agy-agents/scripts/install --milestone m6
+```
+
+Scaffolds `.agy/work/m6/` and **repoints `AGY_WORKSPACE`** — one line rewritten,
+the rest of your config untouched. Never `--force` to advance: that takes the
+gates and the templates with it. The previous milestone stays on disk with its
+ledger; the installer prints the `cp` that carries the shared context over.
+
+Nothing installed restates the workspace path, because the path carries the
+milestone. `.agy/config` is the binding and everything reads it from there —
+including the project skill, which resolves it at the top of a session.
 
 ---
 
@@ -539,7 +556,8 @@ Full protocol: [`reference/protocol.md`](reference/protocol.md). One pass:
 6. **Read the actual diff** — `git log BASE..HEAD` and the changed files. Check
    for files touched that the dispatch did not name.
 7. **Package the review** — `.agy/review-pkg <BASE> task-N`.
-8. **Dispatch a fresh Claude subagent reviewer.**
+8. **Dispatch a fresh Claude subagent reviewer** — three verdicts: brief
+   integrity, spec compliance, code quality.
 9. **Fix loop** — rounds 1–3 back to the implementer via
    `.agy/dispatch --continue --file <correction>`; rounds 4–5 escalate to Claude.
    Five rounds maximum.
@@ -553,6 +571,11 @@ Three rules that carry most of the weight:
 - **Delegating implementation does not delegate review.** The reviewer is a
   fresh Claude subagent that never saw the implementation happen — it has caught
   an initialiser that silently did nothing while every gate stayed green.
+- **The brief is reviewed too, before the diff is.** Ask whether its stated
+  invariants actually follow from its stated rules. A brief that fails that test
+  produces perfect compliance, a clean review and green gates over a defect
+  nobody downstream can see — the controller wrote it, so the controller cannot
+  be the one to catch it.
 - **Never write to the ledger during a dispatch.** It is a guarded surface; a
   controller edit mid-run lands as a fence violation.
 
@@ -570,15 +593,31 @@ the opposite.
 
 ## Reading a verdict block
 
-Every dispatch ends with three judgements and the path to the evidence behind
-them. **Anything other than clean / clean / green stops the cycle.**
+Every dispatch ends with the harness's judgements and the path to the evidence
+behind them. **Anything other than clean / clean / green stops the cycle.**
 
 | Line | Means |
 |---|---|
 | `run` | the harness's own reading of the event stream, not `$?` |
 | `fence` | guarded surfaces before vs after — a violation names the files |
+| `landed` | what the run put in the tree: commits, uncommitted changes, or nothing |
 | `log` | the event stream of the attempt that produced this verdict |
 | `gates` | the project's verification suite, run by the harness |
+
+`landed  NOTHING — no commit, and nothing changed outside the workspace` is the
+one to read twice. Every other line describes how the session behaved, and a
+run that wrote no code at all behaves impeccably: clean run, clean fence, green
+gates, a confident report. The workspace is excluded from the count for the
+same reason the fence prunes it — a report saying the work happened is not the
+work. It reports rather than fails, because an investigation task legitimately
+lands nothing and a harness that cries wolf on those gets ignored on the ones
+that matter.
+
+`landed  NOT COMMITTED — N change(s) outside the workspace, 0 commits` does
+fail the run. That one is not a judgement call: the brief's definition of done
+names the commit, so work sitting in the working tree is an unfinished task —
+and the next dispatch starts on top of it, inheriting changes no ledger entry
+explains.
 
 Read the `log` line here, not the one in the header. The header prints its path
 before any attempt runs, so on a quota fallback it names the attempt that hit
