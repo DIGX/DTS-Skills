@@ -801,6 +801,28 @@ bash "$SKILL_DIR/scripts/install" --milestone m3 >"$TMP/m3.log" 2>&1
 has "an unmatched binding fails loudly" "COULD NOT REPOINT" "$TMP/m3.log"
 has "  and counts as a problem" "need attention" "$TMP/m3.log"
 
+# =========================================================== bench instrumentation
+printf '\n=== bench instrumentation ===\n'
+
+# A normal committing run must leave its measurements on disk, not just on screen.
+# Everything downstream reads the .class sidecar; a number that is only printed
+# is a number the dashboard has to invent.
+(
+	cd "$REPO" || exit 1
+	# Create task dispatch file in the m1 workspace (set by installer)
+	printf '# Task 1\nExecute the task.\n' > .agy/work/m1/task-1-dispatch.md
+	FAKE_TOUCH="src/bench1.txt" FAKE_COMMIT=1 FAKE_ERROR=none \
+		bash .agy/dispatch 1 > "$TMP/b1.log" 2>&1
+)
+# Look for the .class file in the m1 logs directory
+BCLASS="$(ls -t "$REPO"/.agy/work/m1/logs/*.class 2>/dev/null | head -1)"
+if [ -n "$BCLASS" ]; then ok "instrumented run wrote a .class"; else bad "instrumented run wrote a .class" "none found"; fi
+has "  records wall seconds"     "wall="         "$BCLASS"
+has "  records total tokens"     "tokens_total=" "$BCLASS"
+has "  records input tokens"     "tokens_in="    "$BCLASS"
+has "  records the commit count" "commits=1"     "$BCLASS"
+has "  records the commit range" "range="        "$BCLASS"
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

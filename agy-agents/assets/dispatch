@@ -522,10 +522,19 @@ if (failed) {
 	}
 }
 
+// Printed measurements are measurements the benchmark cannot read back. These
+// are the same numbers the summary prints below; they live here so a scraper
+// never has to re-derive them, and never has to guess a zero when it cannot.
+const uw = result.usage || {};
+const nz = v => (typeof v === 'number' && isFinite(v)) ? v : '';
 fs.writeFileSync(classPath,
 	`quota=${quota}\ntools=${tools.size}\nstatus=${status}\n` +
 	`killed=${killed ? 1 : 0}\nidle=${idleArg || 0}\ncapped=${capped ? 1 : 0}\n` +
 	`deferred=${deferred ? 1 : 0}\n` +
+	`wall=${wall}\n` +
+	`tokens_in=${nz(uw.input_tokens)}\ntokens_out=${nz(uw.output_tokens)}\n` +
+	`tokens_think=${nz(uw.thinking_tokens)}\ntokens_total=${nz(uw.total_tokens)}\n` +
+	`model=${(init.model || '').replace(/\n/g, ' ')}\n` +
 	`raw=${quotaRaw.replace(/\n/g, ' ')}\n`);
 
 const u = result.usage || {};
@@ -768,6 +777,18 @@ LANDED_DIRTY="$(git status --porcelain -- . ":(exclude)$AGY_WORKSPACE" 2>/dev/nu
 # outside the workspace, so it never reaches here.
 LANDED_RC=0
 [ "${LANDED_COMMITS:-0}" -eq 0 ] && [ "${LANDED_DIRTY:-0}" -gt 0 ] && LANDED_RC=1
+
+# The commit range is known only here — the node parser runs before the fence
+# is verified, so it cannot see what landed. Appended rather than rewritten so
+# the parser stays the sole owner of everything above it.
+if [ -f "$LOG_BASE.class" ]; then
+	printf 'commits=%s\n' "${LANDED_COMMITS:-0}" >> "$LOG_BASE.class"
+	if [ "${LANDED_COMMITS:-0}" -gt 0 ] && [ -n "${WAS_HEAD:-}" ] && [ -n "${IS_HEAD:-}" ]; then
+		printf 'range=%s..%s\n' "$WAS_HEAD" "$IS_HEAD" >> "$LOG_BASE.class"
+	else
+		printf 'range=\n' >> "$LOG_BASE.class"
+	fi
+fi
 
 # ------------------------------------------------------------------- run gates
 printf -- '\n--- gates ----------------------------------------------------------\n'
