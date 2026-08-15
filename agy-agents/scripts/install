@@ -12,6 +12,10 @@
 #   --guard-tree <path>  an external read-only tree to fence (a dev site, a
 #                        data dir). Fingerprinted by size+mtime, not content.
 #   --plan <path>        the plan the ledger should reference
+#   --coauthor <trailer> the one Co-Authored-By: value landed commits may carry,
+#                        e.g. 'Antigravity <agy@example.com>'. Also read from
+#                        AGY_COAUTHOR; empty switches the check off. Defaults to
+#                        an address nobody can own — see .agy/config.
 #   --force              overwrite config, gates and templates that already exist
 #   --dry-run            print what would happen, change nothing
 #
@@ -25,7 +29,7 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETS="$SKILL_DIR/assets"
 
 ROOT=""; PROJECT=""; MILESTONE=""; WORKSPACE=""; GATES=""; GUARD_TREE=""
-PLAN=""; FORCE=0; DRY=0
+PLAN=""; FORCE=0; DRY=0; COAUTHOR_OPT=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -36,6 +40,7 @@ while [ $# -gt 0 ]; do
 	--gates)      GATES="$2"; shift 2 ;;
 	--guard-tree) GUARD_TREE="$2"; shift 2 ;;
 	--plan)       PLAN="$2"; shift 2 ;;
+	--coauthor)   COAUTHOR_OPT="$2"; COAUTHOR_SET=1; shift 2 ;;
 	--force)      FORCE=1; shift ;;
 	--dry-run)    DRY=1; shift ;;
 	-h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
@@ -58,11 +63,30 @@ ROOT="$PWD"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 TODAY="$(date +%Y-%m-%d)"
 
-# The commit trailer, defined once. It is written into .agy/config for the check
-# to read and substituted into dispatch-context.md for the model to copy, so the
-# rule and its enforcement cannot drift. See the config's attribution section for
-# why the address is deliberately unresolvable.
+# The commit trailer, resolved once, here. It is written into .agy/config for the
+# check to read and substituted into dispatch-context.md for the model to copy —
+# one source, two renderings, so the rule and its enforcement cannot drift.
+#
+# Three sources, most specific first: --coauthor, then AGY_COAUTHOR from the
+# environment (export it in your shell profile and every repo you install into
+# gets your address, without editing anything), then the shipped default.
+#
+# The shipped default is unroutable ON PURPOSE, and changing it is not a
+# housekeeping edit. This installer runs in other people's repositories, so
+# whatever address is baked in here is stamped on the contributor graph of every
+# repo any stranger installs it into. That is the exact bug this check exists to
+# stop, and putting a maintainer's own address here would only reverse who it is
+# done to. A default must credit nobody; an address that credits *someone* is a
+# choice each project makes for itself.
+#
+# `.invalid` is reserved by RFC 2606 and can never be registered, so no account
+# can ever verify an address there. Empty switches the check off.
 COAUTHOR="Antigravity <antigravity@antigravity.invalid>"
+if [ -n "$COAUTHOR_OPT" ] || [ -n "${COAUTHOR_SET:-}" ]; then
+	COAUTHOR="$COAUTHOR_OPT"
+elif [ -n "${AGY_COAUTHOR+set}" ]; then
+	COAUTHOR="$AGY_COAUTHOR"
+fi
 
 say()  { printf '  %-8s %s\n' "$1" "$2"; }
 do_it() { [ "$DRY" -eq 1 ] && return 1; return 0; }
@@ -360,18 +384,31 @@ else
 : "\${AGY_REQUIRE:=$REQUIRE}"
 
 # ------------------------------------------------------------------ attribution
-# The one \`Co-Authored-By:\` address a landed commit may carry. This value is
+# The one \`Co-Authored-By:\` address a landed commit may carry. This value was
 # substituted into dispatch-context.md at install, so the instruction the model
 # reads and the check the harness runs come from here — one source, two
-# renderings, nothing to drift apart.
+# renderings, nothing to drift apart. Change it in one place and the other stops
+# matching, which \`.agy/dispatch\` refuses to run on; change both, or re-install.
 #
-# The address must not resolve. GitHub matches co-author trailers to accounts by
-# EMAIL and counts them on the contributor graph, so a real domain credits
-# whoever owns that mailbox: the default here used to be antigravity@google.com,
-# which put a stranger in the contributor list of every repo this harness
-# touched. \`.invalid\` is reserved by RFC 2606 and can never be registered.
-# Do not "fix" this to <name>@users.noreply.github.com — that form resolves to
-# the GitHub user of that name, and \`antigravity\` is a real account.
+# GitHub matches co-author trailers to accounts BY EMAIL — the display name is
+# cosmetic and ignored — and counts them on the contributor graph. So there are
+# exactly two defensible answers here, and the space between them is the bug:
+#
+#   AN ADDRESS YOU OWN. Credits your account or your organisation for work your
+#   harness produced. True, and visible as such. Prefer a dedicated mailbox
+#   (agy@example.com) over a personal or general one: it reads as machine
+#   authorship in \`git log\` instead of quietly inflating a human's graph.
+#
+#   AN ADDRESS NOBODY CAN OWN. Credits no account at all. \`.invalid\` is
+#   reserved by RFC 2606 and can never be registered, so nobody can ever verify
+#   an address there. This is the shipped default, because a default that
+#   credits somebody credits the wrong somebody.
+#
+# What is never right is an address belonging to a third party. This defaulted
+# to antigravity@google.com once, and every repo the harness touched published a
+# claim of authorship against a live account whose owner had never had access.
+# \`<name>@users.noreply.github.com\` is not the safe-looking middle: that form
+# resolves to the GitHub user of that name, and \`antigravity\` is a real one.
 #
 # Set empty to switch the check off entirely — \`AGY_COAUTHOR=\` here, or in the
 # environment. Note the assignment below is \`=\` and not \`:=\` for exactly that

@@ -9,6 +9,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.5] — 2026-08-16
+
+1.8.4 made the trailer checkable and then shipped one address for everybody.
+That is fine for the check and wrong for the credit: the projects using this
+harness are not one project, and the account that should be named is a thing
+each of them knows and the installer does not.
+
+#### Added
+- **`--coauthor`, and `AGY_COAUTHOR` read from the environment at install.**
+  A project crediting its own mailbox is making a true claim, and there was no
+  way to make it short of editing two files by hand after every install:
+
+  ```bash
+  scripts/install --coauthor 'Antigravity <agy@example.com>'   # this repo
+  export AGY_COAUTHOR='Antigravity <agy@example.com>'          # every repo
+  ```
+
+  Both write `.agy/config` and `dispatch-context.md` from the one value, so the
+  override inherits the property the default had — the model's copy of the rule
+  and the harness's copy still come from a single source.
+
+  The shipped default stays `antigravity@antigravity.invalid`, and that is not
+  an oversight to tidy up later. This installer runs in other people's
+  repositories, so whatever is baked in here lands on the contributor graph of
+  every repo a stranger installs it into — the bug 1.8.4 fixed, with the roles
+  swapped. A default must credit nobody. Crediting *someone* is a choice each
+  project makes for itself, which is what these two flags are for.
+
+  Prefer a dedicated mailbox: `agy@` reads as machine authorship in `git log`,
+  where a personal address quietly inflates a human's graph with a model's work.
+
+#### Fixed
+- **A config and a context that disagree now refuse to dispatch.** The trailer
+  rule has two renderings and the installer wrote both — but nothing stopped
+  them being edited apart afterwards. Change `AGY_COAUTHOR`, hand-edit the
+  context, copy a context in from another project, and the model is told one
+  address and judged against another. Every run then fails on a trailer the
+  implementer copied faithfully out of the file it was given, and the evidence
+  points squarely at the implementer, which is the one place the fault is not.
+
+  So the disagreement is caught before anything is dispatched, alongside the
+  unfilled-marker refusal and for the same reason: it costs one edit, and it is
+  a configuration fault rather than evidence about anybody's work.
+
+  A note for whoever simplifies the comparison: it lowercases both sides
+  through `tr` instead of asking grep for `-i`. `-F` is not optional — an
+  address contains `.` — and `grep -iF`, the obvious way to write that pair, is
+  the one shape that cannot be used. GNU grep 3.0 as shipped by Git for Windows
+  **aborts** on `-i` combined with `-F`, and an aborting check inside `if !`
+  reads as "no match", so every dispatch on Windows would have refused.
+
 ### [1.8.4] — 2026-08-15
 
 `dispatch-context.md` is where every behavioural rule in this harness lives,

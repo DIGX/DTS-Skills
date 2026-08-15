@@ -268,6 +268,44 @@ if [ "$unfilled" -ne 0 ] && [ "${AGY_ALLOW_UNFILLED:-0}" != "1" ]; then
 	die 2 'the brief is still a template' 'see the unfilled lines listed above'
 fi
 
+# The trailer rule exists in two renderings: AGY_COAUTHOR, which the check after
+# the run enforces, and the trailer block in the context, which is the only copy
+# the model ever sees. The installer writes both from one value. Edit one of them
+# afterwards — change the config, hand-edit the context, copy a context in from
+# another project — and the model is now told a different rule from the one it
+# will be judged by. Every run then fails on a trailer the implementer copied
+# faithfully, and the diagnosis points at the implementer, which is the one place
+# the fault is not.
+#
+# So it refuses here, before anything is dispatched, for the same reason the
+# unfilled check does: the cost is one edit, and it is a configuration fault, not
+# evidence about anybody's work.
+#
+# The comparison lowercases both sides through `tr` rather than asking grep for
+# `-i`, and `-F` is not optional — an address contains `.`, which is a regex
+# metacharacter, so a plain grep would match addresses that differ from this one.
+# `grep -iF` is the obvious way to write that pair and it is the one shape that
+# cannot be used: GNU grep 3.0 as shipped by Git for Windows ABORTS on `-i`
+# combined with `-F` (SIGABRT, rc 134), and an aborting check inside `if !`
+# reads as "no match" — so every dispatch on Windows would refuse. Either flag
+# alone is fine. This is why the normalisation is done by hand, the same way the
+# post-run attribution check does it.
+if [ -n "${AGY_COAUTHOR:-}" ] && [ -f "$AGY_CONTEXT" ]; then
+	ctx_addr="$(printf '%s' "$AGY_COAUTHOR" |
+		sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr 'A-Z' 'a-z')"
+	[ -n "$ctx_addr" ] || ctx_addr="$(printf '%s' "$AGY_COAUTHOR" | tr 'A-Z' 'a-z')"
+	if ! tr 'A-Z' 'a-z' <"$AGY_CONTEXT" | grep -qF -- "$ctx_addr"; then
+		printf '\ndispatch: the context does not carry the co-author the harness checks.\n' >&2
+		printf '  .agy/config wants   %s\n' "$AGY_COAUTHOR" >&2
+		printf '  %s never names it.\n' "$AGY_CONTEXT" >&2
+		printf '\nThe implementer copies the trailer out of that file, so it would be\n' >&2
+		printf 'judged against a rule it was never given. Put the same address in\n' >&2
+		printf 'both, or re-install to rewrite them from one value.\n' >&2
+		die 2 'the co-author rule and the context disagree' \
+			"config: $AGY_COAUTHOR" "context: $AGY_CONTEXT does not name it"
+	fi
+fi
+
 mkdir -p "$LOGDIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BASE="$LOGDIR/$LABEL-$STAMP"

@@ -57,21 +57,20 @@ Verbatim from the plan or spec — not paraphrased. These bind every task.
    Co-Authored-By: {{COAUTHOR}}
    ```
 
-   The trailer is a record of authorship and the reviewer relies on it; do not
-   copy the other agent's, and do not substitute an address of your own. **This
-   one is checked.** The harness reads the trailers off every commit the run
-   landed and fails the run on any other address, so a substitution here costs
-   a `git commit --amend`, not a discussion.
+   Copy it exactly. Do not use an address of your own, one you have seen in
+   this repository's history, or one you think is more correct. **This one is
+   checked**: the harness reads the trailers off every commit the run landed
+   and fails the run on any other address, so a substitution here costs a
+   `git commit --amend`, not a discussion.
 
-   The address is deliberately unroutable. GitHub resolves co-author trailers
-   to accounts **by email** and counts them on the repository's Insights
-   contributor graph, so a trailer on a real domain credits whoever owns that
-   mailbox. `antigravity@google.com` is a live third-party account, and using
-   it put a stranger in the contributor list of a repository they have never
-   had any access to. `antigravity@users.noreply.github.com` is not a fix
-   either — the GitHub user `antigravity` exists, and that form resolves to
-   them. `.invalid` is reserved by RFC 2606: it can never be registered, so no
-   account can ever verify an address there and the trailer credits nobody.
+   It is checked because guessing it has already gone wrong. GitHub resolves
+   co-author trailers to accounts **by email** — the display name is cosmetic
+   and ignored — and counts them on the repository's Insights contributor
+   graph. So a plausible-looking address is not a harmless one: it publishes a
+   claim that a specific real account helped write this code. This project's
+   address was chosen deliberately by whoever set the harness up, and it is
+   the only one that carries their intent. Yours does not, however reasonable
+   it looks.
 4. Nothing committed under {{vendor/, node_modules/, or other generated dirs}}.
 
 ## Write your report incrementally

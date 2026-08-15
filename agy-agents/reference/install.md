@@ -57,8 +57,49 @@ overrides the refusal for that run.
 | `--gates <path>` | bind to an existing gate runner instead of writing one |
 | `--guard-tree <path>` | fence an external read-only tree (a dev site, a data dir) |
 | `--plan <path>` | the plan the ledger should reference |
+| `--coauthor <trailer>` | the one `Co-Authored-By:` value landed commits may carry (see below) |
 | `--force` | overwrite config, gates and templates |
 | `--dry-run` | print, change nothing |
+
+## The co-author trailer
+
+Every commit an implementer lands carries a `Co-Authored-By:` trailer, and
+`.agy/dispatch` **fails the run** on any address that is not the configured
+one. GitHub resolves those trailers to accounts by email — the display name is
+ignored — and counts them on the repository's contributor graph, so the address
+is a public claim that a specific account helped write the code.
+
+The default credits nobody: `Antigravity <antigravity@antigravity.invalid>`.
+`.invalid` is reserved by RFC 2606 and can never be registered. This is the
+default precisely because the installer runs in other people's repositories,
+and a default that credits somebody credits the wrong somebody.
+
+To credit your own account or organisation instead:
+
+```bash
+# this repository only
+scripts/install --coauthor 'Antigravity <agy@example.com>'
+
+# every repository you install into, from now on
+export AGY_COAUTHOR='Antigravity <agy@example.com>'
+```
+
+Prefer a dedicated mailbox over a personal or general one — `agy@` reads as
+machine authorship in `git log`, where `you@` quietly inflates a human's
+contribution graph with work a model did.
+
+Both the value in `.agy/config` and the trailer block in `dispatch-context.md`
+are written from this one setting. Change one without the other and dispatch
+refuses to run: the implementer would be judged against a rule it was never
+given. Fix both, or re-install.
+
+Already installed? Re-running the installer **keeps** an edited `.agy/config`,
+and `--force` would overwrite your filled-in `dispatch-context.md`. So change
+the two by hand: the `AGY_COAUTHOR` line in `.agy/config`, and the trailer
+block under "Definition of done" in `.agy/work/<slug>/dispatch-context.md`.
+
+`AGY_COAUTHOR=` (empty) switches the check off. Opt out that way, never by
+widening it to a value that matches anything.
 
 ## Advancing to the next milestone
 

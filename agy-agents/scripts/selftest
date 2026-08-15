@@ -164,6 +164,12 @@ export PATH="$BIN_U:$PATH"
 # three minutes of pure sleeping across the suite. The watchdog's own behaviour
 # is asserted in its own section, with its own timings.
 export AGY_IDLE_POLL=1
+
+# The installer honours AGY_COAUTHOR from the environment, so a maintainer who
+# exported theirs would install the fixture with it and the attribution section
+# would assert against their address instead of the shipped default. The suite
+# has to test what a stranger gets, not what this machine is configured for.
+unset AGY_COAUTHOR
 case "$(command -v agy)" in
 "$BIN_U"/*) ;;
 *) printf 'selftest: ABORT — `agy` resolves to %s, not the stub at %s.\n' "$(command -v agy)" "$BIN_U" >&2
@@ -862,12 +868,28 @@ has "  and into the context the model reads" \
 # different rule from the one the harness checks, which is the whole failure.
 hasnt "  and leaves no unfilled marker behind" \
 	"{{COAUTHOR}}" .agy/work/m1/dispatch-context.md
-# The context names the two wrong answers on purpose. Both look like fixes —
-# a real domain, and the noreply form — and both credit a live account, so a
-# template that only states the right address invites being "tidied" into one
-# of them. Deleting this paragraph is how the bug comes back.
+
+# The shipped default must credit nobody. This installer runs in other people's
+# repositories, so an address baked in here lands on the contributor graph of
+# every repo a stranger installs it into — which is the original bug with the
+# roles swapped. A maintainer wanting their own address sets it per install;
+# they do not change what everyone else gets.
+has "the shipped default is an address nobody can own" \
+	'COAUTHOR="Antigravity <antigravity@antigravity.invalid>"' "$SKILL_DIR/scripts/install"
+# Pinned on the assignment line, not on the file. Asserting the config never
+# *mentions* a live address would be the wrong test and it fails: the config
+# names antigravity@google.com on purpose, in the paragraph explaining what is
+# never right. A rule that cannot cite the case that produced it is a weaker
+# rule. What must not drift is the value the check reads.
+has "  and that is what the config assigns" \
+	': "${AGY_COAUTHOR=Antigravity <antigravity@antigravity.invalid>}"' .agy/config
+# The config explains both defensible answers, because "must never resolve" is
+# not one of them — a project crediting its own mailbox is making a true claim.
+# Stating only one answer is what makes the other look like a bug to fix.
+has "  the config gives the rule, not just the value" \
+	"BY EMAIL" .agy/config
 has "  and warns off the noreply form, which resolves too" \
-	"users.noreply.github.com" .agy/work/m1/dispatch-context.md
+	"users.noreply.github.com" .agy/config
 
 landing "$TMP/ca1.log" "src/ca1.txt" 1 "$GOOD_CA"
 want "the configured co-author passes"     0 $?
@@ -924,6 +946,52 @@ which is a live account. Quoted here, not claimed." \
 AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ca5.log" 2>&1
 want "an address quoted in a commit body is not a trailer" 0 $?
 hasnt "  the prose is not read as a claim" "WRONG CO-AUTHOR" "$TMP/ca5.log"
+
+rm -f "$REPORT_9"
+
+# Per-install override, both ways in. A project that wants its own address must
+# be able to have it without editing the skill everyone else installs — and both
+# renderings have to move together, or the model is told one rule and judged by
+# another.
+for how in flag env; do
+	CAREPO="$TMP/ca-$how"
+	mkdir -p "$CAREPO/src"
+	(
+		cd "$CAREPO" || exit 1
+		git init -q . && git config user.email t@t && git config user.name T
+		printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+		if [ "$how" = flag ]; then
+			bash "$SKILL_DIR/scripts/install" --project CA \
+				--coauthor 'Antigravity <agy@example.test>' >/dev/null 2>&1
+		else
+			AGY_COAUTHOR='Antigravity <agy@example.test>' \
+				bash "$SKILL_DIR/scripts/install" --project CA >/dev/null 2>&1
+		fi
+	) || bad "install --$how sets the co-author" "setup failed"
+	has "install by $how puts the chosen address in the config" \
+		"agy@example.test" "$CAREPO/.agy/config"
+	has "  and the same one in the context" \
+		"agy@example.test" "$(echo "$CAREPO"/.agy/work/*/dispatch-context.md)"
+	hasnt "  and the shipped default is gone from the context" \
+		"antigravity.invalid" "$(echo "$CAREPO"/.agy/work/*/dispatch-context.md)"
+done
+
+# The two renderings can be edited apart afterwards — a hand-edited config, a
+# context copied in from another project. Then every run fails on a trailer the
+# implementer copied faithfully out of the file it was given, and the diagnosis
+# points at the implementer, which is the one place the fault is not. Refuse
+# before dispatching instead: it is a configuration fault, like the fence whose
+# baseline does not pair with its config.
+rm -f "$REPORT_9"
+AGY_COAUTHOR="Antigravity <someone.else@example.test>" \
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ca6.log" 2>&1
+want "a config and context that disagree REFUSE to dispatch" 2 $?
+has  "  names the address the check wants"  "someone.else@example.test" "$TMP/ca6.log"
+has  "  and the file that never mentions it" "dispatch-context.md"      "$TMP/ca6.log"
+has  "  says the implementer would be judged on a rule it never got" \
+	"judged against a rule it was never given" "$TMP/ca6.log"
+has  "  and nothing was dispatched"         "the tree is untouched"     "$TMP/ca6.log"
 
 rm -f "$REPORT_9"
 
@@ -1012,9 +1080,16 @@ mkdir -p "$REPO/$BWS/logs"
 #   progress.md          — $AGY_LEDGER, a guarded file; the fence will not arm
 #                          over a guard that points at nothing, so a workspace
 #                          without a ledger cannot dispatch at all
+#   dispatch-context.md  — refused a third way when it does not carry the
+#                          co-author .agy/config wants, which a hand-written
+#                          context like this one has to state explicitly. That
+#                          is not an inconvenience of the fixture; it is the
+#                          drift refusal doing its job on the exact case it
+#                          exists for — a context written by something other
+#                          than the installer.
 printf '# Task 1\nExecute the task.\n' > "$REPO/$BWS/task-1-dispatch.md"
-printf '# context\nBuild the thing. Gates are authoritative.\n' \
-	> "$REPO/$BWS/dispatch-context.md"
+printf '# context\nBuild the thing. Gates are authoritative.\n\nCo-Authored-By: %s\n' \
+	"$GOOD_CA" > "$REPO/$BWS/dispatch-context.md"
 printf '# ledger\n\n(bench instrumentation run)\n' > "$REPO/$BWS/progress.md"
 # AGY_SKIP_GATES=1 for the same reason every other clean-run test here sets it:
 # the fixture has no toolchain, so the generated .agy/gates is TODO comments,
@@ -1068,6 +1143,13 @@ ws="$(unset AGY_WORKSPACE; . ./.agy/config >/dev/null 2>&1; printf '%s' "${AGY_W
 	|| bad "repoints AGY_WORKSPACE at it" "config still resolves to '${ws:-<empty>}'"
 has "  says so out loud"           "repoint"            "$TMP/m1.log"
 has "  offers the context carry-over" "dispatch-context.md" "$TMP/m1.log"
+# The new milestone's context is scaffolded from the template, and a context
+# that does not name the co-author is one dispatch refuses to run against. So
+# the substitution has to survive every path that writes that file, not only
+# first install — otherwise advancing a milestone would brick the project until
+# somebody hand-edited a file they were never told about.
+has "  the new context still carries the co-author" \
+	"antigravity@antigravity.invalid" .agy/work/m2/dispatch-context.md
 
 # The repoint edits one line. If it regenerated the config instead it would take
 # the gates, the models and the project environment with it — which is exactly
