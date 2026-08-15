@@ -316,6 +316,68 @@ if ! bash .agy/tripwire snapshot "$SNAP"; then
 	die 3 'the fence would not arm' 'the run auto-approves every tool call — unfenced is not an option'
 fi
 
+# ------------------------------------------------------- interrupted mid-flight
+# From here on the model can move the tree, so from here on this script owes a
+# verdict however it ends. Killed between the parser and the fence check it used
+# to leave nothing at all: a .class with an empty status, no .gates.log, no
+# .response.md, no verdict block — and a commit in history. On disk that is
+# indistinguishable from a dispatch that never ran, except HEAD had moved, which
+# is the one fact nobody was told. A silent exit after a commit is the same
+# failure as a fence that says "clean" without checking: the reader is left with
+# an account that reads like nothing happened.
+#
+# So an interrupt prints a verdict in the usual shape. It is neither a pass nor
+# a failure but an unfinished run, and it says so — naming the only thing still
+# knowable without the model's cooperation, which is what git holds.
+VERDICT_PRINTED=0
+AGY_CHILD_PID=""
+
+on_interrupt() { # on_interrupt <signal-name> <exit-code>
+	trap - INT TERM
+	[ "$VERDICT_PRINTED" -eq 1 ] && exit "$2"
+
+	# agy was started with & — a signal delivered to this script alone never
+	# reaches it, and it would go on writing to the log after the verdict said
+	# the run had stopped. Same TERM-then-KILL sequence the watchdog uses.
+	if [ -n "$AGY_CHILD_PID" ] && kill -0 "$AGY_CHILD_PID" 2>/dev/null; then
+		printf '\nINTERRUPT stopping agy (pid %s).\n' "$AGY_CHILD_PID"
+		kill -TERM "$AGY_CHILD_PID" 2>/dev/null
+		for _ in 1 2 3; do
+			kill -0 "$AGY_CHILD_PID" 2>/dev/null || break
+			sleep 1
+		done
+		kill -KILL "$AGY_CHILD_PID" 2>/dev/null
+	fi
+
+	int_was="$(awk -F'\t' '$1=="head"{print $2}' "$SNAP/git.txt" 2>/dev/null)"
+	int_now="$(git rev-parse HEAD 2>/dev/null)"
+	int_dirty="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+
+	printf -- '\n--- verdict --------------------------------------------------------\n'
+	printf '  %-7s %s\n' run "INTERRUPTED by $1 — this run did not finish"
+	if [ -n "$int_was" ] && [ -n "$int_now" ] && [ "$int_was" != "$int_now" ]; then
+		printf '  %-7s %s\n' landed \
+			"$(git rev-list --count "$int_was..$int_now" 2>/dev/null || printf '?') commit(s) — THE TREE MOVED"
+		printf '  %-7s %s\n' '' "$int_was..$int_now"
+	elif [ "${int_dirty:-0}" -gt 0 ]; then
+		printf '  %-7s %s\n' landed "no commit, $int_dirty uncommitted path(s)"
+	else
+		printf '  %-7s %s\n' landed 'nothing — no commit, clean tree'
+	fi
+	printf '  %-7s %s\n' fence 'NOT CHECKED'
+	printf '  %-7s %s\n' gates 'NEVER RAN'
+	printf '  %-7s %s\n' log "$LOG_BASE.ndjson"
+	printf '  %-7s %s\n' exit "$2"
+	printf '\n  Nothing here has been verified. The fence was armed and never\n'
+	printf '  compared, so no guarded surface has been cleared; the gates never\n'
+	printf '  ran, so nothing says the work is sound. If the tree moved, read that\n'
+	printf '  diff before dispatching again — the next run starts from it.\n'
+	printf '  Fence baseline kept at %s\n' "$SNAP"
+	exit "$2"
+}
+trap 'on_interrupt SIGINT 130' INT
+trap 'on_interrupt SIGTERM 143' TERM
+
 # ------------------------------------------------------------------ one attempt
 # $1 model, $2 output base, $3 extra continue flag ("" or "--continue")
 run_attempt() {
@@ -338,6 +400,8 @@ run_attempt() {
 		${AGY_ARGS:-} \
 		> "$out.ndjson" 2> "$out.stderr" &
 	local agy_pid=$!
+	# Visible to the interrupt handler, which has to stop it before reporting.
+	AGY_CHILD_PID="$agy_pid"
 
 	# Watchdog for failure 4. Size, not mtime: the stream is append-only so size
 	# is monotone, and a one-second mtime granularity makes short gaps
@@ -391,6 +455,7 @@ run_attempt() {
 
 	wait "$agy_pid"
 	local rc=$?
+	AGY_CHILD_PID=""
 
 	elapsed=$(( SECONDS - started ))
 
@@ -908,6 +973,9 @@ NODE
 fi
 
 # --------------------------------------------------------------------- verdict
+# Set before the block prints, not after: an interrupt landing midway through
+# these lines must not append a second, contradictory verdict to a partial one.
+VERDICT_PRINTED=1
 printf -- '\n--- verdict --------------------------------------------------------\n'
 v() { printf '  %-7s %s\n' "$1" "$2"; }
 if [ "$FELL_BACK" -eq 1 ]; then

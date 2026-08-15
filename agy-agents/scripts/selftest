@@ -593,6 +593,87 @@ has  "  says the report is missing" "no report at" "$TMP/x2.log"
 
 rm -f "$REPORT_9"
 
+printf '\n=== interrupted mid-flight =========================================\n'
+# Ctrl-C, a closed terminal, a killed parent. Every other stopped-run case here
+# ends with the script still in control; this one does not, and it used to exit
+# silently — no verdict, no fence check, no gates — after the model had already
+# committed. On disk that is indistinguishable from a dispatch that never ran,
+# except HEAD moved, which is the one fact nobody was told.
+#
+# The watchdog is disarmed on purpose (both caps 0) so the script is parked in
+# `wait` when the signal lands: this measures the trap, not the watchdog.
+rm -f "$REPORT_9"
+INT_WAS="$(git rev-parse HEAD)"
+FAKE_HANG=30 FAKE_TOUCH="src/interrupted.txt" FAKE_COMMIT=1 FAKE_REPORT="$REPORT_9" \
+FAKE_ERROR=none AGY_IDLE_TIMEOUT=0 AGY_MAX_WALL=0 AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/i1.log" 2>&1 &
+int_pid=$!
+# Signal only once the tree has actually moved — before that the run has nothing
+# to under-report and the test would pass on a script that still exits silently.
+int_n=0
+while [ "$int_n" -lt 60 ]; do
+	[ "$(git rev-parse HEAD)" != "$INT_WAS" ] && break
+	int_n=$(( int_n + 1 )); sleep 0.25
+done
+kill -TERM "$int_pid" 2>/dev/null
+wait "$int_pid"
+want "an interrupted run exits on the signal, not on its own" 143 $?
+has  "  names the signal"            "INTERRUPTED by SIGTERM" "$TMP/i1.log"
+has  "  says the run did not finish" "did not finish"         "$TMP/i1.log"
+has  "  reports the commit it left"  "THE TREE MOVED"         "$TMP/i1.log"
+has  "  gives the range to read"     "$INT_WAS.."            "$TMP/i1.log"
+# The whole point: an unfinished run must not borrow the vocabulary of a
+# finished one. Neither check ran, so neither may report a result.
+has   "  fence is unjudged, not clean" "fence   NOT CHECKED"  "$TMP/i1.log"
+has   "  gates are unrun, not green"   "gates   NEVER RAN"    "$TMP/i1.log"
+hasnt "  never claims a clean fence"   "fence   clean"        "$TMP/i1.log"
+hasnt "  never claims green gates"     "gates   green"        "$TMP/i1.log"
+# agy is a background child; a signal sent to the script alone never reaches it,
+# and it would go on writing to the log after the verdict said the run stopped.
+int_child="$(sed -n 's/.*INTERRUPT stopping agy (pid \([0-9][0-9]*\)).*/\1/p' \
+	"$TMP/i1.log" | head -1)"
+if [ -n "$int_child" ] && ! kill -0 "$int_child" 2>/dev/null; then
+	ok "  the model process is stopped too"
+else
+	bad "  the model process is stopped too" \
+		"child pid '${int_child:-<never named>}' still alive after the trap"
+fi
+
+# The other branch, and the other signal: Ctrl-C on a run that had not landed
+# anything yet. Reporting movement that did not happen sends the reader to hunt
+# a diff that is not there, which costs as much trust as missing one that did.
+#
+# This one cannot be driven with `&` like the SIGTERM case above. A shell
+# without job control starts background jobs with SIGINT set to SIG_IGN, and an
+# inherited ignore cannot be re-trapped — the dispatch would run to completion
+# and the test would pass on any script at all. So dispatch runs in the
+# FOREGROUND here, exactly as it does under a real Ctrl-C, and a background
+# helper does the signalling. The wrapper `exec`s, so the pid it recorded is
+# dispatch's own.
+rm -f "$REPORT_9" "$TMP/i2.pid"
+(
+	int_n=0
+	while [ "$int_n" -lt 80 ]; do
+		# The stub writes its report and only then sleeps, so the report
+		# appearing means agy is up and dispatch is parked in `wait`.
+		[ -s "$TMP/i2.pid" ] && [ -f "$REPORT_9" ] && break
+		int_n=$(( int_n + 1 )); sleep 0.25
+	done
+	kill -INT "$(cat "$TMP/i2.pid" 2>/dev/null)" 2>/dev/null
+) &
+int_killer=$!
+FAKE_HANG=30 FAKE_REPORT="$REPORT_9" FAKE_ERROR=none \
+AGY_IDLE_TIMEOUT=0 AGY_MAX_WALL=0 AGY_SKIP_GATES=1 \
+	bash -c 'echo $$ > "$1"; exec bash .agy/dispatch 9' _ "$TMP/i2.pid" \
+	>"$TMP/i2.log" 2>&1
+want "SIGINT is trapped the same way" 130 $?
+wait "$int_killer" 2>/dev/null
+has   "  names the signal"          "INTERRUPTED by SIGINT" "$TMP/i2.log"
+hasnt "  does not invent a commit"  "THE TREE MOVED"        "$TMP/i2.log"
+has   "  still says what landed"    "no commit"             "$TMP/i2.log"
+
+rm -f "$REPORT_9"
+
 printf '\n=== bypass =========================================================\n'
 # A denial on its own is an incomplete run. A denial followed by the same
 # command under another name is a different thing entirely: the boundary held,
