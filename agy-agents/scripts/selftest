@@ -755,6 +755,73 @@ has "the dispatch template names the adopted runner" "scripts/gates" \
 	&& bad "adoption does not write a competing runner" "wrote .agy/gates anyway" \
 	|| ok "adoption does not write a competing runner"
 
+# =================================================== bench instrumentation
+printf '\n=== bench instrumentation ==========================================\n'
+
+# A normal committing run must leave its measurements on disk, not just on
+# screen. Everything downstream reads the .class sidecar; a number that is only
+# printed is a number the dashboard has to invent.
+#
+# This section sits *above* the milestone tests on purpose. Those tests end by
+# appending a raw `AGY_WORKSPACE=.agy/work/mX` to .agy/config to exercise the
+# COULD NOT REPOINT path — a plain assignment, not the `:=` form, so it wins
+# over the environment for every dispatch that runs after it, and mX has no
+# task file. Run below them, this section's dispatch dies before writing
+# anything, and `ls -t` over an older milestone's logs hands the assertions a
+# .class from an unrelated earlier run — one that now carries every key they
+# look for. Green, and measuring nothing.
+#
+# The two guards that keep it honest: a private workspace whose logs directory
+# starts empty, so the file read back can only be the one this run wrote; and
+# an exit-code check, so a run that never happened cannot be scored on a
+# leftover.
+BWS=".agy/work/mbench"
+rm -rf "${REPO:?}/$BWS"
+mkdir -p "$REPO/$BWS/logs"
+#
+# A private workspace has to be scaffolded like a real one, not merely be a
+# directory with a task file in it. Three things gate a dispatch before the
+# model is ever launched, and all three are workspace-relative:
+#   task-N-dispatch.md   — absent, and there is no task to run
+#   dispatch-context.md  — refused when it still carries {{...}}, and refused
+#                          just as hard when it is absent
+#   progress.md          — $AGY_LEDGER, a guarded file; the fence will not arm
+#                          over a guard that points at nothing, so a workspace
+#                          without a ledger cannot dispatch at all
+printf '# Task 1\nExecute the task.\n' > "$REPO/$BWS/task-1-dispatch.md"
+printf '# context\nBuild the thing. Gates are authoritative.\n' \
+	> "$REPO/$BWS/dispatch-context.md"
+printf '# ledger\n\n(bench instrumentation run)\n' > "$REPO/$BWS/progress.md"
+# AGY_SKIP_GATES=1 for the same reason every other clean-run test here sets it:
+# the fixture has no toolchain, so the generated .agy/gates is TODO comments,
+# and dispatch calls an ungated run a hard failure rather than a pass. That is
+# the behaviour under test elsewhere; here it would only stop the run before it
+# could be measured. The keys this section reads are appended after the gate
+# step regardless of how the gates went, so skipping them removes a failure
+# without removing any of the instrumentation being asserted.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 \
+		FAKE_TOUCH="src/bench1.txt" FAKE_COMMIT=1 FAKE_ERROR=none \
+		bash .agy/dispatch 1 > "$TMP/b1.log" 2>&1
+)
+brc=$?
+want "the instrumented run exits clean" 0 "$brc"
+# A failed run here is scored on what it did not write, so say why it failed
+# rather than leaving seven assertions to report the same silence.
+if [ "$brc" -ne 0 ]; then
+	sed -n '1,20p' "$TMP/b1.log" 2>/dev/null | sed 's/^/        | /'
+	awk '/--- gates/,0' "$TMP/b1.log" 2>/dev/null | sed 's/^/        | /'
+fi
+
+BCLASS="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -n "$BCLASS" ]; then ok "instrumented run wrote a .class"; else bad "instrumented run wrote a .class" "none found"; fi
+has "  records wall seconds"     "wall="         "$BCLASS"
+has "  records total tokens"     "tokens_total=" "$BCLASS"
+has "  records input tokens"     "tokens_in="    "$BCLASS"
+has "  records the commit count" "commits=1"     "$BCLASS"
+has "  records the commit range" "range="        "$BCLASS"
+
 printf '\n=== milestone advance ==============================================\n'
 # A project outlives the milestone it was installed on. Passing --milestone used
 # to scaffold the new workspace and change nothing else: the adoption scan
@@ -800,28 +867,6 @@ printf 'AGY_WORKSPACE=.agy/work/mX\n' >> .agy/config
 bash "$SKILL_DIR/scripts/install" --milestone m3 >"$TMP/m3.log" 2>&1
 has "an unmatched binding fails loudly" "COULD NOT REPOINT" "$TMP/m3.log"
 has "  and counts as a problem" "need attention" "$TMP/m3.log"
-
-# =========================================================== bench instrumentation
-printf '\n=== bench instrumentation ===\n'
-
-# A normal committing run must leave its measurements on disk, not just on screen.
-# Everything downstream reads the .class sidecar; a number that is only printed
-# is a number the dashboard has to invent.
-(
-	cd "$REPO" || exit 1
-	# Create task dispatch file in the m1 workspace (set by installer)
-	printf '# Task 1\nExecute the task.\n' > .agy/work/m1/task-1-dispatch.md
-	FAKE_TOUCH="src/bench1.txt" FAKE_COMMIT=1 FAKE_ERROR=none \
-		bash .agy/dispatch 1 > "$TMP/b1.log" 2>&1
-)
-# Look for the .class file in the m1 logs directory
-BCLASS="$(ls -t "$REPO"/.agy/work/m1/logs/*.class 2>/dev/null | head -1)"
-if [ -n "$BCLASS" ]; then ok "instrumented run wrote a .class"; else bad "instrumented run wrote a .class" "none found"; fi
-has "  records wall seconds"     "wall="         "$BCLASS"
-has "  records total tokens"     "tokens_total=" "$BCLASS"
-has "  records input tokens"     "tokens_in="    "$BCLASS"
-has "  records the commit count" "commits=1"     "$BCLASS"
-has "  records the commit range" "range="        "$BCLASS"
 
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
