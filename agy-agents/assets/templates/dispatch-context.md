@@ -51,9 +51,24 @@ Verbatim from the plan or spec — not paraphrased. These bind every task.
 
 1. Every step in your brief carried out.
 2. `{{GATES}}` — all gates green. Not "should pass": run it.
-3. Committed as `{{feat(m1): task N — <what>}}`, with a `Co-Authored-By:`
-   trailer naming whoever actually wrote the change. The trailer is a record of
-   authorship and the reviewer relies on it; do not copy the other agent's.
+3. Committed as `{{feat(m1): task N — <what>}}`, with this trailer **exactly**:
+
+   ```
+   Co-Authored-By: Antigravity <antigravity@antigravity.invalid>
+   ```
+
+   The trailer is a record of authorship and the reviewer relies on it; do not
+   copy the other agent's, and do not substitute an address of your own.
+
+   The address is deliberately unroutable. GitHub resolves co-author trailers
+   to accounts **by email** and counts them on the repository's Insights
+   contributor graph, so a trailer on a real domain credits whoever owns that
+   mailbox. `antigravity@google.com` is a live third-party account, and using
+   it put a stranger in the contributor list of a repository they have never
+   had any access to. `antigravity@users.noreply.github.com` is not a fix
+   either — the GitHub user `antigravity` exists, and that form resolves to
+   them. `.invalid` is reserved by RFC 2606: it can never be registered, so no
+   account can ever verify an address there and the trailer credits nobody.
 4. Nothing committed under {{vendor/, node_modules/, or other generated dirs}}.
 
 ## Write your report incrementally

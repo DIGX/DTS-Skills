@@ -132,7 +132,8 @@ setting `AGY_ALLOW_UNFILLED=1`.
 
 8. **Dispatch the reviewer** — a fresh Claude subagent, per the contract below.
 
-9. **Fix loop** — see below.
+9. **Fix loop** — see below. It comes back here: the loop is a detour inside
+   this step, and a task that leaves it still has step 10 to do.
 
 10. **Close the task** — append to the ledger: commits, gate results, every
     Minor finding as `Task N: minor (deferred): <one-liner>`, any ruling you
@@ -270,6 +271,18 @@ Five rounds maximum.
 - After fixing, package the fix diff with `.agy/review-pkg <prev> task-N-rM` and
   send a **scoped** re-review: only "are these findings resolved, and did the
   fix introduce anything new".
+
+**When the loop closes — clean re-review, or findings adjudicated at round
+five — go back to step 10 and close the task.** The loop is a detour inside
+step 9, not the end of the cycle. Say so out loud, because the text does not
+carry you there: the section ends here, and the next heading is a different
+subject entirely. A controller that resolves the last finding and stops has
+finished the work and written down nothing about it — no commits, no gate
+results, no deferred Minors, no rulings. That is the most expensive way to
+finish a task, because it is invisible: the code is right, the review passed,
+and the next controller has no record that any of it happened.
+
+Adjudication is the last thing you decide. It is never the last thing you do.
 
 ## Sizing tasks
 
