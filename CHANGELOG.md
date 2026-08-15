@@ -9,6 +9,88 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.3] — 2026-08-15
+
+Five field reports. Every one of them is a control that was present, ran, and
+reported — while being structurally unable to see the thing it named. A check
+that cannot fail is not a weaker check than one that can; it is worse than
+none, because the clean result it prints is read as evidence.
+
+#### Fixed
+- **The claims checker had been inverted, and nobody could tell.** Two
+  independent causes. `singular()` stripped `/e?s$/`, which turns `failures`
+  into `failur` and `cases`, `suites`, `examples`, `gates` likewise — none of
+  them a known unit, so they were dropped from *both* sides and silently never
+  compared. Five of the eleven units were unreachable in the plural, including
+  the one that matters most. Separately, the comparison asked only whether the
+  report's number appeared anywhere in the gate output, so a correctly-labelled
+  scoped count — `19 tests (--filter Gateway)` beside a suite of 76 — was
+  flagged as a contradiction. The net effect was a checker that passed the lies
+  and failed the accurate reports, teaching every controller who saw it to
+  ignore the line. It now strips at most a trailing `s`, and only when that
+  lands on a real unit; and a report naming several numbers for one unit is
+  read as naming several scopes, which the gate log cannot disambiguate, so it
+  is not judged at all.
+
+  The three existing tests passed throughout because all three were written
+  with `assertions` — the one plural the old regex happened to survive.
+
+- **`--file` switched off both report checks.** Every fix round is dispatched
+  as `--continue --file task-N-fixM.md`, and that path set `REPORT=""`, which
+  gates off the report contract *and* the claims comparison. So the checks were
+  live on the first attempt and dark for every correction after it — including
+  the rounds most likely to be papered over. The label is now matched for a
+  task number and the report path recovered from it; a correction file that is
+  not a task file still skips, exactly as before.
+
+- **An interrupted run left a commit and no account of it.** Flaw #20. Ctrl-C,
+  a closed terminal, a killed parent — the script exited silently, and if the
+  model had already committed, what remained on disk was indistinguishable from
+  a dispatch that never ran, except that HEAD had moved. From the moment the
+  fence is armed the run now owes a verdict however it ends, in the usual shape
+  and in its own vocabulary: `INTERRUPTED by SIGTERM`, `THE TREE MOVED` with
+  the range to read, `fence NOT CHECKED`, `gates NEVER RAN`. Neither check ran,
+  so neither reports a result. The handler also stops `agy`, which is a
+  background child and would otherwise go on writing to the log after the
+  verdict said the run had stopped.
+
+- **The commit trailer credited a real person.** `dispatch-context.md` required
+  a `Co-Authored-By:` trailer and never said what to put in it, so implementers
+  supplied `antigravity@google.com` — and GitHub resolves co-author trailers to
+  accounts by email, putting a stranger on the Insights contributor graph of
+  repositories they have never had access to. The trailer is now pinned
+  verbatim to `antigravity@antigravity.invalid`: `.invalid` is reserved by
+  RFC 2606 and can never be registered, so no account can ever verify it. The
+  template explains why, because the obvious alternative is the trap — the
+  `<username>@users.noreply.github.com` form resolves to the GitHub user of
+  that name, and the user `antigravity` exists.
+
+- **The fix loop had no way back.** Flaw #24 reported the protocol as having no
+  step for closing a task in the ledger. It has one, and always has — but step
+  9 is "Fix loop — see below", and that section ended at the scoped re-review
+  with the next heading on a different subject. A controller that resolved the
+  last finding and adjudicated had reached the genuine end of the text. The
+  step existed; nothing routed to it. Fixed as an edge rather than a second
+  step, since two closing instructions is how they start to disagree.
+
+- **`protocol.md` named a file that does not exist in half of all installs.**
+  Flaw #19. Three places told the controller to run `.agy/gates` — written only
+  when the installer generates a starter suite. In an adopted repo the
+  installer binds `AGY_GATES` to the runner already present and deliberately
+  writes no competing one, so the literal path is a `No such file or
+  directory`. Now `( . .agy/config && bash $AGY_GATES )`, which is what the
+  wrapper itself does.
+
+- **Nothing compared a task brief against the shared context.** Flaw #21. Both
+  are binding and the implementer reads both, so a rule the context states and
+  the brief contradicts is a task carrying two specifications with nothing to
+  say which governs. The implementer picks one silently and the run comes back
+  clean: every check in the loop reads one document and finds it
+  self-consistent. One such pair survived four dispatches. The cycle now
+  reconciles the two before dispatch, the reviewer contract carries the
+  backstop, and the resolution must fix a document rather than rule around it —
+  a contradiction settled as a one-task ruling is one you meet again on N+1.
+
 ### [1.8.2] — 2026-08-14
 
 Two more from the same day. Both are about a control that cannot see the thing
