@@ -9,6 +9,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.4] — 2026-08-15
+
+`dispatch-context.md` is where every behavioural rule in this harness lives,
+and until now not one of them was enforced. The fence checks file scope, the
+gates check correctness, the report contract checks the report — conduct was
+enforced by the model choosing to comply, and detected only if a controller
+happened to look. That is not a weaker control than a check; it is the absence
+of one, wearing the vocabulary of a rule.
+
+#### Fixed
+- **The co-author trailer is now checked, not merely requested.** The template
+  asked for a `Co-Authored-By:` line without saying what to put in it, so
+  implementers filled it in themselves and settled on `antigravity@google.com`.
+  GitHub resolves co-author trailers to accounts **by email** and counts them
+  on the repository's Insights contributor graph — so every run of this harness
+  was publishing a false claim of authorship against a live third-party
+  account, in a repository its owner has never had any access to.
+
+  Naming the right address in the template is half a fix, because the previous
+  wrong address got there the same way. `.agy/dispatch` now reads the trailers
+  off every commit the run landed and fails on any address that is not the
+  configured one, printing the `git commit --amend` that fixes it. The address
+  is compared alone — the display name is cosmetic, and GitHub ignores it.
+
+  The value is defined once, in the installer, and rendered into two places:
+  `AGY_COAUTHOR` in `.agy/config` for the check, and the trailer block in
+  `dispatch-context.md` for the model. One source, two renderings, so the rule
+  the model reads and the rule the harness enforces cannot drift apart.
+
+  The default is `Antigravity <antigravity@antigravity.invalid>`. `.invalid` is
+  reserved by RFC 2606 and can never be registered, so no account can ever
+  verify an address there and the trailer credits nobody.
+  `antigravity@users.noreply.github.com` is **not** an alternative: the GitHub
+  user `antigravity` exists, and that form resolves to them. Both the config
+  and the template say so, because both wrong answers look like fixes.
+
+  Scope, deliberately: a *wrong* address fails, a *missing* trailer does not.
+  Whether a commit should have carried one is a judgement — controllers commit
+  into the same range, amends drop trailers, merges never carry them — and a
+  check that can be wrong warns rather than fails. Whether an address is the
+  configured one is not a judgement. Only that is enforced.
+
+  `AGY_COAUTHOR=` (empty) switches the check off. The config binds it with `=`
+  rather than `:=` for exactly that reason: under `:=` an empty value is
+  indistinguishable from an unset one and the default comes straight back,
+  leaving no way to opt out short of deleting the check.
+
+  Trailers are read through git's own parser rather than matched in the message
+  text, so a commit that *discusses* an address — like the ones in this
+  release — is prose, not a claim.
+
 ### [1.8.3] — 2026-08-15
 
 Five field reports. Every one of them is a control that was present, ran, and

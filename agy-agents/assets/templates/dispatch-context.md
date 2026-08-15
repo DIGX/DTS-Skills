@@ -54,11 +54,14 @@ Verbatim from the plan or spec — not paraphrased. These bind every task.
 3. Committed as `{{feat(m1): task N — <what>}}`, with this trailer **exactly**:
 
    ```
-   Co-Authored-By: Antigravity <antigravity@antigravity.invalid>
+   Co-Authored-By: {{COAUTHOR}}
    ```
 
    The trailer is a record of authorship and the reviewer relies on it; do not
-   copy the other agent's, and do not substitute an address of your own.
+   copy the other agent's, and do not substitute an address of your own. **This
+   one is checked.** The harness reads the trailers off every commit the run
+   landed and fails the run on any other address, so a substitution here costs
+   a `git commit --amend`, not a discussion.
 
    The address is deliberately unroutable. GitHub resolves co-author trailers
    to accounts **by email** and counts them on the repository's Insights

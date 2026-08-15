@@ -58,6 +58,12 @@ ROOT="$PWD"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 TODAY="$(date +%Y-%m-%d)"
 
+# The commit trailer, defined once. It is written into .agy/config for the check
+# to read and substituted into dispatch-context.md for the model to copy, so the
+# rule and its enforcement cannot drift. See the config's attribution section for
+# why the address is deliberately unresolvable.
+COAUTHOR="Antigravity <antigravity@antigravity.invalid>"
+
 say()  { printf '  %-8s %s\n' "$1" "$2"; }
 do_it() { [ "$DRY" -eq 1 ] && return 1; return 0; }
 
@@ -353,6 +359,28 @@ else
 # broke — and a broken fence reporting "clean" is worse than no fence.
 : "\${AGY_REQUIRE:=$REQUIRE}"
 
+# ------------------------------------------------------------------ attribution
+# The one \`Co-Authored-By:\` address a landed commit may carry. This value is
+# substituted into dispatch-context.md at install, so the instruction the model
+# reads and the check the harness runs come from here — one source, two
+# renderings, nothing to drift apart.
+#
+# The address must not resolve. GitHub matches co-author trailers to accounts by
+# EMAIL and counts them on the contributor graph, so a real domain credits
+# whoever owns that mailbox: the default here used to be antigravity@google.com,
+# which put a stranger in the contributor list of every repo this harness
+# touched. \`.invalid\` is reserved by RFC 2606 and can never be registered.
+# Do not "fix" this to <name>@users.noreply.github.com — that form resolves to
+# the GitHub user of that name, and \`antigravity\` is a real account.
+#
+# Set empty to switch the check off entirely — \`AGY_COAUTHOR=\` here, or in the
+# environment. Note the assignment below is \`=\` and not \`:=\` for exactly that
+# reason: with \`:=\` an empty value is indistinguishable from an unset one and
+# the default would come straight back, so there would be no way to opt out
+# short of deleting the check. Opt out by emptying it, never by widening it to
+# something that matches anything.
+: "\${AGY_COAUTHOR=$COAUTHOR}"
+
 # --------------------------------------------------------------- project environment
 # Anything the gates and the implementer both need. \`.agy/dispatch\` sources
 # this file before it runs \`$GATES\`, so exports here reach the gates on every
@@ -410,6 +438,7 @@ subst() {
 		-e "s#{{PROTOCOL}}#$SKILL_DIR/reference/protocol.md#g" \
 		-e "s#{{MODEL}}#gemini-3.7-flash-high#g" \
 		-e "s#{{FALLBACK_MODEL}}#claude-opus-4-6-thinking#g" \
+		-e "s#{{COAUTHOR}}#$COAUTHOR#g" \
 		"$1"
 }
 

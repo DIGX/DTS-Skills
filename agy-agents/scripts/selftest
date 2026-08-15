@@ -67,7 +67,19 @@ if [ -n "${FAKE_TOUCH:-}" ]; then
 	printf 'implemented\n' > "$FAKE_TOUCH"
 	if [ -n "${FAKE_COMMIT:-}" ]; then
 		git add -A >/dev/null 2>&1
-		git commit -qm "task work: $FAKE_TOUCH" >/dev/null 2>&1
+		# FAKE_COAUTHOR is the trailer the run claims. Unset means no trailer at
+		# all, which is what most tests want; the attribution tests set it.
+		msg="task work: $FAKE_TOUCH"
+		# FAKE_BODY is a prose paragraph between the subject and the trailer
+		# block — the shape a commit takes when it talks *about* a trailer.
+		[ -n "${FAKE_BODY:-}" ] && msg="$msg
+
+$FAKE_BODY"
+		[ -n "${FAKE_COAUTHOR:-}" ] &&
+			msg="$msg
+
+Co-Authored-By: $FAKE_COAUTHOR"
+		git commit -qm "$msg" >/dev/null 2>&1
 	fi
 fi
 
@@ -794,10 +806,10 @@ REPORT_OK='Done.
 ## Observations
 None.'
 
-landing() { # landing <log> [FAKE_TOUCH] [FAKE_COMMIT]
+landing() { # landing <log> [FAKE_TOUCH] [FAKE_COMMIT] [FAKE_COAUTHOR]
 	rm -f "$REPORT_9"
 	FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
-	FAKE_TOUCH="${2:-}" FAKE_COMMIT="${3:-}" AGY_SKIP_GATES=1 \
+	FAKE_TOUCH="${2:-}" FAKE_COMMIT="${3:-}" FAKE_COAUTHOR="${4:-}" AGY_SKIP_GATES=1 \
 		bash .agy/dispatch 9 >"$1" 2>&1
 }
 
@@ -829,6 +841,89 @@ hasnt "  does not claim nothing landed"    "landed  NOTHING" "$TMP/l3.log"
 has "the turn count is labelled agy's own" "agy's own count" "$TMP/l3.log"
 has "the tool line totals the calls"       "call(s) —"       "$TMP/l3.log"
 hasnt "the duration line no longer carries turns" "thread-elapsed / " "$TMP/l3.log"
+
+rm -f "$REPORT_9"
+
+printf '\n=== attribution ====================================================\n'
+# Every behavioural rule in dispatch-context.md used to be enforced by the model
+# choosing to comply. This is the one that had a victim: the template asked for a
+# `Co-Authored-By:` line without saying what to put in it, implementers supplied
+# antigravity@google.com, and GitHub — which resolves co-author trailers to
+# accounts BY EMAIL — put a real stranger on the contributor graph. Telling the
+# model harder is not the lever; the instruction was already there.
+
+GOOD_CA="Antigravity <antigravity@antigravity.invalid>"
+
+has "the installer writes the trailer into the config" \
+	"antigravity@antigravity.invalid" .agy/config
+has "  and into the context the model reads" \
+	"antigravity@antigravity.invalid" .agy/work/m1/dispatch-context.md
+# One source, two renderings. If these could drift, the model would be obeying a
+# different rule from the one the harness checks, which is the whole failure.
+hasnt "  and leaves no unfilled marker behind" \
+	"{{COAUTHOR}}" .agy/work/m1/dispatch-context.md
+# The context names the two wrong answers on purpose. Both look like fixes —
+# a real domain, and the noreply form — and both credit a live account, so a
+# template that only states the right address invites being "tidied" into one
+# of them. Deleting this paragraph is how the bug comes back.
+has "  and warns off the noreply form, which resolves too" \
+	"users.noreply.github.com" .agy/work/m1/dispatch-context.md
+
+landing "$TMP/ca1.log" "src/ca1.txt" 1 "$GOOD_CA"
+want "the configured co-author passes"     0 $?
+hasnt "  and says nothing about it"        "WRONG CO-AUTHOR" "$TMP/ca1.log"
+
+# A missing trailer is not a wrong one. The controller commits in this range
+# too, amends drop trailers, and merges never carry them — so "should there
+# have been a trailer" is a judgement, while "is this address the configured
+# one" is not. Only the second is deterministic, so only the second fails.
+landing "$TMP/ca0.log" "src/ca0.txt" 1
+want "a commit with no trailer at all is left alone" 0 $?
+hasnt "  and is not reported as wrong"     "WRONG CO-AUTHOR" "$TMP/ca0.log"
+
+# The display name is cosmetic — GitHub matches on the address alone, so two
+# trailers differing only in the name are the same claim and must not disagree
+# here. Case too: addresses are not case-sensitive on the part that matters.
+landing "$TMP/ca2.log" "src/ca2.txt" 1 "Some Other Name <ANTIGRAVITY@Antigravity.INVALID>"
+want "a different display name is still the same co-author" 0 $?
+hasnt "  no complaint"                     "WRONG CO-AUTHOR" "$TMP/ca2.log"
+
+landing "$TMP/ca3.log" "src/ca3.txt" 1 "Antigravity <antigravity@google.com>"
+want "the address that caused this FAILS the run" 1 $?
+has  "  the verdict block names it"        "trailer WRONG CO-AUTHOR" "$TMP/ca3.log"
+has  "  quotes the offending address"      "antigravity@google.com"  "$TMP/ca3.log"
+has  "  and the one it expected"           "Expected: $GOOD_CA"      "$TMP/ca3.log"
+has  "  gives the remedy, not a lecture"   'git commit --amend --trailer' "$TMP/ca3.log"
+has  "  says why an address is not cosmetic" "BY EMAIL"              "$TMP/ca3.log"
+# The verdict block and the exit code have to agree. The run, the fence and the
+# gates were all fine here — the trailer is the only thing that failed, so it
+# has to appear in the block a controller reads, not only in a section above it.
+has  "  and detail above the block"        "--- attribution"         "$TMP/ca3.log"
+
+# Opt out by emptying the value, not by widening it — a check that matches
+# anything is the state this whole section exists to leave behind. This is also
+# what pins the config to `:=`'s cousin: with `${AGY_COAUTHOR:=...}` an empty
+# value is indistinguishable from an unset one, the default comes straight back,
+# and this test fails.
+rm -f "$REPORT_9"
+AGY_COAUTHOR="" FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/ca4.txt" FAKE_COMMIT=1 FAKE_COAUTHOR="Antigravity <antigravity@google.com>" \
+AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ca4.log" 2>&1
+want "an empty AGY_COAUTHOR switches the check off" 0 $?
+hasnt "  and prints nothing about attribution" "WRONG CO-AUTHOR" "$TMP/ca4.log"
+
+# The check reads git's own trailer parser, not the message text. A commit whose
+# body discusses a trailer is prose, and prose is not a claim of authorship —
+# without this, the commit that lands this very section would fail its own check,
+# and so would every commit that documents the address it replaced.
+rm -f "$REPORT_9"
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/ca5.txt" FAKE_COMMIT=1 FAKE_COAUTHOR="$GOOD_CA" \
+FAKE_BODY="The old default was Co-Authored-By: Antigravity <antigravity@google.com>,
+which is a live account. Quoted here, not claimed." \
+AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ca5.log" 2>&1
+want "an address quoted in a commit body is not a trailer" 0 $?
+hasnt "  the prose is not read as a claim" "WRONG CO-AUTHOR" "$TMP/ca5.log"
 
 rm -f "$REPORT_9"
 
