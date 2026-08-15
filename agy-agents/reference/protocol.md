@@ -49,6 +49,24 @@ setting `AGY_ALLOW_UNFILLED=1`.
    is the envelope around it — interfaces from earlier tasks, your rulings on
    anything ambiguous, and the scope fence.
 
+   Read the brief **beside `dispatch-context.md`**, never on its own. The
+   implementer reads both and treats both as binding, so a rule the context
+   states and the brief contradicts is a task carrying two specifications with
+   nothing to say which governs. The implementer does not stop on that: it
+   picks one, silently, and the run comes back clean — the contradiction is
+   invisible to every check in the loop, because each of them reads one
+   document and finds it self-consistent. One such pair, disagreeing about
+   whether proof scripts are committed, survived four dispatches. Your standing
+   contradiction pass compares the brief against the *code*; this is the pass
+   against the *context*, and it is the only one that catches this class.
+
+   Resolve any disagreement before dispatching, by fixing a document rather
+   than by ruling around it. If the brief is wrong, correct the brief. If the
+   **context** is wrong, correct the context and note it in the ledger: it is
+   inherited by every later task, so a contradiction resolved as a one-task
+   ruling is one you meet again on N+1 — which is exactly how the same pair
+   contradicted four briefs in a row.
+
    Long is fine. It costs one write, and unlike a pasted prompt it never
    re-enters your context on later turns.
 
@@ -92,7 +110,19 @@ setting `AGY_ALLOW_UNFILLED=1`.
    step in the cycle: the implementer's claim is the least verifiable link in
    the chain and you cannot see its reasoning. A green report over a red gate is
    the expected failure mode, not a surprise. If you are ever unsure the run
-   really executed them, run `.agy/gates` again yourself.
+   really executed them, run them again yourself:
+
+   ```sh
+   ( . .agy/config && bash $AGY_GATES )
+   ```
+
+   Not `.agy/gates` — that file exists only when the installer wrote a starter
+   suite. In an adopted repo it bound `AGY_GATES` to the runner you already had
+   and deliberately wrote no competing one, so the literal path is a `No such
+   file or directory`. Sourcing the config is what makes the command work in
+   both kinds of repo, and it is exactly what the wrapper does before its own
+   gate run. `$AGY_GATES` is left unquoted for the same reason it is unquoted
+   in `dispatch` — a runner may carry arguments.
 
 6. **Read the actual diff** — `git log BASE..HEAD` and the changed files. Not
    the report. Check for scope drift: files touched that the dispatch did not
@@ -125,6 +155,8 @@ review package. Then:
   1. **Brief integrity** — do the brief's stated invariants actually follow from
      its stated rules? Not "is the brief clear", but: take the rules it lays
      down, follow them, and see whether they produce the property it claims.
+     Then read it against `dispatch-context.md`: anything the two documents
+     say differently is a finding here, whichever one turns out to be right.
   2. **Spec compliance** — ✅/❌, walked requirement by requirement with
      `file:line` citations.
   3. **Code quality** — Approved / Changes requested, findings as Critical /
@@ -140,7 +172,10 @@ review package. Then:
   as ground truth, because from where it sits that is exactly what it is.
   A finding here is **adjudicated by the controller, not fixed by the
   implementer**: correct the brief, record the correction as a ruling in the
-  ledger, and re-dispatch if the landed work is now wrong.
+  ledger, and re-dispatch if the landed work is now wrong. The same holds for
+  a brief that contradicts the context, with one addition — fix the document
+  that is actually wrong. Correcting the brief when the context was the faulty
+  one leaves every later task inheriting the fault.
 - **Grade the acceptance criteria as claims to falsify, not as work to
   summarise.** Left to itself an implementer fills that table in as a report of
   what it did: every row restates the action it took, so a row reads ✅ because
@@ -266,7 +301,7 @@ inherits it and the plan stops being reproducible.
 failure:
 
 1. Check what is on disk: `git status --short`, and whether the review exists.
-2. Run `.agy/gates` yourself.
+2. Run the gates yourself: `( . .agy/config && bash $AGY_GATES )`.
 3. **Decide before resuming.** A killed subagent is not lost — it can be
    resumed from its own transcript, which still holds everything it read.
    Resuming reloads that transcript (~120–150k tokens), so resume when what
@@ -285,7 +320,7 @@ history, so recovery is cheaper: `.agy/dispatch --continue --file <correction>`.
 But first establish what actually landed, from disk, not by asking it:
 
 1. `git status --short` and `git log BASE..HEAD` — what was committed.
-2. `.agy/gates` — what actually passes.
+2. `( . .agy/config && bash $AGY_GATES )` — what actually passes.
 3. Read `task-N-report.md` — how far the incremental log got.
 
 Then send a correction naming the remaining steps only. If it has stopped early
