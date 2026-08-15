@@ -196,7 +196,20 @@ if [ "${1:-}" = "--file" ]; then
 	PROMPT="Read ${2} and execute it in full."
 	PROMPT_FILE="$2"
 	LABEL="$(basename "$2" | sed 's/\.[^.]*$//')"
-	REPORT=""
+	# A correction file is still a task. Every fix round is sent this way
+	# (`--continue --file task-7-fix3.md`), and an empty REPORT gates off both
+	# the report contract and the claims comparison — so the dispatches most
+	# likely to be cutting corners were the only ones running unchecked, and
+	# nothing said so. The label already carries the task number; recover the
+	# report path from it, and fall back to none only when the prompt file is
+	# not named after a task. Checks still require a report written during THIS
+	# run, so a correction that does not touch it is skipped exactly as before.
+	case "$LABEL" in
+	task-[0-9]*)
+		REPORT="$AGY_WORKSPACE/task-$(printf '%s' "$LABEL" |
+			sed 's/^task-\([0-9][0-9]*\).*/\1/')-report.md" ;;
+	*) REPORT="" ;;
+	esac
 elif [ -n "${1:-}" ]; then
 	N="$1"
 	DISPATCH="$AGY_WORKSPACE/task-$N-dispatch.md"
@@ -826,7 +839,23 @@ const read = p => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { retur
 // Quantities a gate suite actually measures and a report actually claims.
 // Anything outside this list (minutes, commits, line numbers) is not compared.
 const UNITS = ['assertion', 'test', 'check', 'gate', 'spec', 'example', 'case', 'suite', 'failure', 'error', 'warning'];
-const singular = w => w.toLowerCase().replace(/e?s$/, '').replace(/^(assertion|test|check|gate|spec|example|case|suite|failure|error|warning)$/, '$1');
+
+// Strip at most a trailing "s", and only when doing so lands on a real unit.
+// The previous form stripped /e?s$/, which turned `failures` into `failur`,
+// `gates` into `gat`, and `cases`, `suites`, `examples` likewise — none of them
+// in UNITS, so they were dropped from BOTH sides and silently never compared.
+// Five of the eleven units were unreachable in the plural, `failure` among
+// them: the one number this check exists to catch a lie about. `76 tests, 0
+// failures` against `Tests: 76, Failures: 2` compared only the tests, matched,
+// and reported that nothing contradicted. The tests missed it because they
+// were written with `assertions`, which is the plural the old regex happened
+// to handle.
+const singular = w => {
+	const lw = w.toLowerCase();
+	if (UNITS.includes(lw)) return lw;
+	const s = lw.replace(/s$/, '');
+	return UNITS.includes(s) ? s : lw;
+};
 
 const grab = text => {
 	const found = new Map();
@@ -851,7 +880,16 @@ const conflicts = [];
 for (const [unit, nums] of claimed) {
 	const got = measured.get(unit);
 	if (!got) continue;
-	for (const n of nums) if (!got.has(n)) conflicts.push({ unit, n, got: [...got] });
+	// A report naming several numbers for one unit is naming several scopes —
+	// "19 tests (--filter Gateway). Full unit suite: 76 tests" — and nothing in
+	// the gate log says which of them the gates measured. Comparing each number
+	// against the whole set flagged the scoped one every time, so a correctly
+	// labelled partial run could never pass. That is a checker that fires on
+	// accurate reports, which is the failure this section's own comment warns
+	// about. Only a single, unambiguous claim is comparable.
+	if (nums.size !== 1) continue;
+	const n = [...nums][0];
+	if (!got.has(n)) conflicts.push({ unit, n, got: [...got] });
 }
 
 if (!conflicts.length) {

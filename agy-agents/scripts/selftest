@@ -633,6 +633,32 @@ FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Took 12 minutes across
 	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b4.log" 2>&1
 hasnt "an unmeasured quantity is not flagged" "CLAIM" "$TMP/b4.log"
 
+# Failure counts are the number this check exists to catch a lie about, and
+# they were never compared. `singular()` stripped /e?s$/, so `failures` became
+# `failur` and fell out of UNITS on both sides at once — the report's count and
+# the gates' count were both discarded, and the run reported that nothing
+# contradicted. Five of eleven units were unreachable in the plural this way.
+# The three cases above all say `assertions`, the one plural that regex
+# happened to survive, which is why they passed throughout.
+printf '#!/usr/bin/env bash\nprintf "OK (76 tests, 2 failures)\\n"\nexit 0\n' > .agy/gates
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Done. 76 tests, 0 failures.' \
+	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b5.log" 2>&1
+has "a failure count the gates contradict is flagged" "CLAIM" "$TMP/b5.log"
+has "  quotes the report's count" "says 0 failure" "$TMP/b5.log"
+has "  quotes the gate's count"   "reported 2"     "$TMP/b5.log"
+
+# The mirror image, and the one that actually fired in the field: a report that
+# labels its scope is accurate, not lying. Every number used to be tested for
+# membership in the whole gate set, so a correctly labelled partial run could
+# never pass — it was reconciled by hand on four consecutive tasks. A unit the
+# report gives more than one number for is naming more than one scope, and the
+# gate log does not say which one it measured.
+printf '#!/usr/bin/env bash\nprintf "OK (76 tests)\\nSlow: 21 tests\\n"\nexit 0\n' > .agy/gates
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" \
+	FAKE_REPORT_TEXT='Ran 19 tests (--filter Gateway). Full unit suite: 76 tests.' \
+	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b6.log" 2>&1
+hasnt "a scoped count beside the full count is not flagged" "CLAIM" "$TMP/b6.log"
+
 cp "$TMP/gates.claims.bak" .agy/gates
 rm -f "$REPORT_9"
 
@@ -653,6 +679,28 @@ FAKE_ERROR=none FAKE_REPORT="$REPORT_9" \
 None.' \
 	AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/s2.log" 2>&1
 want "a report carrying it passes" 0 $?
+rm -f "$REPORT_9"
+
+# --file used to set REPORT="", and both this check and the claims comparison
+# are gated on having a fresh report. So every fix round — which is exactly how
+# a correction is sent, `--continue --file task-9-fix1.md` — ran with both
+# checks off, and nothing in the output said so. The dispatches most likely to
+# be cutting corners were the only unchecked ones. The label already carries
+# the task number, so the report path is recoverable from it.
+printf 'Fix the thing.\n' > "$TMP/task-9-fix1.md"
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Done. Everything green.' \
+	AGY_SKIP_GATES=1 bash .agy/dispatch --file "$TMP/task-9-fix1.md" >"$TMP/s3.log" 2>&1
+want "a --file correction still enforces the contract" 1 $?
+has  "  names the section" "## Observations" "$TMP/s3.log"
+
+# A prompt file not named after a task has no report to check, and must not
+# invent one — the checks stay off rather than failing on a file that is not
+# there.
+printf 'Do a thing.\n' > "$TMP/scratch-note.md"
+FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --file "$TMP/scratch-note.md" >"$TMP/s4.log" 2>&1
+want "a --file prompt with no task number still runs" 0 $?
+hasnt "  and claims no report contract" "report contract" "$TMP/s4.log"
 rm -f "$REPORT_9"
 
 printf '\n=== what landed ====================================================\n'
