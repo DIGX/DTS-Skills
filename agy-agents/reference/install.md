@@ -93,13 +93,60 @@ are written from this one setting. Change one without the other and dispatch
 refuses to run: the implementer would be judged against a rule it was never
 given. Fix both, or re-install.
 
-Already installed? Re-running the installer **keeps** an edited `.agy/config`,
-and `--force` would overwrite your filled-in `dispatch-context.md`. So change
-the two by hand: the `AGY_COAUTHOR` line in `.agy/config`, and the trailer
-block under "Definition of done" in `.agy/work/<slug>/dispatch-context.md`.
+Already installed? `--coauthor` changes it in place — the `AGY_COAUTHOR` line
+in `.agy/config` and the `Co-Authored-By:` line in the current milestone's
+`dispatch-context.md`, both, in one run. Nothing else in either file is
+touched, and the installer re-reads the config afterwards to confirm the new
+value is what the harness will actually resolve. If it cannot, it says so and
+tells you to edit by hand rather than reporting a change it did not make.
 
 `AGY_COAUTHOR=` (empty) switches the check off. Opt out that way, never by
 widening it to a value that matches anything.
+
+### Which value wins
+
+Four sources, most specific first:
+
+| | source | when it applies |
+|---|---|---|
+| 1 | `--coauthor` on this run | always — this is how you change a decided project |
+| 2 | `AGY_COAUTHOR` in `.agy/config` | the project already chose; `--force` does not override it |
+| 3 | `AGY_COAUTHOR` in the environment | first install into this repository |
+| 4 | the shipped default | nothing else was said |
+
+An existing config outranks your environment on purpose. Exporting
+`AGY_COAUTHOR` and then installing into somebody else's repository must not
+rewrite their shared context to name your mailbox — and a milestone advance
+re-scaffolds `dispatch-context.md`, so without that rule it would.
+
+## Re-installing an existing repository
+
+The four scripts (`dispatch`, `tripwire`, `review-pkg`, the gate runner) are
+refreshed on every install. `.agy/config`, the gate file and the templates are
+kept unless you pass `--force`.
+
+Keeping the config wholesale used to mean a key introduced by a later version
+never reached a repository installed before it existed — while the *code* that
+reads that key arrived anyway. `AGY_COAUTHOR` is how that surfaced: 1.8.4
+shipped the trailer check into repositories with no value for it to check
+against, and an unset `AGY_COAUTHOR` means off. The check landed and did
+nothing.
+
+So a kept config is now compared against the one this version would write, and
+any key missing from yours is **appended** in a dated block at the end, with
+the comment paragraph that explains it. Nothing above that block is read for
+its value, rewritten, or reordered — it stays yours. Appending is safe on its
+own terms too: every binding is `${VAR:=…}` or `${VAR=…}`, so a value set
+earlier in the file wins over anything below it. The installer names each key
+it adds.
+
+One of those additions has a consequence worth stating: adding `AGY_COAUTHOR`
+to a config that never carried it turns the trailer check **on**, and dispatch
+then refuses to run until the milestone context names the same address. That
+refusal is correct, but meeting it on your next dispatch — in a repository
+where nothing looked like it changed the rules — reads as a broken harness. So
+the install that causes it says so, and either rewrites the template's
+`Co-Authored-By:` line for you or prints the exact line to paste.
 
 ## Advancing to the next milestone
 

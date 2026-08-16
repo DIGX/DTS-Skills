@@ -9,6 +9,75 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.6] — 2026-08-16
+
+A new control shipped to every repository running the harness, and reached
+none of them. That is the whole release: the gap between "the skill has it"
+and "this repository has it".
+
+#### Added
+- **The installer adds missing keys to a config it keeps.** `.agy/config` is
+  the project's file and re-installing has always kept it — but the four
+  scripts are refreshed every time, so 1.8.4's trailer check arrived in old
+  repositories with no `AGY_COAUTHOR` for it to read. An unset value means
+  off. The check landed and did nothing, which is worse than not shipping it:
+  the repository now looks protected and is not.
+
+  A kept config is compared against the one this version would write, and any
+  key yours lacks is appended in a dated block, carrying the comment paragraph
+  that explains it — a control that arrives without its paragraph is a line
+  somebody deletes later for looking like noise. Nothing above the block is
+  read for its value, rewritten, or reordered. Appending is safe on its own
+  terms too: every binding is `${VAR:=…}` or `${VAR=…}`, so an earlier value
+  wins over anything below it, and a deliberate edit survives even if the name
+  match were wrong.
+
+  Adding `AGY_COAUTHOR` turns the trailer check on, and dispatch then refuses
+  until the context names the same address. Correct — and, arriving on the
+  next dispatch in a repository where nothing looked like it changed,
+  indistinguishable from a broken harness. So the run that causes it says so,
+  and either rewrites the template's `Co-Authored-By:` line or prints the line
+  to paste.
+
+- **`--coauthor` now works on a repository that already has one.** The
+  migration only *adds* keys, which left the documented way to change this
+  address doing nothing on the only repositories that needed it — the same
+  trap one level up. The flag repoints `.agy/config` and the milestone
+  context in place, then re-sources the config to confirm the value the
+  harness will actually resolve. If it does not match, the installer says it
+  could not repoint rather than reporting a change it did not make.
+
+- **Install-time precedence, most specific first:** `--coauthor`, then
+  `.agy/config`, then `AGY_COAUTHOR` in the environment, then the shipped
+  default. An existing config outranks the environment deliberately — a
+  maintainer with `AGY_COAUTHOR` exported, installing into somebody else's
+  repository, must not rewrite that project's shared context to name their own
+  mailbox. A milestone advance re-scaffolds `dispatch-context.md` from the
+  resolved value, so without this rule 1.8.5 would have manufactured exactly
+  the config/context drift it added a refusal for. `--force` regenerates the
+  config but does not silently move the credit; only `--coauthor` does.
+
+#### Changed
+- **The protocol now says what makes a fault injection sound** (field report
+  #29). It already required each acceptance criterion to be falsified rather
+  than summarised, and said nothing about attributing a mutation's red to its
+  fault — so every harness that has tried it reached for the same unsound
+  shortcut: inject the fault, grep the whole output for `FAIL`. A suite of any
+  size has other reasons to go red, and a fault that *cannot fire* looks
+  identical to one that fired and was caught.
+
+  The rule added: name the assertions the fault should break **before**
+  running, then compare predicted against observed. Predicted-red-observed-
+  green means the assertion is vacuous. Observed-red-unpredicted means the
+  blast radius is wider than the fault, usually a cascade, and those
+  assertions are still unpinned. Only a match is proof.
+
+  The worked example in the text is from this release. A mutation disabling
+  the config read turned four assertions red; "did it go red?" says yes, and
+  the precedence assertions get filed as pinned. They were green — the
+  mutation had disabled a different branch. Inverting the precedence directly
+  turned five other assertions red, and the two sets barely overlap.
+
 ### [1.8.5] — 2026-08-16
 
 1.8.4 made the trailer checkable and then shipped one address for everybody.

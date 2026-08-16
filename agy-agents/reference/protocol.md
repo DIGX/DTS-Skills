@@ -186,6 +186,36 @@ review package. Then:
   attempted to falsify is not satisfied, it is **unverified**, and it is
   reported ❌ with what a test of it would take. This is the same rule the rest
   of the harness runs on: an absent measurement is never a pass.
+- **A fault injection proves something only if you predicted what it would
+  break.** The bullet above says to try to break the criterion. This one is
+  about how to read the result, and it is where the technique quietly stops
+  working. Injecting a fault and then searching the output for `FAIL` — or for
+  a marker string anywhere in it — certifies nothing: a suite of any size has
+  other reasons to go red, so a fault that *cannot fire* looks exactly like one
+  that fired and was caught. Reaching for an output-wide grep is the default
+  move, and it has been the default move of every harness that has tried this
+  here.
+
+  So name the targets first. Before running the mutated suite, write down the
+  exact assertion labels the fault should turn red. Run it. Compare the two
+  sets, and read each mismatch as its own answer:
+
+  - **predicted red, observed green** — the assertion is vacuous. It does not
+    test what its label claims. That is a defect in the test, not a detail.
+  - **observed red, not predicted** — the blast radius is wider than the fault.
+    Usually a cascade: one fixture feeding later assertions, which then fail
+    for a missing precondition rather than for the fault. Those assertions are
+    still unpinned. Pin them with a second, narrower mutation.
+  - **the two sets match** — and only then — the assertions are falsified.
+
+  Worked example, from this repo's own 1.8.6 work. A mutation that stopped the
+  installer reading the co-author out of an existing config turned four
+  assertions red. "Did it go red?" says yes, and the precedence assertions get
+  filed as pinned — but they were green, and they were green because the
+  mutation had disabled a *different* branch that happened to leave the config
+  untouched. Inverting the precedence directly turned five other assertions
+  red. The two sets barely overlap, and only the second mutation said anything
+  about the rule that was supposedly under test.
 - **Reconcile the acceptance-criteria rows against the brief, and say the
   count.** The failure above is an optimistic row; this one is a row that is not
   there at all. A task issued with twelve criteria came back reporting eight,

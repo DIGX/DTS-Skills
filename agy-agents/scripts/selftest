@@ -1017,6 +1017,111 @@ bash "$SKILL_DIR/scripts/install" >/dev/null 2>&1
 has "re-install keeps an edited config" "EDITED BY THE USER" .agy/config
 has "re-install keeps an edited gate runner" "EDITED BY THE USER" .agy/gates
 
+# ================================================== config key migration
+printf '\n=== config key migration ===========================================\n'
+# "A config that exists is kept" is right about the values and wrong about the
+# keys. The four scripts ARE refreshed on every install, so a repo installed
+# before AGY_COAUTHOR existed got the trailer check and nothing to check
+# against — and an unset AGY_COAUTHOR means the check is off. The control
+# shipped, arrived, and did nothing, which is the one outcome worse than not
+# shipping it. Field reports from such a repo are indistinguishable from an
+# open flaw, because the fix is on disk and inert.
+MIG="$TMP/migrate"
+mkdir -p "$MIG/src"
+(
+	cd "$MIG" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project MIG >/dev/null 2>&1
+) || bad "migration fixture installs" "setup failed"
+
+# Forge the pre-1.8.4 config: the key and its comment paragraph gone, an edit of
+# the user's left behind to prove the append never touches what is above it.
+sed -i '/^# ---* attribution/,/^: "${AGY_COAUTHOR/d' "$MIG/.agy/config"
+printf '\n# EDITED BY THE USER\n' >> "$MIG/.agy/config"
+hasnt "an old config really lacks the key" "AGY_COAUTHOR" "$MIG/.agy/config"
+# And an old context has no trailer block either — a repo from before the rule
+# existed is missing both halves, which is what makes the next dispatch refuse.
+sed -i '/Co-Authored-By:/d' "$MIG/.agy/work/m1/dispatch-context.md"
+
+( cd "$MIG" && bash "$SKILL_DIR/scripts/install" --project MIG >"$TMP/mig1.log" 2>&1 )
+has "re-install adds a key the config never carried" \
+	'"${AGY_COAUTHOR=' "$MIG/.agy/config"
+has "  and says so, because a new key can turn a check on" \
+	"AGY_COAUTHOR" "$TMP/mig1.log"
+has "  keeps the paragraph that explains it" "BY EMAIL" "$MIG/.agy/config"
+has "  and leaves the user's own edits alone" "EDITED BY THE USER" "$MIG/.agy/config"
+# Turning the check on makes dispatch refuse until the context names the same
+# address. The context here was written before the key existed, so it does not
+# — and being told that by the next dispatch, in a repo where nothing about the
+# install looked like a rule change, is how a correct refusal reads as a broken
+# harness.
+has "  warns that the check is now ON" "co-author check is now ON" "$TMP/mig1.log"
+has "  and gives the line to paste"    "Co-Authored-By: Antigravity" "$TMP/mig1.log"
+
+# Idempotent, or the second install appends a duplicate binding of everything.
+( cd "$MIG" && bash "$SKILL_DIR/scripts/install" --project MIG >/dev/null 2>&1 )
+n="$(grep -c '^: "${AGY_COAUTHOR' "$MIG/.agy/config" 2>/dev/null || echo 0)"
+[ "$n" = 1 ] && ok "  a second re-install adds nothing" \
+	|| bad "  a second re-install adds nothing" "$n bindings of AGY_COAUTHOR"
+
+# An emptied value is a project switching the check off deliberately. Migrating
+# it "back" would silently re-enable a control someone turned off — the append
+# keys on whether the file NAMES the key, never on whether it has a value.
+sed -i 's/^: "${AGY_COAUTHOR=.*/: "${AGY_COAUTHOR=}"/' "$MIG/.agy/config"
+( cd "$MIG" && bash "$SKILL_DIR/scripts/install" --project MIG >"$TMP/mig2.log" 2>&1 )
+n="$(grep -c '^: "${AGY_COAUTHOR' "$MIG/.agy/config" 2>/dev/null || echo 0)"
+[ "$n" = 1 ] && ok "an opt-out survives re-install" \
+	|| bad "an opt-out survives re-install" "$n bindings — the opt-out was overwritten"
+has "  and is reported as off, not as a value" "check is OFF" "$TMP/mig2.log"
+
+# Install-time precedence. A maintainer with AGY_COAUTHOR exported installing
+# into somebody else's repo must not repoint that repo's committed context at
+# their own mailbox. The project decided; the export is one machine's habit.
+# Their export still wins at runtime, where the drift refusal stops them
+# dispatching against a rule the context does not carry.
+PREC="$TMP/precedence"
+mkdir -p "$PREC/src"
+(
+	cd "$PREC" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project PREC \
+		--coauthor 'Antigravity <theirs@example.test>' >/dev/null 2>&1
+	AGY_COAUTHOR='Antigravity <mine@example.test>' \
+		bash "$SKILL_DIR/scripts/install" --project PREC --milestone m2 \
+		>"$TMP/prec.log" 2>&1
+) || bad "precedence fixture installs" "setup failed"
+has "an existing config outranks the environment" \
+	"theirs@example.test" "$PREC/.agy/config"
+hasnt "  the export does not reach the config" \
+	"mine@example.test" "$PREC/.agy/config"
+# The milestone's fresh context is scaffolded by substitution, so it takes
+# whatever the installer resolved. Resolve it from the environment and the new
+# context names an address the config does not — the exact drift .agy/dispatch
+# refuses on, manufactured by the installer itself on a routine advance.
+has "  a new milestone's context takes the project's address" \
+	"theirs@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
+hasnt "  and not the installing machine's" \
+	"mine@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
+# --force regenerates scaffolding. Who gets credited on a contributor graph is
+# not scaffolding, and there is an explicit flag for changing it.
+( cd "$PREC" && bash "$SKILL_DIR/scripts/install" --project PREC --force >/dev/null 2>&1 )
+has "  --force does not silently repoint the credit" \
+	"theirs@example.test" "$PREC/.agy/config"
+( cd "$PREC" && bash "$SKILL_DIR/scripts/install" --project PREC \
+	--coauthor 'Antigravity <changed@example.test>' >"$TMP/prec2.log" 2>&1 )
+has "  --coauthor is what changes it" "changed@example.test" "$PREC/.agy/config"
+has "  and says which value moved"    "AGY_COAUTHOR: Antigravity <theirs@example.test> ->" \
+	"$TMP/prec2.log"
+# Moving one rendering and not the other manufactures the exact drift dispatch
+# refuses on. The trailer line came from our own template, so its shape is ours
+# to know and safe to rewrite; the rest of that file is the user's prose.
+has "  and carries the context with it" \
+	"changed@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
+hasnt "  leaving no stale address behind" \
+	"theirs@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
+
 printf '\n=== adoption =======================================================\n'
 # Adopting a repo that already has its own gate runner is the path a real
 # migration takes, and it is the one that goes wrong quietly: the generated
