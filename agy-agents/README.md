@@ -381,6 +381,37 @@ would have pushed the real content past the reviewer's read limit. The manifests
 themselves (`composer.json`, `package.json`, …) are always included in full, so
 nothing a reviewer must judge is hidden.
 
+#### `--check` — is the review finished?
+
+```bash
+.agy/review-pkg --check <workspace>/task-3-review.md --ac 12
+# reviewed: brief=ok spec=pass quality=approved ac=12/12 (…/task-3-review.md)
+```
+
+The package tells the reviewer to end its file with one line:
+
+```
+REVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>
+```
+
+`--check` tests for its **absence** and exits non-zero. A reviewer killed
+mid-write leaves a file that reads exactly like a review which found nothing —
+the verdict table is written before the findings are, so what survives is a
+complete-looking table with every row MET and no findings section. The
+controller's only signal was the presence of a table, which is what the
+truncated file has. An unfinished artefact must not borrow the vocabulary of a
+finished one.
+
+Three other things fail on the way past, all of them arithmetic rather than
+judgement: a spec `pass` reported alongside criteria that were not met, more
+criteria met than issued, and — with `--ac <n>` — a reconciled total that does
+not match the count the brief handed out. That last one is how a dropped row
+becomes visible: an optimistic table is still a checklist, wrong but auditable,
+where a table that can lose rows shows the reader nothing about what is gone.
+
+The line it prints on success is what goes in the ledger, so a review nobody
+checked is a review with no verdict to record.
+
 ---
 
 ## Installing
@@ -566,7 +597,9 @@ Full protocol: [`reference/protocol.md`](reference/protocol.md). One pass:
    for files touched that the dispatch did not name.
 7. **Package the review** — `.agy/review-pkg <BASE> task-N`.
 8. **Dispatch a fresh Claude subagent reviewer** — three verdicts: brief
-   integrity, spec compliance, code quality.
+   integrity, spec compliance, code quality. Then
+   `.agy/review-pkg --check <workspace>/task-N-review.md --ac <n>` before
+   reading it: a review that was cut off looks like one that found nothing.
 9. **Fix loop** — rounds 1–3 back to the implementer via
    `.agy/dispatch --continue --file <correction>`; rounds 4–5 escalate to Claude.
    Five rounds maximum.

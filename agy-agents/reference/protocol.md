@@ -131,6 +131,10 @@ setting `AGY_ALLOW_UNFILLED=1`.
 7. **Package the review** — `.agy/review-pkg <BASE> task-N`.
 
 8. **Dispatch the reviewer** — a fresh Claude subagent, per the contract below.
+   When it returns, check the file it wrote before reading a word of it:
+   `.agy/review-pkg --check <workspace>/task-N-review.md --ac <criteria the
+   brief issued>`. Non-zero means there is no review here yet, whatever is on
+   disk. The line it prints on success is the one that goes in the ledger.
 
 9. **Fix loop** — see below. It comes back here: the loop is a detour inside
    this step, and a task that leaves it still has step 10 to do.
@@ -229,6 +233,30 @@ review package. Then:
   reason** — which is information, where a deleted row is the absence of it.
 - Tell it to write the full review to `<workspace>/task-N-review.md` and reply
   with only the verdicts, counts, and one line per Critical/Important finding.
+- **Demand a terminator, and check for it mechanically.** The review's last
+  line, nothing after it:
+
+  ```
+  REVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>
+  ```
+
+  A reviewer killed mid-write — session limit, dispatch failure — leaves a file
+  that reads exactly like a review which found nothing. The verdict table is
+  written before the findings are, so what survives is a complete-looking table
+  with every row MET and no findings section, and the controller's only signal
+  was the presence of a table. That is precisely what the truncated file has.
+  This is flaw #20's shape one level up: **an unfinished artefact must not
+  borrow the vocabulary of a finished one.**
+
+  So the finished state has a mark that a partial file cannot accidentally
+  carry, and `.agy/review-pkg --check <file> --ac <n>` tests for its absence and
+  exits non-zero. Run it before reading the review. Three more failures fall out
+  of the same line on the way past, all arithmetic rather than judgement: a spec
+  `pass` reported alongside criteria that were not met — there is no third
+  verdict for a criterion, so those cannot both be true; more criteria met than
+  issued; and a reconciled total that does not match the count the brief handed
+  out. Take its output as the ledger's verdict line — a review you did not check
+  is one you have no line to record.
 - **Declare authorship honestly** — say which code came from the implementer and
   which you wrote yourself, and that both are in scope on the same terms.
   Controller-authored code fails review at a similar rate; hiding it wastes the
@@ -300,7 +328,13 @@ Five rounds maximum.
   it, mirror it into the plan, and tell the user.
 - After fixing, package the fix diff with `.agy/review-pkg <prev> task-N-rM` and
   send a **scoped** re-review: only "are these findings resolved, and did the
-  fix introduce anything new".
+  fix introduce anything new". It ends with the same `REVIEW-END` line and is
+  checked the same way, with one substitution: on a scoped re-review `ac` counts
+  the **findings sent back**, not the brief's acceptance criteria, so `--ac`
+  takes the number of findings you handed it. The field means "of the things
+  this review was asked to reconcile, how many came back met" either way, and a
+  re-review that answers three of five findings is the same defect as a table
+  that lost rows.
 
 **When the loop closes — clean re-review, or findings adjudicated at round
 five — go back to step 10 and close the task.** The loop is a detour inside

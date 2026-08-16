@@ -9,6 +9,59 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.7] — 2026-08-16
+
+Field report #22: a reviewer killed by a session limit leaves a file that
+reads as a finished review. Fixed as the same rule that closed flaw #20 —
+**an unfinished artefact must not borrow the vocabulary of a finished one.**
+
+#### Added
+- **`.agy/review-pkg --check <file> [--ac <n>]`.** The verdict table is
+  written before the findings are, so a review cut off mid-write survives as
+  a complete-looking table with every row MET and no findings section. The
+  controller's only signal was the presence of a table, which is exactly what
+  the truncated file has — and the ledger then records a review that never
+  happened.
+
+  So a finished review now ends with a line a partial file cannot carry:
+
+  ```
+  REVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>
+  ```
+
+  `--check` tests for its **absence** and exits non-zero. Deterministic, so it
+  fails rather than warns: a file either ends with that line or it does not.
+  The requirement is printed into the review package itself, which is the one
+  file a reviewer subagent is guaranteed to open. The line `--check` prints on
+  success is what goes in the ledger, so a review nobody checked is a review
+  with no verdict to record.
+
+  Three more failures fall out of the same line, all arithmetic rather than
+  judgement: a spec `pass` reported alongside criteria that were not met —
+  there is no third verdict for a criterion, so those cannot both be true;
+  more criteria met than issued; and, with `--ac <n>`, a reconciled total that
+  does not match the count the brief handed out. That last one is flaw #14's
+  dropped row made mechanical. A task issued with twelve criteria once came
+  back reporting eight, and among the four that had quietly gone was the one
+  marked non-negotiable. An optimistic table is still a checklist — wrong, but
+  auditable. A table that can lose rows shows the reader nothing about what is
+  missing.
+
+  `--check` runs before git and the config are touched: a review is a file,
+  and checking one should not require a repository.
+
+#### Notes
+- `review-pkg` is one of the four scripts refreshed on every install, so this
+  reaches installed repositories as soon as the installer is re-run there —
+  and unlike 1.8.4's trailer check it needs no config key, so there is nothing
+  to migrate. The controller-facing half lives in `protocol.md`, and the
+  per-repo project skill points at that file by absolute path — so a
+  controller in an adopted repository reads the live protocol, not a copy of
+  it. The one residual: `.claude/skills/agy-task-cycle/SKILL.md` is a kept
+  file, so its command table will not gain the `--check` row on a re-install.
+  A convenience row, in a file whose job is to send the reader to the protocol
+  anyway.
+
 ### [1.8.6] — 2026-08-16
 
 A new control shipped to every repository running the harness, and reached

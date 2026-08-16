@@ -26,6 +26,7 @@ sizing rules. This file is only what is specific to this project.
 | Gates | `{{GATES}}` |
 | Dispatch | `.agy/dispatch <N>` |
 | Review package | `.agy/review-pkg <BASE> task-<N>` |
+| Review finished? | `.agy/review-pkg --check <review file> --ac <n>` — run it before reading one |
 | Implementer | `{{MODEL}}` |
 | Reserve | `{{FALLBACK_MODEL}}` — weekly exhaustion only |
 

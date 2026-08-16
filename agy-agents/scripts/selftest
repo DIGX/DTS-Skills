@@ -1009,6 +1009,111 @@ has "  brief integrity is the first"       "1. **Brief integrity**"      "$PKG"
 has "  asked as a question about the rules" "actually follow from its stated rules" "$PKG"
 has "  and routed to the controller"       "controller to adjudicate"    "$PKG"
 has "  the diff is still there"            "## Diff (-U10)"              "$PKG"
+has "  and demands a terminator"           "REVIEW-END brief=<ok|findings>" "$PKG"
+has "  saying why one is needed"           "never existed"               "$PKG"
+
+# ============================================== is the review finished?
+printf '\n=== review completeness ============================================\n'
+# The defect: a reviewer killed mid-write leaves a file that reads exactly like
+# a review which found nothing. The verdict table is written before the findings
+# are, so what survives is a complete table with every row MET and no findings
+# section — and the controller's only signal was the presence of a table.
+#
+# Every assertion here is on the exit code first. The message matters, but a
+# check whose text is right and whose status is wrong is one an `if` reads
+# backwards, which is exactly how the grep -iF abort took down 1.8.5.
+RV="$TMP/reviews"
+mkdir -p "$RV"
+END='REVIEW-END brief=ok spec=pass quality=approved ac=12/12'
+
+printf '# Review\n\n| AC | verdict |\n|---|---|\n| 1 | MET |\n\n%s\n' "$END" > "$RV/good.md"
+bash .agy/review-pkg --check "$RV/good.md" > "$TMP/rv-good.log" 2>&1
+want "a finished review passes" 0 $?
+has  "  and prints the ledger line" "reviewed: brief=ok spec=pass quality=approved ac=12/12" "$TMP/rv-good.log"
+
+# The whole flaw, reproduced: the table is complete and the file stops there.
+printf '# Review\n\n| AC | verdict |\n|---|---|\n| 1 | MET |\n' > "$RV/trunc.md"
+bash .agy/review-pkg --check "$RV/trunc.md" > "$TMP/rv-trunc.log" 2>&1
+want "a truncated review fails" 1 $?
+has  "  and is called unfinished, not failed" "is UNFINISHED"        "$TMP/rv-trunc.log"
+has  "  with the reason it looks complete"    "before the findings"  "$TMP/rv-trunc.log"
+has  "  and what to do about it"              "fresh"                "$TMP/rv-trunc.log"
+
+# A terminator that is not terminal is not a terminator: a reviewer that wrote
+# the line and kept going has not finished either, and this is the case a plain
+# `grep REVIEW-END` would wave through.
+printf '# Review\n\n%s\n\nOne more thought.\n' "$END" > "$RV/notlast.md"
+bash .agy/review-pkg --check "$RV/notlast.md" >/dev/null 2>&1
+want "the terminator must be the last line" 1 $?
+
+# Trailing blank lines are not content — an editor that adds one must not turn
+# a finished review into an unfinished one.
+printf '# Review\n\n%s\n\n\n' "$END" > "$RV/blanks.md"
+bash .agy/review-pkg --check "$RV/blanks.md" >/dev/null 2>&1
+want "trailing blank lines do not unfinish it" 0 $?
+
+# CR is in [:space:], which is the only reason a review written on Windows
+# passes at all. Asserted because it is invisible and one `tr` away from broken.
+printf '# Review\r\n\r\n%s\r\n' "$END" > "$RV/crlf.md"
+bash .agy/review-pkg --check "$RV/crlf.md" >/dev/null 2>&1
+want "a CRLF review still passes" 0 $?
+
+printf '# Review\n\nREVIEW-END spec=pass quality=approved ac=12/12\n' > "$RV/nobrief.md"
+bash .agy/review-pkg --check "$RV/nobrief.md" > "$TMP/rv-nobrief.log" 2>&1
+want "a missing verdict fails" 1 $?
+# The needle is the whole phrase, not "brief". `brief` on its own also occurs
+# in the SUCCESS line (`reviewed: brief= spec=pass …`), so the short version
+# passed whether or not the failure message was ever printed — a vacuous
+# assertion, and it survived the mutation that should have killed it. Found by
+# predicting the red set before running rather than by counting failures.
+has  "  and names which one"  "Unreadable or missing: brief" "$TMP/rv-nobrief.log"
+has  "  and shows the shape"  "quality=<approved|changes>" "$TMP/rv-nobrief.log"
+
+# The template pasted verbatim. A reviewer that copied the line without
+# answering it has reported nothing, and the placeholders are how you tell.
+printf '# Review\n\nREVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>\n' > "$RV/tmpl.md"
+bash .agy/review-pkg --check "$RV/tmpl.md" >/dev/null 2>&1
+want "the unanswered template fails" 1 $?
+
+# Not judgement — arithmetic. Spec compliance cannot pass while criteria the
+# brief issued went unmet, because there is no third verdict for a criterion:
+# it is MET or it is NOT MET with a reason.
+printf '# Review\n\nREVIEW-END brief=ok spec=pass quality=approved ac=8/12\n' > "$RV/contra.md"
+bash .agy/review-pkg --check "$RV/contra.md" > "$TMP/rv-contra.log" 2>&1
+want "a pass with unmet criteria fails" 1 $?
+has  "  naming the contradiction" "cannot both be true" "$TMP/rv-contra.log"
+
+printf '# Review\n\nREVIEW-END brief=ok spec=fail quality=changes ac=8/12\n' > "$RV/fewer.md"
+bash .agy/review-pkg --check "$RV/fewer.md" >/dev/null 2>&1
+want "  but a fail with unmet criteria is fine" 0 $?
+
+printf '# Review\n\nREVIEW-END brief=ok spec=fail quality=changes ac=13/12\n' > "$RV/over.md"
+bash .agy/review-pkg --check "$RV/over.md" >/dev/null 2>&1
+want "more met than issued fails" 1 $?
+
+# The dropped row, made visible. The controller knows the count; the review
+# reconciles against it. Twelve criteria issued, eight reported, and among the
+# four that quietly went was the one marked non-negotiable.
+bash .agy/review-pkg --check "$RV/good.md" --ac 12 >/dev/null 2>&1
+want "the criteria count can be reconciled" 0 $?
+printf '# Review\n\nREVIEW-END brief=ok spec=pass quality=approved ac=8/8\n' > "$RV/lost.md"
+bash .agy/review-pkg --check "$RV/lost.md" --ac 12 > "$TMP/rv-lost.log" 2>&1
+want "  and a table that lost rows fails" 1 $?
+has  "  saying rows went missing" "Rows went missing" "$TMP/rv-lost.log"
+
+# Absent is not zero. A reviewer that wrote no file at all must not be quieter
+# than one that wrote a bad one.
+bash .agy/review-pkg --check "$RV/never-written.md" > "$TMP/rv-none.log" 2>&1
+want "an absent review is its own exit code" 2 $?
+has  "  and is not read as a pass" "not a pass" "$TMP/rv-none.log"
+: > "$RV/empty.md"
+bash .agy/review-pkg --check "$RV/empty.md" >/dev/null 2>&1
+want "an empty review is treated as absent" 2 $?
+
+bash .agy/review-pkg --check >/dev/null 2>&1
+want "--check with no file is a usage error" 64 $?
+bash .agy/review-pkg --check "$RV/good.md" --ac twelve >/dev/null 2>&1
+want "--ac takes a number" 64 $?
 
 printf '\n=== idempotency ====================================================\n'
 printf '\n# EDITED BY THE USER\n' >> .agy/config
