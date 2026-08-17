@@ -136,6 +136,13 @@ setting `AGY_ALLOW_UNFILLED=1`.
    brief issued>`. Non-zero means there is no review here yet, whatever is on
    disk. The line it prints on success is the one that goes in the ledger.
 
+   If the reviewer cannot be dispatched at all — quota exhausted, model outage,
+   the harness refuses — that is **not** this step failing open. Go to *When the
+   reviewer cannot run*, below, and hold the task. Reported from the field as a
+   missing path, by a controller that had already handled it correctly: the
+   clause existed and it still was not found from here, which is why this
+   pointer exists.
+
 9. **Fix loop** — see below. It comes back here: the loop is a detour inside
    this step, and a task that leaves it still has step 10 to do.
 
@@ -295,7 +302,16 @@ The task is **HELD** instead:
 
 1. Leave the task open. Do not close it, do not start the next one.
 2. Record it: `Task N: HELD — reviewed by nobody; <why the reviewer could not
-   run>`. A held task is a visible state, not a quiet gap.
+   run>; retry after <time, or the condition that clears it>`. A held task is a
+   visible state, not a quiet gap.
+
+   The retry field is not decoration. A session that resumes tomorrow reads the
+   ledger, not this session's transcript, and `quota` tells it only that
+   something was wrong once — where `retry after 8:10am (Asia/Kolkata)` tells it
+   what to do and when. Write the wall-clock time with its zone when you have
+   one, and the condition when you do not: *retry after the weekly window
+   resets*, *retry once the harness allows subagents again*. Without it, HELD
+   and "review found nothing" are the same entry to whoever arrives next.
 3. Tell the user what is on disk — commits, gate results, whether the diff
    stayed in scope — and that it is unreviewed.
 4. Wait for a reviewer to become available. That is the only exit.

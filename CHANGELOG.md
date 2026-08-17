@@ -9,6 +9,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.8] — 2026-08-17
+
+Field report #31: *"the protocol has no reviewer-unavailable path."* Verified
+before acting, and **the headline is false** — `reference/protocol.md` has
+carried *When the reviewer cannot run* since at least 1.6.0, which is the
+version the reporting repository actually has installed. That controller
+followed the contract correctly: it refused to substitute itself, held the
+task, and said what was on disk. It just did not know the clause it was
+obeying existed.
+
+So the real defect was **discoverability, not coverage** — a controller hit
+the exact situation the protocol documents, did the right thing, and still
+filed it as unhandled. The one substantive gap was the report's own suggested
+wording rather than its claim.
+
+#### Changed
+- **The HELD ledger line takes a retry field**: `Task N: HELD — reviewed by
+  nobody; <why>; retry after <time, or the condition that clears it>`. A
+  session that resumes tomorrow reads the ledger, not the transcript, and
+  `quota` tells it only that something was wrong once — where `retry after
+  8:10am (Asia/Kolkata)` tells it what to do and when. Without it, HELD and
+  "review found nothing" are the same entry to whoever arrives next. Same
+  family as 1.8.7: the difference between a record that says a thing happened
+  and a record another agent can act on.
+- **Step 8 points at the clause.** The dispatch step now says outright that a
+  reviewer which cannot be spawned is not this step failing open, and sends
+  the reader to the section. The pointer exists because the section alone was
+  not enough — it was not found from where a controller actually stands when
+  it needs it.
+
+#### Notes
+- Prose only, and prose constraints hold about half the time in this harness
+  while machine-checkable ones hold absolutely. Nothing checks a ledger line;
+  the retry field will be obeyed at roughly the rate the existing clause was.
+  A ledger checker is the real fix and is deliberately not in this release.
+- `#22` and `#29` also appear as carried in that report. Both are fixed here
+  (1.8.7 and 1.8.6) and neither has been installed anywhere — the same
+  distribution asymmetry recorded against #28.
+
 ### [1.8.7] — 2026-08-16
 
 Field report #22: a reviewer killed by a session limit leaves a file that
