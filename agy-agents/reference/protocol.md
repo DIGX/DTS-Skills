@@ -124,6 +124,25 @@ setting `AGY_ALLOW_UNFILLED=1`.
    gate run. `$AGY_GATES` is left unquoted for the same reason it is unquoted
    in `dispatch` — a runner may carry arguments.
 
+   **Order this against step 8.** Steps 5 and 6 spend the controller's budget
+   and step 8 spends it on the reviewer — the same pool, with the reviewer
+   drawing from it last, when it is thinnest. So the harder the controller
+   works, the less likely its own review can run. Nothing in step 7 needs step
+   5 or 6: the package is built from `BASE..HEAD` alone. Read the gate result
+   the dispatch already captured — free, already on disk, and enough to stop
+   you spending a reviewer on a red gate — then package, dispatch the reviewer,
+   and do the rest of this step and step 6 while it runs. Background dispatch
+   makes that literal where the harness offers it; where it does not, dispatch
+   first anyway, because the point is the reviewer's position in the budget and
+   not the wall clock.
+
+   What moves after the dispatch is the open-ended half: your own gate re-run,
+   and the contract's rule about re-executing every command the report pastes
+   as proof. Reported from the field after three consecutive reviewer losses in
+   one session. Three is not proof the structure caused them — an account near
+   its weekly cap produces the same pattern — but the structure is real and the
+   reordering costs nothing either way.
+
 6. **Read the actual diff** — `git log BASE..HEAD` and the changed files. Not
    the report. Check for scope drift: files touched that the dispatch did not
    name. Silent scope expansion is the drift this workflow exists to catch.
@@ -131,7 +150,9 @@ setting `AGY_ALLOW_UNFILLED=1`.
 7. **Package the review** — `.agy/review-pkg <BASE> task-N`.
 
 8. **Dispatch the reviewer** — a fresh Claude subagent, per the contract below.
-   When it returns, check the file it wrote before reading a word of it:
+   Do this before the open-ended half of steps 5 and 6, not after them; step 5
+   says why. When it returns, check the file it wrote before reading a word of
+   it:
    `.agy/review-pkg --check <workspace>/task-N-review.md --ac <criteria the
    brief issued>`. Non-zero means there is no review here yet, whatever is on
    disk. The line it prints on success is the one that goes in the ledger.
@@ -240,6 +261,17 @@ review package. Then:
   reason** — which is information, where a deleted row is the absence of it.
 - Tell it to write the full review to `<workspace>/task-N-review.md` and reply
   with only the verdicts, counts, and one line per Critical/Important finding.
+- **Have it write each finding to that file as it finds it, and the verdict
+  table last.** A reviewer that composes the whole review in its head and
+  writes it at the end loses all of it when it is killed — and the reviewer is
+  the likeliest agent in the cycle to be killed, because it runs last on the
+  thinnest budget. The natural order is also the worst one: the verdict table
+  is the cheapest section to produce and the findings are the dearest, so
+  writing top to bottom guarantees that the part which survives is the part
+  with no information in it. Invert it. A file holding four findings and no
+  terminator is still rejected by `--check`, exactly as before — but the fix
+  loop can start from those four, and a re-dispatched reviewer can be told what
+  is already covered instead of buying the whole review a second time.
 - **Demand a terminator, and check for it mechanically.** The review's last
   line, nothing after it:
 
@@ -248,10 +280,13 @@ review package. Then:
   ```
 
   A reviewer killed mid-write — session limit, dispatch failure — leaves a file
-  that reads exactly like a review which found nothing. The verdict table is
-  written before the findings are, so what survives is a complete-looking table
-  with every row MET and no findings section, and the controller's only signal
-  was the presence of a table. That is precisely what the truncated file has.
+  that reads exactly like a review which found nothing. Left to itself a
+  reviewer writes the verdict table before the findings, so what survives is a
+  complete-looking table with every row MET and no findings section, and the
+  controller's only signal was the presence of a table. That is precisely what
+  the truncated file has. The bullet above asks for the opposite order; this
+  one is what catches a reviewer that did not comply, which is the half of the
+  pair a machine can check.
   This is flaw #20's shape one level up: **an unfinished artefact must not
   borrow the vocabulary of a finished one.**
 

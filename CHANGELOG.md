@@ -9,6 +9,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.9] — 2026-08-17
+
+Field report #32, and this one holds up where #31's headline did not: the
+protocol schedules the reviewer last and treats a fresh subagent as free. It is
+neither. The reviewer draws on the same session budget the controller has been
+spending all cycle on gate verification, diff reading, re-execution of pasted
+proof, adjudication and ledger work — so the harder the controller works, the
+less likely its own review can run, and the review is scheduled at the moment
+the budget is thinnest. The report arrived after three consecutive reviewer
+losses in one session.
+
+#### Changed
+
+- **The reviewer is dispatched before the controller's own re-execution pass,
+  not after it.** Nothing in packaging needs steps 5 or 6 — the package is
+  built from `BASE..HEAD` alone. The cheap gate check stays in front (it is
+  already on disk, and it stops a reviewer being spent on a red gate); the
+  open-ended half — your own gate re-run, re-executing every command the report
+  pastes as proof — moves behind the dispatch, to run while the reviewer runs.
+- **The reviewer writes findings as it finds them; the verdict table goes
+  last.** The natural order is the worst one: the table is the cheapest section
+  to produce and the findings are the dearest, so writing top to bottom
+  guarantees that what survives a kill is the part carrying no information.
+  1.8.7 made that truncation *detectable*; this makes it *salvageable*. The
+  instruction is in `review-pkg`'s emitted package, not only in `protocol.md` —
+  the reviewer never reads the latter.
+
+#### Notes
+
+Three losses is not proof that the structure caused them; an account near its
+weekly cap produces the same pattern. The reordering is worth making either
+way, because it costs nothing and it dominates.
+
+Both changes are prose, and prose holds about half the time. The terminator
+check still carries the machine-checkable half, and `protocol.md` now says so
+next to the ordering rule rather than leaving the two to look redundant.
+
+Not done in this release: `scripts/selftest` has no assertion that the new
+section reaches the emitted package. It is owed, and it is listed in the plan
+ledger — the file was being edited by a running implementer at the time.
+
 ### [1.8.8] — 2026-08-17
 
 Field report #31: *"the protocol has no reviewer-unavailable path."* Verified

@@ -221,6 +221,16 @@ fi
 	echo "a file whose verdict table is complete and whose findings section"
 	echo "never existed, and it reads exactly like a review that found nothing."
 	echo
+	echo "## Write each finding down as you reach it"
+	echo
+	echo "Append findings to your review file as you find them, and write the"
+	echo "verdict table and the REVIEW-END line last. You are the agent in this"
+	echo "cycle most likely to be cut off — you run last, on whatever budget is"
+	echo "left. Composing the whole review and writing it in one pass at the end"
+	echo "means being cut off loses all of it. Writing findings first means"
+	echo "being cut off still leaves behind the expensive half, and the review"
+	echo "can resume from there instead of being bought twice."
+	echo
 	echo "## Commits"
 	git log --oneline "$base..$head"
 	echo
