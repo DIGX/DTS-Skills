@@ -35,6 +35,41 @@ has()  { # has <label> <needle> <file>
 hasnt() {
 	if grep -qF -- "$2" "$3" 2>/dev/null; then bad "$1" "unexpected '$2'"; else ok "$1"; fi
 }
+# Not `hasnt "$(printf '\r')"`. grep here strips a CR that sits at a line ending,
+# so a search for one cannot see the very case this asserts against: a forged
+# value whose CR precedes the newline it injected. That assertion passed against
+# a file with the carriage return still in it, under the mutation built to break
+# it — found by predicting the red labels first and finding this one green.
+# Count the bytes instead; `tr` has no notion of a line.
+no_cr() { # no_cr <label> <file>
+	n_cr="$(tr -cd '\r' < "$2" 2>/dev/null | wc -c | tr -d ' ')"
+	if [ "${n_cr:-0}" = "0" ]; then ok "$1"
+	else bad "$1" "$n_cr carriage return(s) survived into $(basename "$2")"; fi
+}
+# `has key=` is a substring search, so it passes on a key whose value is empty —
+# which is exactly how a run that measured nothing looks. These three read the
+# value the way dispatch's own read_class does, through one reader, so a test
+# cannot disagree with the thing it is testing about what a key says.
+class_val() { # class_val <file> <key>
+	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1
+}
+hasval() { # hasval <label> <key> <file> — present AND carrying a value
+	# Absent and empty are different defects: one means the writer never ran,
+	# the other means it ran and had nothing to say. Say which.
+	if ! grep -q -- "^$2=" "$3" 2>/dev/null; then
+		bad "$1" "no '$2=' line at all in $(basename "$3")"
+	elif [ -z "$(class_val "$3" "$2")" ]; then
+		bad "$1" "'$2=' is present but empty in $(basename "$3")"
+	else ok "$1"; fi
+}
+noval() { # noval <label> <key> <file> — present AND deliberately empty
+	if ! grep -q -- "^$2=" "$3" 2>/dev/null; then
+		bad "$1" "no '$2=' line at all in $(basename "$3")"
+	else
+		nv="$(class_val "$3" "$2")"
+		if [ -z "$nv" ]; then ok "$1"; else bad "$1" "'$2=' is '$nv', expected empty"; fi
+	fi
+}
 
 cleanup() {
 	if [ "$KEEP" -eq 1 ]; then
@@ -54,6 +89,15 @@ cat > "$BIN/agy" <<'STUB'
 model=""; prev=""
 for a in "$@"; do [ "$prev" = "--model" ] && model="$a"; prev="$a"; done
 printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
+
+# A real run reports token usage on its result event; this one does it only when
+# asked. Both halves need testing and they need separate runs: that the numbers
+# survive to disk exactly, and that a run which reported nothing is recorded as
+# having reported nothing rather than as having used none. The values are
+# deliberately unmistakable — no 0, no 1, nothing a miscount could land on — and
+# the total is the sum, so a reader that mixes the keys up is visible too.
+USAGE=""
+[ -n "${FAKE_USAGE:-}" ] && USAGE=',"usage":{"input_tokens":13571,"output_tokens":24680,"thinking_tokens":31415,"total_tokens":69666}'
 
 # A report written by the run itself, so it is genuinely newer than RUN_START.
 if [ -n "${FAKE_REPORT:-}" ] && [ -n "${FAKE_REPORT_TEXT:-}" ]; then
@@ -81,6 +125,26 @@ $FAKE_BODY"
 Co-Authored-By: $FAKE_COAUTHOR"
 		git commit -qm "$msg" >/dev/null 2>&1
 	fi
+fi
+
+# The run rewrites a commit that predates it — an amend, a rebase, a squash of
+# someone else's work. The pre-run head stops being an ancestor of HEAD, so what
+# landed cannot be counted at all. Deliberately a NEW message: an amend that
+# reproduces the same tree, message and timestamps produces the same sha, and
+# then nothing has been rewritten.
+if [ -n "${FAKE_REWRITE:-}" ]; then
+	git commit -q --amend -m "task work: history rewritten under the run" >/dev/null 2>&1
+fi
+
+# A status carrying line breaks. Not a hypothetical: `status` is whatever the
+# stream says it is, and the sidecar is a flat key=value file read first-match-
+# wins, so a value with a newline in it writes rows of its own — above the
+# genuine ones. The CR is there too, because it corrupts a value without
+# splitting a row and is the half a \n-only sanitiser misses.
+if [ -n "${FAKE_INJECT:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
+	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS\r\nwall=999999\nmodel=INJECTED","response":"Did the work.","num_turns":1,"duration_seconds":2}}'
+	exit 0
 fi
 
 # A blocked call, followed by the same call wearing a wrapper the deny rule
@@ -139,7 +203,7 @@ case "$model" in
 	fivehour) msg="Rate limit: 5 hour limit reached, refreshes in 3h45m" ;;
 	unknown)  msg="429 RESOURCE_EXHAUSTED" ;;
 	none)     printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{}}}}'
-	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Gemini did the work.","num_turns":2,"duration_seconds":5}}'
+	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Gemini did the work.","num_turns":2,"duration_seconds":5'"$USAGE"'}}'
 	          exit 0 ;;
 	*)        msg="RESOURCE_EXHAUSTED: weekly limit reached for Gemini models" ;;
 	esac
@@ -147,7 +211,7 @@ case "$model" in
 	exit 1 ;;
 *)
 	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
-	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Reserve model completed the task.","num_turns":2,"duration_seconds":9}}'
+	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Reserve model completed the task.","num_turns":2,"duration_seconds":9'"$USAGE"'}}'
 	exit 0 ;;
 esac
 STUB
@@ -232,7 +296,15 @@ has "  and told the invariants must follow from the rules" \
 has "  and that a brief defect is the controller's to adjudicate" \
 	"adjudicated by the controller" "$proto"
 
-has "the protocol names a HELD state for an unavailable reviewer" "HELD" "$proto"
+# Not the bare word "HELD" — it now appears in several places, so that needle
+# passed for the wrong reason. Assert the ledger line's actual shape, including
+# the retry field, which is the part a resuming session acts on.
+has "the protocol names a HELD state for an unavailable reviewer" \
+	"HELD — reviewed by nobody" "$proto"
+has "  and makes the held entry say when to retry" \
+	"retry after <time, or the condition that clears it>" "$proto"
+has "  and schedules the reviewer before the controller's own re-execution" \
+	"Order this against step 8" "$proto"
 has "  and forbids the controller reviewing its own work" \
 	"substitute yourself for the reviewer" "$proto"
 
@@ -1011,6 +1083,11 @@ has "  and routed to the controller"       "controller to adjudicate"    "$PKG"
 has "  the diff is still there"            "## Diff (-U10)"              "$PKG"
 has "  and demands a terminator"           "REVIEW-END brief=<ok|findings>" "$PKG"
 has "  saying why one is needed"           "never existed"               "$PKG"
+# The reviewer never reads protocol.md, so a rule addressed to the reviewer is
+# only real if it reaches the package. This is the assertion 1.8.9 shipped
+# without and owed.
+has "  and to write findings as it finds them" "Write each finding down as you reach it" "$PKG"
+has "  because it is the likeliest to be cut off" "most likely to be cut off"  "$PKG"
 
 # ============================================== is the review finished?
 printf '\n=== review completeness ============================================\n'
@@ -1311,7 +1388,7 @@ printf '# ledger\n\n(bench instrumentation run)\n' > "$REPO/$BWS/progress.md"
 (
 	cd "$REPO" || exit 1
 	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 \
-		FAKE_TOUCH="src/bench1.txt" FAKE_COMMIT=1 FAKE_ERROR=none \
+		FAKE_TOUCH="src/bench1.txt" FAKE_COMMIT=1 FAKE_ERROR=none FAKE_USAGE=1 \
 		bash .agy/dispatch 1 > "$TMP/b1.log" 2>&1
 )
 brc=$?
@@ -1323,13 +1400,150 @@ if [ "$brc" -ne 0 ]; then
 	awk '/--- gates/,0' "$TMP/b1.log" 2>/dev/null | sed 's/^/        | /'
 fi
 
+# Every assertion below reads $BCLASS. With no file, `basename ""` turns each
+# failure into the same truncated sentence about nothing, so the block is
+# guarded and the absence is reported once, as itself.
 BCLASS="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
-if [ -n "$BCLASS" ]; then ok "instrumented run wrote a .class"; else bad "instrumented run wrote a .class" "none found"; fi
-has "  records wall seconds"     "wall="         "$BCLASS"
-has "  records total tokens"     "tokens_total=" "$BCLASS"
-has "  records input tokens"     "tokens_in="    "$BCLASS"
-has "  records the commit count" "commits=1"     "$BCLASS"
-has "  records the commit range" "range="        "$BCLASS"
+if [ -z "$BCLASS" ]; then
+	bad "instrumented run wrote a .class" "none found — the measurement assertions cannot run"
+else
+	ok "instrumented run wrote a .class"
+	hasval "  records wall seconds"      wall         "$BCLASS"
+	hasval "  records total tokens"      tokens_total "$BCLASS"
+	hasval "  records input tokens"      tokens_in    "$BCLASS"
+	hasval "  records output tokens"     tokens_out   "$BCLASS"
+	hasval "  records thinking tokens"   tokens_think "$BCLASS"
+	# Presence is not enough: a writer that puts the right numbers behind the
+	# wrong keys is invisible to four independent non-empty checks. Read all
+	# four at once and compare against what the stub actually reported.
+	btok="$(class_val "$BCLASS" tokens_in)/$(class_val "$BCLASS" tokens_out)"
+	btok="$btok/$(class_val "$BCLASS" tokens_think)/$(class_val "$BCLASS" tokens_total)"
+	if [ "$btok" = "13571/24680/31415/69666" ]; then
+		ok "  records each count against its own key"
+	else
+		bad "  records each count against its own key" "in/out/think/total read '$btok'"
+	fi
+	has "  records the commit count" "commits=1" "$BCLASS"
+	hasval "  records the commit range" range "$BCLASS"
+	if grep -qE '^range=[0-9a-f]{40}\.\.[0-9a-f]{40}$' "$BCLASS" 2>/dev/null; then
+		ok "  records the range as two resolved heads"
+	else
+		bad "  records the range as two resolved heads" "range=$(class_val "$BCLASS" range)"
+	fi
+fi
+
+# The other half of the contract, and it needs its own run: a measurement that
+# never arrived must be recorded as absent, not as a zero the harness invented.
+# This run reports no usage at all and lands no commit, so the only honest
+# sidecar has empty token keys, an empty range, and — because both heads
+# resolved and matched — a commits count of exactly 0.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=none \
+		bash .agy/dispatch 1 > "$TMP/b2.log" 2>&1
+)
+brc=$?
+want "the run that measures nothing still exits clean" 0 "$brc"
+if [ "$brc" -ne 0 ]; then sed -n '1,20p' "$TMP/b2.log" 2>/dev/null | sed 's/^/        | /'; fi
+
+BCLASS2="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -z "$BCLASS2" ]; then
+	bad "the measureless run wrote a .class" "none found"
+else
+	ok "the measureless run wrote a .class"
+	noval "  leaves an unreported token count empty, not 0" tokens_total "$BCLASS2"
+	noval "  leaves every token key empty, not 0"           tokens_in    "$BCLASS2"
+	# Partial, not absent: the wall clock is ours to measure and it is still
+	# there. A run with no usage is not a run with no measurements.
+	hasval "  still records the wall clock"                 wall         "$BCLASS2"
+	has   "  records a measured zero as 0"     "commits=0" "$BCLASS2"
+	noval "  leaves the range empty when nothing landed" range "$BCLASS2"
+fi
+
+# And the third state, which is neither. When the run rewrites history the
+# pre-run head is no longer an ancestor of HEAD, so nothing can count what
+# landed. That is not a zero, and writing it as one would tell every reader
+# downstream that a run which may have committed a dozen times committed none.
+# The fence refuses the run (exit 4) — a rewritten history is a guarded
+# surface — but the sidecar is written before the verdict and has to be honest
+# about what it could not see.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=none FAKE_REWRITE=1 \
+		bash .agy/dispatch 1 > "$TMP/b3.log" 2>&1
+)
+brc=$?
+want "a run that rewrites history is refused by the fence" 4 "$brc"
+
+BCLASS3="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -z "$BCLASS3" ]; then
+	bad "the history-rewriting run wrote a .class" "none found"
+else
+	ok "the history-rewriting run wrote a .class"
+	noval "  leaves an uncountable commit count empty, not 0" commits "$BCLASS3"
+	noval "  leaves the range empty when it cannot be measured" range "$BCLASS3"
+fi
+
+# What landed is a property of the RUN, not of an attempt: it is counted once,
+# after the fence, over the whole tree. A fallback leaves two sidecars behind
+# and both describe the same run, so both carry the same answer. Written against
+# the deciding attempt alone, the first attempt's .class has the keys missing
+# entirely — a third state, neither a count nor an empty one, that no reader
+# downstream is built to expect.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=weekly AGY_FALLBACK=auto \
+		bash .agy/dispatch 1 > "$TMP/b4.log" 2>&1
+)
+brc=$?
+want "the fallback run exits clean" 0 "$brc"
+
+BRESERVE="$(ls -t "$REPO/$BWS"/logs/*.reserve.class 2>/dev/null | head -1)"
+BFIRST="${BRESERVE%.reserve.class}.class"
+if [ -z "$BRESERVE" ] || [ ! -f "$BFIRST" ]; then
+	bad "the fallback run wrote both attempts' sidecars" "reserve='${BRESERVE:-<none>}'"
+else
+	ok "the fallback run wrote both attempts' sidecars"
+	has "  the deciding attempt records what landed"  "commits=0" "$BRESERVE"
+	has "  the abandoned attempt records it as well"  "commits=0" "$BFIRST"
+	noval "  and both agree the range is empty"       range       "$BFIRST"
+fi
+
+# read_class takes the FIRST line matching a key, so a value carrying a newline
+# does not corrupt its own row — it inserts rows ABOVE the genuine ones and wins.
+# `status` is the vector because it comes straight off the agy stream, and the
+# keys it can forge are now wall and the token counts, which is everything the
+# benchmark reads. The run itself fails (the status is not SUCCESS), which is
+# beside the point: the sidecar is written either way.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_INJECT=1 \
+		bash .agy/dispatch 1 > "$TMP/b5.log" 2>&1
+)
+brc=$?
+want "a run reporting a forged status is not SUCCESS" 1 "$brc"
+
+BCLASS5="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -z "$BCLASS5" ]; then
+	bad "the forging run wrote a .class" "none found"
+else
+	ok "the forging run wrote a .class"
+	if [ "$(grep -c '^wall=' "$BCLASS5" 2>/dev/null)" = "1" ]; then
+		ok "  one wall= row, not the forged one plus the real one"
+	else
+		bad "  one wall= row, not the forged one plus the real one" \
+			"$(grep -c '^wall=' "$BCLASS5" 2>/dev/null) rows begin with wall="
+	fi
+	if [ "$(class_val "$BCLASS5" wall)" = "999999" ]; then
+		bad "  the wall clock read back is the measured one" "read back the forged 999999"
+	else
+		ok "  the wall clock read back is the measured one"
+	fi
+	# The forged text is not deleted — a sanitiser that drops evidence is its own
+	# problem. It stays on the row it was written to, flattened onto one line.
+	has   "  the forged text stays inside its own value" "status=SUCCESS wall=999999" "$BCLASS5"
+	no_cr "  and no carriage return survives into the file" "$BCLASS5"
+fi
 
 printf '\n=== milestone advance ==============================================\n'
 # A project outlives the milestone it was installed on. Passing --milestone used

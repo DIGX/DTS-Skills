@@ -643,15 +643,31 @@ if (failed) {
 // never has to re-derive them, and never has to guess a zero when it cannot.
 const uw = result.usage || {};
 const nz = v => (typeof v === 'number' && isFinite(v)) ? v : '';
-fs.writeFileSync(classPath,
-	`quota=${quota}\ntools=${tools.size}\nstatus=${status}\n` +
-	`killed=${killed ? 1 : 0}\nidle=${idleArg || 0}\ncapped=${capped ? 1 : 0}\n` +
-	`deferred=${deferred ? 1 : 0}\n` +
-	`wall=${wall}\n` +
-	`tokens_in=${nz(uw.input_tokens)}\ntokens_out=${nz(uw.output_tokens)}\n` +
-	`tokens_think=${nz(uw.thinking_tokens)}\ntokens_total=${nz(uw.total_tokens)}\n` +
-	`model=${(init.model || '').replace(/\n/g, ' ')}\n` +
-	`raw=${quotaRaw.replace(/\n/g, ' ')}\n`);
+// Every value is sanitised by the same rule, at the one place values enter the
+// file. read_class is `sed -n 's/^key=//p' | head -1` — FIRST match wins — so a
+// value carrying a newline injects rows that beat the genuine ones further
+// down, and `status` comes straight off the agy stream. A lone \r does not
+// split the row but corrupts the value in every reader downstream, which is why
+// this collapses all whitespace rather than just \n. Rows are a list, not a
+// template, so the next key someone adds cannot be the one that forgot.
+const one = v => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim();
+const classRows = [
+	['quota', quota],
+	['tools', tools.size],
+	['status', status],
+	['killed', killed ? 1 : 0],
+	['idle', idleArg || 0],
+	['capped', capped ? 1 : 0],
+	['deferred', deferred ? 1 : 0],
+	['wall', wall],
+	['tokens_in', nz(uw.input_tokens)],
+	['tokens_out', nz(uw.output_tokens)],
+	['tokens_think', nz(uw.thinking_tokens)],
+	['tokens_total', nz(uw.total_tokens)],
+	['model', init.model],
+	['raw', quotaRaw],
+];
+fs.writeFileSync(classPath, classRows.map(([k, v]) => `${k}=${one(v)}\n`).join(''));
 
 const u = result.usage || {};
 const pad = s => String(s).padEnd(13);
@@ -874,14 +890,31 @@ trip_rc=$?
 # The workspace is excluded for the same reason the fence prunes it: it holds
 # the harness's own paper trail — the brief, the report, the logs — and a report
 # saying the work happened is not the work.
+#
+# LANDED_MEASURED separates "nothing landed" from "we could not tell". Both end
+# with LANDED_COMMITS at 0 — a missing snapshot, an unresolvable HEAD and a
+# rewritten history all leave the count unknown — and on screen that reads the
+# same as a run that landed nothing. It is not the same, and the sidecar below
+# is where the difference has to survive.
 LANDED_COMMITS=0
+LANDED_MEASURED=0
 LANDED_SUBJECT=""
 WAS_HEAD="$(awk -F'\t' '$1=="head"{print $2}' "$SNAP/git.txt" 2>/dev/null)"
 IS_HEAD="$(git rev-parse HEAD 2>/dev/null)"
-if [ -n "$WAS_HEAD" ] && [ -n "$IS_HEAD" ] && [ "$WAS_HEAD" != "$IS_HEAD" ] \
-	&& git merge-base --is-ancestor "$WAS_HEAD" "$IS_HEAD" 2>/dev/null; then
-	LANDED_COMMITS="$(git rev-list --count "$WAS_HEAD..$IS_HEAD" 2>/dev/null || printf 0)"
-	LANDED_SUBJECT="$(git --no-pager log -1 --format=%s "$IS_HEAD" 2>/dev/null)"
+if [ -n "$WAS_HEAD" ] && [ -n "$IS_HEAD" ]; then
+	if [ "$WAS_HEAD" = "$IS_HEAD" ]; then
+		# Both heads resolved and they match: a measured, genuine zero.
+		LANDED_MEASURED=1
+	elif git merge-base --is-ancestor "$WAS_HEAD" "$IS_HEAD" 2>/dev/null; then
+		landed_n="$(git rev-list --count "$WAS_HEAD..$IS_HEAD" 2>/dev/null)"
+		# A rev-list that failed or answered with something that is not a number
+		# has not measured anything either; do not launder it into a 0.
+		case "$landed_n" in
+		''|*[!0-9]*) ;;
+		*) LANDED_COMMITS="$landed_n"; LANDED_MEASURED=1 ;;
+		esac
+		LANDED_SUBJECT="$(git --no-pager log -1 --format=%s "$IS_HEAD" 2>/dev/null)"
+	fi
 fi
 LANDED_DIRTY="$(git status --porcelain -- . ":(exclude)$AGY_WORKSPACE" 2>/dev/null | grep -c . || true)"
 # Work on disk and nothing in history is not a judgement call: the brief's own
@@ -957,14 +990,33 @@ fi
 # The commit range is known only here — the node parser runs before the fence
 # is verified, so it cannot see what landed. Appended rather than rewritten so
 # the parser stays the sole owner of everything above it.
-if [ -f "$LOG_BASE.class" ]; then
-	printf 'commits=%s\n' "${LANDED_COMMITS:-0}" >> "$LOG_BASE.class"
-	if [ "${LANDED_COMMITS:-0}" -gt 0 ] && [ -n "${WAS_HEAD:-}" ] && [ -n "${IS_HEAD:-}" ]; then
-		printf 'range=%s..%s\n' "$WAS_HEAD" "$IS_HEAD" >> "$LOG_BASE.class"
+#
+# Empty is not zero. `commits=0` is a claim that the run landed nothing, and it
+# is only made when both heads resolved and matched. Every other way of ending
+# up without a count — no snapshot to compare against, no HEAD to compare with,
+# a history rewritten under us — is written as `commits=`, because a reader that
+# cannot tell those apart will score an unreadable run as a run that did nothing.
+#
+# The measurement belongs to the RUN, not to an attempt: it is taken once, after
+# the fence, over the whole tree. So both sidecars a fallback leaves behind carry
+# the same answer. Keying this off LOG_BASE gave the first attempt's .class
+# neither key on the quota-fallback path, which is a third state — key absent —
+# that nothing downstream is written to expect.
+if [ "${LANDED_MEASURED:-0}" = "1" ]; then
+	CLASS_COMMITS="$LANDED_COMMITS"
+	if [ "$LANDED_COMMITS" -gt 0 ]; then
+		CLASS_RANGE="$WAS_HEAD..$IS_HEAD"
 	else
-		printf 'range=\n' >> "$LOG_BASE.class"
+		CLASS_RANGE=""
 	fi
+else
+	CLASS_COMMITS=""
+	CLASS_RANGE=""
 fi
+for class_file in "$BASE.class" "$BASE.reserve.class"; do
+	[ -f "$class_file" ] || continue
+	printf 'commits=%s\nrange=%s\n' "$CLASS_COMMITS" "$CLASS_RANGE" >> "$class_file"
+done
 
 # ------------------------------------------------------------------- run gates
 printf -- '\n--- gates ----------------------------------------------------------\n'
