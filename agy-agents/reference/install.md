@@ -207,7 +207,9 @@ Order of operations when adopting a repo mid-flight:
 
 1. `--dry-run` and read the plan it prints.
 2. Install.
-3. Open `.agy/gates` and make it the real suite — this is the step that matters.
+3. Open the runner `.agy/config` now points at — `.agy/gates` on a fresh
+   install, your own on adoption — and confirm it is the real suite. This is
+   the step that matters.
 4. `.agy/tripwire check` — confirm every required surface fingerprints a
    non-zero number of files.
 5. Move the project's task-cycle knowledge into

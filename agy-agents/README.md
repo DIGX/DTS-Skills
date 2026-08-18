@@ -489,7 +489,9 @@ Nothing is deleted, moved or rewritten. Order of operations:
 
 1. `--dry-run` and read the plan it prints.
 2. Install.
-3. Open `.agy/gates` and make it the real suite — **the step that matters**.
+3. Open the runner `.agy/config` now points at — `.agy/gates` on a fresh install,
+   your own on adoption — and confirm it is the real suite. **The step that
+   matters.**
 4. `.agy/tripwire check` — confirm every required surface fingerprints a
    non-zero number of files.
 5. Move project-specific task-cycle knowledge into
@@ -741,7 +743,7 @@ Start with [`reference/dispatch-traps.md`](reference/dispatch-traps.md), then:
 1. Read `<workspace>/logs/task-N-<stamp>.events.ndjson` — the raw stream. It is
    the only account of the run that cannot be summarised away.
 2. `git log BASE..HEAD` and `git status --short` — what actually landed.
-3. `.agy/gates` yourself — never the implementer's claim about them.
+3. `( . .agy/config && bash $AGY_GATES )` yourself — never the implementer's claim about them.
 4. `.agy/tripwire check` — proves the fence still fingerprints real files.
 5. `bash ~/.claude/skills/agy-agents/scripts/selftest` — proves the harness
    itself still works, spending no quota.

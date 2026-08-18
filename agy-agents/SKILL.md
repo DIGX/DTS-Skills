@@ -1,7 +1,7 @@
 ---
 name: agy-agents
 description: Use when setting up or adopting a repository where Claude plans and the Antigravity CLI (`agy`, Gemini) implements; when the user asks to delegate implementation to Gemini or Antigravity; when installing or authenticating `agy` itself; when an `agy` run reports SUCCESS but nothing changed, hangs without ever finishing, hits RESOURCE_EXHAUSTED or a rate limit, or writes outside its scope; or when a fence, tripwire, or gate check fails in a repo using this harness.
-version: 1.8.9
+version: 1.8.10
 user-invocable: true
 argument-hint: "[setup|install|adopt|status|doctor|protocol] — omit to route automatically"
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, TodoWrite
@@ -27,7 +27,7 @@ installed here exists to make one of those distinguishable.
 | No argument, repo has no `.agy/` | Read `reference/install.md`, then install |
 | No argument, repo has `.agy/` | Report status: config, surfaces, ledger, gates |
 | `install` / `adopt` / setup request | Read `reference/install.md`, then install |
-| `status` | `.agy/tripwire check` + `.agy/gates` + tail the ledger |
+| `status` | `.agy/tripwire check` + `( . .agy/config && bash $AGY_GATES )` + tail the ledger |
 | `doctor` — something is off | Read `reference/dispatch-traps.md` first |
 | A run is hanging, was WATCHDOG-KILLED, or died before its result event | `reference/dispatch-traps.md`, trap 4 |
 | `protocol` — how do I run a task | Read `reference/protocol.md` |

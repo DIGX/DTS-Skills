@@ -360,7 +360,7 @@ from the binary you intended. See `setup.md`.
 1. Read `<workspace>/logs/task-N-<stamp>.events.ndjson` — the raw stream. It
    is the only account of the run that cannot be summarised away.
 2. `git log BASE..HEAD` and `git status --short` — what actually landed.
-3. `.agy/gates` yourself — never the implementer's claim about them.
+3. `( . .agy/config && bash $AGY_GATES )` yourself — never the implementer's claim about them.
 4. `.agy/tripwire check` — proves the fence still fingerprints real files. An
    empty surface guards nothing and reports clean.
 5. `bash ~/.claude/skills/agy-agents/scripts/selftest` — proves the harness

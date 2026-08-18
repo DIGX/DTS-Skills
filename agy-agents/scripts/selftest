@@ -1334,6 +1334,66 @@ has "the dispatch template names the adopted runner" "scripts/gates" \
 	&& bad "adoption does not write a competing runner" "wrote .agy/gates anyway" \
 	|| ok "adoption does not write a competing runner"
 
+# ------------------------------------------------- and the documents it reads
+# The block above ranges over every file the installer *writes*. It stayed
+# green while five places in the skill's own documents told the controller to
+# run `.agy/gates` literally — because nothing ranged over what the controller
+# *reads*.
+#
+# `.agy/gates` exists only where the installer generated a starter suite. A
+# repo adopted by `--gates`, or by the auto-detect scan, binds AGY_GATES to
+# the runner it already had and deliberately writes no competing one, so the
+# literal path is a `No such file or directory` on every adopted repo, by
+# either route. The form that is correct in all of them resolves the config:
+# `( . .agy/config && bash $AGY_GATES )`.
+#
+# Every surviving mention is pinned below by a distinctive fragment of its own
+# line — each one is about the generated file specifically, or names the
+# fresh-install case in the same breath. A new mention matches no fragment
+# and fails here; a pinned line reworded out from under its fragment fails
+# too, and has to be re-justified rather than silently re-admitted. Same
+# bargain as the tripwire fingerprints: the churn is the point.
+printf '\n=== documentation ==================================================\n'
+
+GATES_PINS='
+SKILL.md|without `--force`
+README.md|the verification suite
+README.md|exit code is the number of FAILING gates
+README.md|&& git commit` works
+README.md|on a fresh install
+reference/install.md|a starter; make it real
+reference/install.md|now points at
+reference/protocol.md|exists only when the installer wrote
+'
+PINNED=0
+while IFS='|' read -r pin_file pin_frag; do
+	[ -n "$pin_file" ] || continue
+	PINNED=$((PINNED+1))
+	n_pin="$(grep -F -- '.agy/gates' "$SKILL_DIR/$pin_file" 2>/dev/null \
+		| grep -cF -- "$pin_frag")"
+	[ "${n_pin:-0}" = "1" ] \
+		&& ok "  pinned in $pin_file: $pin_frag" \
+		|| bad "  pinned in $pin_file: $pin_frag" \
+			"matched ${n_pin:-0} '.agy/gates' line(s), want exactly 1"
+done <<PINS
+$GATES_PINS
+PINS
+
+MENTIONS="$(cd "$SKILL_DIR" && grep -cF -- '.agy/gates' SKILL.md README.md reference/*.md 2>/dev/null \
+	| awk -F: '{s+=$2} END {print s+0}')"
+[ "$MENTIONS" = "$PINNED" ] \
+	&& ok "no unpinned '.agy/gates' anywhere in the skill's own documents" \
+	|| bad "no unpinned '.agy/gates' anywhere in the skill's own documents" \
+		"$MENTIONS mention line(s) against $PINNED pinned — a new one is a hardcoded path until it earns a pin"
+
+# The pin list alone is satisfied by deleting the recipes outright. These say
+# the resolving form is still there to be read, in each document that gives
+# the controller a gate command to run.
+for doc in SKILL.md README.md reference/dispatch-traps.md reference/protocol.md; do
+	has "  $doc resolves the runner through the config" \
+		'( . .agy/config && bash $AGY_GATES )' "$SKILL_DIR/$doc"
+done
+
 # =================================================== bench instrumentation
 printf '\n=== bench instrumentation ==========================================\n'
 
