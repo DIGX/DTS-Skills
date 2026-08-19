@@ -55,16 +55,21 @@
 # ---------------------------------------------------------------------------
 # MODEL GROUPS AND FALLBACK
 #
-# Antigravity meters two independent buckets, each with its own weekly and
-# 5-hour limit:
+# Antigravity meters two independent groups, each with its own long-horizon
+# and short-horizon limit:
 #
-#   GEMINI MODELS          Gemini Flash, Gemini Pro          <- primary
-#   CLAUDE AND GPT MODELS  Claude Opus, Claude Sonnet, GPT   <- reserve
+#   GEMINI MODELS          Gemini Flash, Gemini Pro
+#   CLAUDE AND GPT MODELS  Claude Opus, Claude Sonnet, GPT
 #
-# Gemini is always tried first. The Claude group drains much faster for the
-# same work, so it is a reserve and never a co-equal: we fall back only when
-# Gemini's *weekly* limit is gone. A spent 5-hour window is not a reason to
-# burn the reserve — it refreshes on its own within hours, so we report and
+# Which group is primary and which is reserve is a config decision, not a fact
+# about the vendors: AGY_MODEL is tried first and AGY_FALLBACK_MODEL is the
+# reserve, and either slot may hold either group. Both inversions are in the
+# field. Nothing below may assume the Gemini-primary arrangement — that
+# assumption is what GST-40 was.
+#
+# The reserve is never a co-equal, whichever group it holds: we fall back only
+# when the primary's LONG bucket is gone. A spent short window is not a reason
+# to burn the reserve — it refreshes on its own within hours, so we report and
 # hold instead.
 #
 # `agy` exposes quota only in its interactive panel; there is no subcommand to
@@ -73,16 +78,16 @@
 # polled in advance.
 #
 # Nothing about being in fallback is ever persisted. Every dispatch starts on
-# Gemini again, which is what makes "switch back the moment it is available"
-# automatic — there is no sticky flag that could strand you on the reserve.
+# the primary again, which is what makes "switch back the moment it is
+# available" automatic — there is no sticky flag that could strand you on the
+# reserve.
 #
-# CAVEAT, and it is load-bearing: the classifier below is written against the
-# vocabulary these errors normally use, not against a captured Antigravity
-# exhaustion event. It is therefore deliberately conservative. A quota-shaped
-# error that does not clearly say *weekly* does NOT trigger fallback; it stops
-# and prints the raw text, so the first genuine occurrence tells you the exact
-# string and this matcher gets corrected once. Use AGY_FALLBACK=force in the
-# meantime — the interactive panel shows the real number.
+# CAVEAT, and it is load-bearing: the classifier below reads each vendor's own
+# wording. It is deliberately conservative — a quota-shaped error that neither
+# names its bucket nor states when it resets does NOT trigger fallback; it
+# stops and prints the raw text, so the first genuine occurrence tells you the
+# exact string and this matcher gets corrected once. Use AGY_FALLBACK=force in
+# the meantime — the interactive panel shows the real number.
 # ---------------------------------------------------------------------------
 #
 # Usage:
@@ -94,9 +99,9 @@
 #   AGY_MODEL, AGY_FALLBACK_MODEL, AGY_EFFORT, AGY_TIMEOUT, AGY_ARGS
 #   AGY_SKIP_GATES=1               report only; do not run the gates
 #   AGY_FALLBACK=auto|force|off    default auto
-#     auto  - Gemini first; reserve only on a clear weekly exhaustion
+#     auto  - AGY_MODEL first; reserve only on a clear LONG exhaustion
 #     force - go straight to the reserve (use when the panel already shows the
-#             Gemini weekly bucket spent)
+#             primary's long bucket spent)
 #     off   - never use the reserve; fail instead
 
 set -uo pipefail
@@ -668,22 +673,67 @@ const status = result.status || '';
 // Quota is a separate question from deferral, and keys on a different fact. A
 // run the WATCHDOG killed is never classified — that guarantee is what stops a
 // hang from spending the scarce reserve group. But a run that died on its own
-// still gets classified, because a genuine weekly exhaustion is one of the ways
+// still gets classified, because a genuine long-bucket exhaustion is one of the ways
 // a session dies without a result event, and the evidence for it is on stderr.
 const failed = !killed && (status !== 'SUCCESS' || Number(agyCode) !== 0);
 
 // Quota classification. Only ever consulted on a FAILED run: a successful run
 // whose report happens to discuss rate limiting must not be mistaken for an
 // exhausted bucket. Conservative by design — see the header. `unknown` means
-// "quota-shaped but it never said weekly", and does not authorise the reserve.
+// "quota-shaped, but it never said which bucket", and does not authorise the
+// reserve.
+//
+// The classes are `long` and `short`. They used to be `weekly` and `fivehour`,
+// and those names were the bug: they were Gemini's vocabulary, and the class
+// that authorises the reserve was reached only by matching the literal word
+// "week". Anthropic's individual quota says "Individual quota reached. ...
+// Resets in 3h27m2s" and never says week, so under AGY_MODEL=claude-* every
+// quota failure landed in `unknown` and AGY_FALLBACK=auto was unreachable code
+// — a fallback that could fire only for a model the harness was not configured
+// to use. Reported from the field as GST-40, and the same shape as the --effort
+// bug one layer up: routing that quietly assumed the Gemini line.
+//
+// So the message's own reset horizon is read as evidence, in the one vocabulary
+// every vendor shares: time. A bucket that comes back in hours is worth waiting
+// out; one that comes back in days is worth spending the scarce reserve on.
+const LONG_AFTER = 12 * 3600;
+function resetHorizon(hay) {
+	// Only within a phrase that is talking about coming back, so a duration
+	// somewhere else in a stack trace cannot be mistaken for a reset time.
+	// Every such phrase, not just the first. "Individual quota reached. Please
+	// try again later. Resets in 3h27m2s" leads with a phrase carrying no
+	// duration at all, so taking only the first match reads the one message
+	// this whole rewrite exists for as stating no reset time.
+	for (const m of hay.matchAll(/(?:resets?|refreshes?|renews?|retry|try again|available again)\b[^.\n]{0,60}/g)) {
+		const units = { d: 86400, h: 3600, m: 60, s: 1 };
+		let secs = 0, found = false;
+		// Longest-first, and deliberately no \b after the bare letters:
+		// "3h27m2s" has no word boundary anywhere inside it.
+		for (const p of m[0].matchAll(/([0-9]+)\s*(days?|hours?|minutes?|seconds?|d|h|m|s)/g)) {
+			const k = p[2][0];
+			if (!(k in units)) continue;
+			secs += Number(p[1]) * units[k];
+			found = true;
+		}
+		if (found) return secs;
+	}
+	return null;
+}
+
 let quota = 'none';
 let quotaRaw = '';
+let quotaResets = '';
 if (failed) {
 	const parts = [JSON.stringify(result.error || ''), status, stderr, response.slice(0, 4000)];
 	const hay = parts.join(' \n ').toLowerCase();
 	if (/quota|rate.?limit|resource.?exhausted|\b429\b|too many requests|usage limit|limit reached|exhausted/.test(hay)) {
-		if (/week/.test(hay)) quota = 'weekly';
-		else if (/5.?hour|five.?hour|hourly/.test(hay)) quota = 'fivehour';
+		const secs = resetHorizon(hay);
+		if (secs !== null) quotaResets = secs;
+		// An explicit bucket word outranks the horizon: that is the vendor
+		// saying which bucket it is, rather than us inferring it.
+		if (/week|month/.test(hay)) quota = 'long';
+		else if (/5.?hour|five.?hour|hourly/.test(hay)) quota = 'short';
+		else if (secs !== null) quota = secs > LONG_AFTER ? 'long' : 'short';
 		else quota = 'unknown';
 		quotaRaw = [JSON.stringify(result.error || ''), stderr].join(' ').replace(/\s+/g, ' ').trim().slice(0, 400);
 	}
@@ -704,6 +754,7 @@ const nz = v => (typeof v === 'number' && isFinite(v)) ? v : '';
 const one = v => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim();
 const classRows = [
 	['quota', quota],
+	['quota_resets_in', quotaResets],
 	['tools', tools.size],
 	['status', status],
 	['killed', killed ? 1 : 0],
@@ -745,9 +796,10 @@ console.log(pad('tools'), tools.size
 // that is on disk. Say which of the two it is.
 if (deferred) console.log(pad(''), 'floor, not a total — the stream ended before the run did');
 if (quota !== 'none') {
-	console.log(pad('quota'), quota === 'weekly'   ? 'WEEKLY bucket exhausted'
-	                        : quota === 'fivehour' ? '5-hour window exhausted (refreshes on its own)'
-	                        :                        'quota-shaped error, bucket UNCLEAR');
+	console.log(pad('quota'), quota === 'long'  ? 'LONG bucket exhausted — the reserve is authorised'
+	                        : quota === 'short' ? 'short window spent (refreshes on its own)'
+	                        :                     'quota-shaped error, bucket UNCLEAR');
+	if (quotaResets !== '') console.log(pad(''), `the error states its own reset: ${quotaResets}s away`);
 	if (quotaRaw) console.log(pad(''), quotaRaw);
 }
 
@@ -811,17 +863,23 @@ read_class() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
 LAST_CLASS="$BASE.class"
 
 quota_class="$(read_class "$BASE.class" quota)"
+quota_resets="$(read_class "$BASE.class" quota_resets_in)"
 tools_used="$(read_class "$BASE.class" tools)"
 
 # ------------------------------------------------------------------- attempt 2
-# Only a clear weekly exhaustion opens the reserve. A spent 5-hour window waits
-# it out; an unclear quota error stops and shows its raw text.
+# Only a clear LONG exhaustion opens the reserve. A spent short window waits it
+# out; an unclear quota error stops and shows its raw text.
+#
+# Which bucket it is comes from the classifier above, which reads the reset
+# horizon rather than one vendor's wording. Nothing below names a vendor: the
+# primary can be a Claude model with a Gemini reserve, and that inversion is in
+# the field.
 if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
 	case "$quota_class" in
-	weekly)
+	long)
 		printf -- '\n--- falling back to the reserve group -------------------------------\n'
-		printf 'The Gemini WEEKLY bucket is spent. Switching to %s.\n' "$AGY_FALLBACK_MODEL"
-		printf 'This group drains fast — the next dispatch starts on Gemini again.\n\n'
+		printf 'The LONG bucket for %s is spent. Switching to %s.\n' "$AGY_MODEL" "$AGY_FALLBACK_MODEL"
+		printf 'The reserve drains fast — the next dispatch starts on %s again.\n\n' "$AGY_MODEL"
 
 		# A run that already touched the tree must be handed over, not restarted:
 		# a cold retry would redo half-finished work on top of itself.
@@ -844,20 +902,24 @@ if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
 		# points at a failed run.
 		LOG_BASE="$BASE.reserve"
 		;;
-	fivehour)
+	short)
 		printf -- '\n--- holding --------------------------------------------------------\n'
-		printf 'The Gemini 5-hour window is spent but the weekly bucket is not. Holding:\n'
+		printf 'The short window for %s is spent; its long bucket is not. Holding:\n' "$AGY_MODEL"
 		printf 'that window refreshes within hours, and the reserve group is scarcer\n'
 		printf 'than the wait. Re-run this dispatch after the refresh, or override with\n'
 		printf 'AGY_FALLBACK=force if you need it done now.\n'
+		if [ -n "$quota_resets" ]; then
+			printf 'The error stated its own reset: %ss from the failure.\n' "$quota_resets"
+		fi
 		;;
 	unknown)
 		printf -- '\n--- holding --------------------------------------------------------\n'
-		printf 'A quota-shaped error came back that does not say which bucket it is.\n'
-		printf 'Not spending the reserve on a guess. The raw text is in the run report\n'
-		printf 'above and in %s.\n' "$BASE.class"
-		printf 'If the interactive panel shows the weekly bucket spent, re-run with\n'
-		printf 'AGY_FALLBACK=force — and fix the matcher in .agy/dispatch.\n'
+		printf 'A quota-shaped error came back that does not say which bucket it is,\n'
+		printf 'and does not state when it resets. Not spending the reserve on a guess.\n'
+		printf 'The raw text is in the run report above and in %s.\n' "$BASE.class"
+		printf 'If you know the long bucket is spent, re-run with AGY_FALLBACK=force —\n'
+		printf 'and add this wording to the matcher in .agy/dispatch, which classifies\n'
+		printf 'on the stated reset time and falls through to here without one.\n'
 		;;
 	esac
 fi
@@ -1180,7 +1242,7 @@ VERDICT_PRINTED=1
 printf -- '\n--- verdict --------------------------------------------------------\n'
 v() { printf '  %-7s %s\n' "$1" "$2"; }
 if [ "$FELL_BACK" -eq 1 ]; then
-	v model "$USED_MODEL  <- RESERVE GROUP BURNED (Gemini weekly exhausted)"
+	v model "$USED_MODEL  <- RESERVE GROUP BURNED (primary's long bucket exhausted)"
 	[ -n "$HANDOVER" ] && v '' "$HANDOVER"
 elif [ "$AGY_FALLBACK" = "force" ]; then
 	v model "$USED_MODEL  <- reserve group, forced"

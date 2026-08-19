@@ -236,7 +236,7 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_LEDGER` | the progress file; guarded as a file surface |
 | `AGY_GATES` | path to the gate runner. **Empty is a hard failure**, not a pass |
 | `AGY_MODEL` | primary implementer (`gemini-3.7-flash-high`) |
-| `AGY_FALLBACK_MODEL` | reserve, weekly exhaustion only (`claude-opus-4-6-thinking`) |
+| `AGY_FALLBACK_MODEL` | reserve, long-bucket exhaustion only (`claude-opus-4-6-thinking`) |
 | `AGY_FALLBACK` | `auto` \| `force` \| `off` |
 | `AGY_EFFORT` | `--effort` value. Sent to Gemini models only — see below |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |

@@ -420,9 +420,10 @@ cat > "$CFG_NEW" <<CONFIG
 : "\${AGY_GATES:=$GATES}"
 
 # ------------------------------------------------------------------------- models
-# Gemini is primary. The Claude/GPT group is a separate quota bucket that
-# drains much faster for the same work, so it is a reserve, entered only on a
-# clear *weekly* Gemini exhaustion. See .agy/dispatch's header.
+# Gemini is the default primary and the Claude/GPT group the default reserve —
+# a separate quota bucket that drains much faster for the same work, entered
+# only on a clear exhaustion of the primary's LONG bucket. Either slot may hold
+# either group; nothing downstream assumes this arrangement. See .agy/dispatch.
 : "\${AGY_MODEL:=gemini-3.7-flash-high}"
 : "\${AGY_FALLBACK_MODEL:=claude-opus-4-6-thinking}"
 : "\${AGY_FALLBACK:=auto}"

@@ -181,31 +181,50 @@ clean, empty run.
 
 ## Quota: two independent groups
 
-Antigravity meters two buckets, each with **its own weekly and 5-hour limit**:
+Antigravity meters two groups, each with **its own long-horizon and
+short-horizon limit**:
 
-| Group | Members | Role |
-|---|---|---|
-| `GEMINI MODELS` | Gemini Flash, Gemini Pro | primary |
-| `CLAUDE AND GPT MODELS` | Claude Opus, Claude Sonnet, GPT | reserve |
+| Group | Members |
+|---|---|
+| `GEMINI MODELS` | Gemini Flash, Gemini Pro |
+| `CLAUDE AND GPT MODELS` | Claude Opus, Claude Sonnet, GPT |
+
+Which group is primary is a config decision, not a property of the vendors:
+`AGY_MODEL` is tried first and `AGY_FALLBACK_MODEL` is the reserve, and either
+slot may hold either group. Both arrangements are in the field.
 
 The reserve drains far faster for the same work, so it is never a co-equal.
-Fallback happens **only on a clear weekly exhaustion of the Gemini group**. A
-spent 5-hour window refreshes on its own within hours — the dispatch reports
+
+Fallback happens **only on a clear exhaustion of the primary's long bucket**. A
+spent short window refreshes on its own within hours — the dispatch reports
 and holds rather than burning the reserve.
 
 **Quota is not queryable headlessly.** `agy quota` produces nothing and no quota
 verb appears in `agy --help`; it exists only in the interactive panel. So
 exhaustion is detected from the failure itself, not polled in advance.
 
-**Nothing about being in fallback is persisted.** Every dispatch starts on
-Gemini again, which is what makes "switch back the moment it is available"
+**Nothing about being in fallback is persisted.** Every dispatch starts on the
+primary again, which is what makes "switch back the moment it is available"
 automatic — there is no sticky flag that can strand you on the reserve.
 
-### The classifier is deliberately conservative
+### Which bucket, without asking the vendor
 
-It is written against the vocabulary these errors normally use, not against a
-captured Antigravity exhaustion event. So a quota-shaped error that does not
-clearly say *weekly* does **not** trigger fallback — it stops and prints the raw
+The classifier reads the **reset horizon the error states about itself**. That
+is the one vocabulary every vendor shares: a bucket coming back in hours is
+short and worth waiting out, one coming back in more than 12 hours is long and
+worth the reserve. An explicit bucket word (*week*, *month*, *5-hour*) outranks
+the horizon — that is the vendor naming the bucket rather than us inferring it.
+
+It reads horizons because it used to read one vendor's wording. The
+reserve-authorising class was reached only by matching the literal word *week*,
+which is Gemini's. Anthropic's individual quota says `Individual quota reached.
+... Resets in 3h27m2s` and never says week, so under `AGY_MODEL=claude-*` every
+quota failure classified as `unknown` and `AGY_FALLBACK=auto` was unreachable
+code — a fallback that could fire only for the group the harness was not
+configured to use. Reported from the field as GST-40.
+
+It is still deliberately conservative: an error that names no bucket **and**
+states no reset time does **not** trigger fallback. It stops and prints the raw
 text, so the first genuine occurrence tells you the exact string and the matcher
 gets corrected once.
 
@@ -213,7 +232,7 @@ Use `AGY_FALLBACK=force` in the meantime; the interactive panel shows the real
 number.
 
 ```bash
-AGY_FALLBACK=force .agy/dispatch 4    # panel already shows the weekly bucket spent
+AGY_FALLBACK=force .agy/dispatch 4    # panel already shows the long bucket spent
 AGY_FALLBACK=off   .agy/dispatch 4    # never touch the reserve
 ```
 

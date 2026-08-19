@@ -81,8 +81,15 @@ cleanup() {
 trap cleanup EXIT
 
 # --------------------------------------------------------------- the fake agy
-# Gemini models report an exhausted bucket (FAKE_ERROR picks which); every
-# other model succeeds. That is enough to drive all four routing paths.
+# One model reports an exhausted bucket (FAKE_ERROR picks which wording) and
+# every other model succeeds. FAKE_QUOTA_MODEL is the case glob naming which
+# one, defaulting to *gemini*.
+#
+# That glob used to be hardcoded, and the hardcoding was the bug: a Claude
+# primary could not fail on quota at all, so a fallback that was structurally
+# unreachable under AGY_MODEL=claude-* (GST-40) stayed invisible behind a green
+# suite. Same shape as the --effort bug one layer up. A test double narrower
+# than the thing it doubles does not test the thing it doubles.
 mkdir -p "$BIN"
 cat > "$BIN/agy" <<'STUB'
 #!/usr/bin/env bash
@@ -219,12 +226,20 @@ if [ -n "${FAKE_DIE:-}" ]; then
 fi
 
 case "$model" in
-*gemini*)
-	case "${FAKE_ERROR:-weekly}" in
-	fivehour) msg="Rate limit: 5 hour limit reached, refreshes in 3h45m" ;;
+${FAKE_QUOTA_MODEL:-*gemini*})
+	case "${FAKE_ERROR:-long}" in
+	short)    msg="Rate limit: 5 hour limit reached, refreshes in 3h45m" ;;
+	# Anthropic's individual-quota wording, from the field report that became
+	# GST-40. It never says week and never says hour: the only bucket evidence
+	# it carries is the reset time it states about itself.
+	ashort)   msg="Individual quota reached. Please try again later. Resets in 3h27m2s." ;;
+	# The same sentence with a horizon that can only be the long bucket. The
+	# duration is the ONLY difference between this row and the one above, which
+	# is what makes the pair a test of the horizon rather than of the wording.
+	along)    msg="Individual quota reached. Please try again later. Resets in 2d4h." ;;
 	unknown)  msg="429 RESOURCE_EXHAUSTED" ;;
 	none)     printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{}}}}'
-	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Gemini did the work.","num_turns":2,"duration_seconds":5'"$USAGE"'}}'
+	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"The primary model did the work.","num_turns":2,"duration_seconds":5'"$USAGE"'}}'
 	          exit 0 ;;
 	*)        msg="RESOURCE_EXHAUSTED: weekly limit reached for Gemini models" ;;
 	esac
@@ -600,7 +615,7 @@ run_dispatch() { # run_dispatch <label> <FAKE_ERROR> <AGY_FALLBACK> <expected-rc
 	want "$1" "$4" $?
 }
 
-run_dispatch "weekly exhaustion falls back to the reserve" weekly auto 0 "$TMP/d2.log"
+run_dispatch "long-bucket exhaustion falls back to the reserve" long auto 0 "$TMP/d2.log"
 has   "  names the burn"        "RESERVE GROUP BURNED" "$TMP/d2.log"
 has   "  used the reserve model" "claude-opus-4-6-thinking" "$TMP/d2.log"
 # The header prints its log path before any attempt runs, so on a fallback it
@@ -611,7 +626,7 @@ has   "  used the reserve model" "claude-opus-4-6-thinking" "$TMP/d2.log"
 # The verdict block is what a reader acts on, so the real path belongs there.
 has   "  the verdict names the reserve log" ".reserve.ndjson" "$TMP/d2.log"
 
-run_dispatch "a spent 5-hour window HOLDS" fivehour auto 1 "$TMP/d3.log"
+run_dispatch "a spent short window HOLDS" short auto 1 "$TMP/d3.log"
 hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d3.log"
 has   "  says it is waiting"       "refreshes within hours" "$TMP/d3.log"
 
@@ -619,14 +634,52 @@ run_dispatch "an unclear quota error HOLDS" unknown auto 1 "$TMP/d4.log"
 hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d4.log"
 has   "  shows the raw text"       "does not say which bucket" "$TMP/d4.log"
 
-run_dispatch "AGY_FALLBACK=off never falls back" weekly off 1 "$TMP/d5.log"
+run_dispatch "AGY_FALLBACK=off never falls back" long off 1 "$TMP/d5.log"
 hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d5.log"
 
-run_dispatch "AGY_FALLBACK=force starts on the reserve" weekly force 0 "$TMP/d6.log"
+run_dispatch "AGY_FALLBACK=force starts on the reserve" long force 0 "$TMP/d6.log"
 has   "  labelled as forced" "reserve group, forced" "$TMP/d6.log"
 
-run_dispatch "a clean Gemini run stays on Gemini" none auto 0 "$TMP/d7.log"
+run_dispatch "a clean primary run stays on the primary" none auto 0 "$TMP/d7.log"
 hasnt "  did not touch the reserve" "claude-opus" "$TMP/d7.log"
+
+# ---- GST-40: the bucket is read from the message, not from the vendor -------
+#
+# Everything above runs the common arrangement — Gemini primary, Claude reserve
+# — and every quota assertion above passed for the whole time the fallback was
+# unreachable in the arrangement below. These four rows are the difference.
+#
+# The classifier used to reach its reserve-authorising class only by matching
+# the literal word "week", which is Gemini's vocabulary. Anthropic's individual
+# quota says "Resets in 3h27m2s" and never says week, so under AGY_MODEL=claude-*
+# every quota failure landed in `unknown`: AGY_FALLBACK=auto could fire only for
+# the model the harness was not configured to use.
+#
+# So the pair below inverts the slots and differs only in the stated horizon.
+# Same wording, same vendor, same config — hours holds, days spends the reserve.
+inverted_dispatch() { # inverted_dispatch <label> <FAKE_ERROR> <expected-rc> <log>
+	FAKE_QUOTA_MODEL='*claude*' FAKE_ERROR="$2" \
+	AGY_MODEL=claude-opus-4-6-thinking AGY_FALLBACK_MODEL=gemini-3-pro-high \
+	AGY_FALLBACK=auto AGY_SKIP_GATES=1 \
+		bash .agy/dispatch 9 >"$4" 2>&1
+	want "$1" "$3" $?
+}
+
+inverted_dispatch "a Claude primary out of quota for days spends the reserve" along 0 "$TMP/d10.log"
+has   "  names the burn"           "RESERVE GROUP BURNED" "$TMP/d10.log"
+has   "  and ran on the Gemini reserve" "gemini-3-pro-high" "$TMP/d10.log"
+has   "  reading the bucket off the stated reset" "LONG bucket exhausted" "$TMP/d10.log"
+
+inverted_dispatch "the same wording resetting in hours HOLDS" ashort 1 "$TMP/d11.log"
+hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d11.log"
+has   "  and says which model is waiting" "claude-opus-4-6-thinking" "$TMP/d11.log"
+has   "  quoting the reset it was given" "12422s" "$TMP/d11.log"
+
+# A quota error with no bucket word AND no reset time is still not a guess to
+# spend the reserve on — the conservatism survived the rewrite.
+inverted_dispatch "a bare 429 still HOLDS under an inverted config" unknown 1 "$TMP/d12.log"
+hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d12.log"
+has   "  says it has nothing to classify on" "does not state when it resets" "$TMP/d12.log"
 
 FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d8.log" 2>&1
 has "gates run as part of a dispatch" "--- gates ---" "$TMP/d8.log"
@@ -673,7 +726,7 @@ has   "  and the banner says so"               "effort high"   "$TMP/eff_gemini.
 # carries the flag and fails against correct code. Split, the pair says
 # something the single log cannot — that ONE dispatch routed the flag two
 # different ways according to which model each attempt reached.
-effort_run eff_reserve AGY_FALLBACK=auto FAKE_ERROR=weekly
+effort_run eff_reserve AGY_FALLBACK=auto FAKE_ERROR=long
 grep -F -- 'claude-opus-4-6-thinking' "$TMP/eff_reserve.argv" > "$TMP/eff_reserve.res.argv"
 grep -F -- 'gemini' "$TMP/eff_reserve.argv" > "$TMP/eff_reserve.pri.argv"
 has   "the reserve attempt still runs after the fallback" "claude-opus-4-6-thinking" "$TMP/eff_reserve.res.argv"
@@ -1718,7 +1771,7 @@ fi
 # downstream is built to expect.
 (
 	cd "$REPO" || exit 1
-	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=weekly AGY_FALLBACK=auto \
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=long AGY_FALLBACK=auto \
 		bash .agy/dispatch 1 > "$TMP/b4.log" 2>&1
 )
 brc=$?
