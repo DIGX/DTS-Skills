@@ -527,6 +527,44 @@ want "refuses a task brief with a marker left in it" 2 $?
 has  "  names the brief" "task-8-dispatch.md" "$TMP/c3.log"
 rm -f .agy/work/m1/task-8-dispatch.md
 
+# ------------------------------------------------------- the planning template
+# Planning can be dispatched too, which inverts who reviews the plan: the
+# implementer writes it and the controller reviews it, instead of the controller
+# doing both. That matters because the plan is where the defects measurably are.
+# The template is guarded by the same unfilled check as a task brief — an
+# unfilled {{SPEC}} would send a planner at nothing in particular and it would
+# plan something, which is the failure this whole section exists to prevent,
+# one artefact upstream.
+PLANT=".agy/work/m1/plan-dispatch.template.md"
+[ -f "$PLANT" ] \
+	&& ok "the installer ships a planning template" \
+	|| bad "the installer ships a planning template" "no file at $PLANT"
+has   "  with the workspace substituted in" ".agy/work/m1/plan.md" "$PLANT"
+has   "  and the spec left for the controller" "{{SPEC}}" "$PLANT"
+# The one content rule the arrangement depends on. A plan carrying complete code
+# IS the implementation: reviewing it coarsely is a rubber stamp, reviewing it
+# properly costs what writing it would have, and the task dispatch that follows
+# is reduced to transcription. If this line goes, the feature is worse than not
+# having it, so it is pinned rather than trusted.
+has   "  forbidding implementation bodies" "not implementation bodies" "$PLANT"
+has   "  and demanding exact values reach the implementer" "A near-miss is a miss" "$PLANT"
+
+cp "$PLANT" .agy/work/m1/plan-prompt.md
+bash .agy/dispatch --file .agy/work/m1/plan-prompt.md >"$TMP/p1.log" 2>&1
+want "refuses a planning prompt with {{SPEC}} unfilled" 2 $?
+has  "  names the prompt file" "plan-prompt.md" "$TMP/p1.log"
+
+sed 's/{{[^}]*}}/filled-in/g' .agy/work/m1/plan-prompt.md > "$TMP/plan.filled"
+cp "$TMP/plan.filled" .agy/work/m1/plan-prompt.md
+FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --file .agy/work/m1/plan-prompt.md >"$TMP/p2.log" 2>&1
+want "a filled planning prompt dispatches" 0 $?
+# Not task-N, so the code-report contract must not be claimed against a run
+# whose deliverable is a plan. This is the property that makes --file the right
+# entry point rather than a task number with a special case bolted on.
+hasnt "  and claims no report contract over a plan" "report contract" "$TMP/p2.log"
+rm -f .agy/work/m1/plan-prompt.md
+
 printf '\n=== dispatch =======================================================\n'
 bash .agy/dispatch 404 >"$TMP/d0.log" 2>&1
 want "refuses a missing dispatch file" 2 $?

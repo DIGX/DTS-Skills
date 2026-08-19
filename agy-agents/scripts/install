@@ -606,7 +606,8 @@ subst() {
 
 for pair in "dispatch-context.md:$WORKSPACE/dispatch-context.md" \
 	"progress.md:$WORKSPACE/progress.md" \
-	"task-dispatch.md:$WORKSPACE/task-dispatch.template.md"; do
+	"task-dispatch.md:$WORKSPACE/task-dispatch.template.md" \
+	"plan-dispatch.md:$WORKSPACE/plan-dispatch.template.md"; do
 	src="${pair%%:*}"; dst="${pair#*:}"
 	if [ -f "$dst" ] && [ "$FORCE" -eq 0 ]; then
 		say keep "$dst"

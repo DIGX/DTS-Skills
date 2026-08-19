@@ -261,6 +261,7 @@ All three are handled by refusing to proceed:
     ├── progress.md            the ledger
     ├── dispatch-context.md    shared context, pointed at rather than quoted
     ├── task-dispatch.template.md
+    ├── plan-dispatch.template.md  optional: dispatch the planning too
     └── logs/                  raw event streams + per-run responses
 
 .claude/skills/agy-task-cycle/ thin project skill holding this repo's bindings

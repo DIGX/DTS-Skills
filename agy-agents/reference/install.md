@@ -21,6 +21,7 @@ nothing.
 .agy/work/<slug>/progress.md    the ledger
 .agy/work/<slug>/dispatch-context.md
 .agy/work/<slug>/task-dispatch.template.md
+.agy/work/<slug>/plan-dispatch.template.md   optional — see protocol.md
 .claude/skills/agy-task-cycle/  thin project skill holding this repo's bindings
 ```
 

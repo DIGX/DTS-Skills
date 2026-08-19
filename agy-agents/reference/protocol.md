@@ -36,6 +36,66 @@ every reviewer on the plan — they read `{{Language/runtime floor}}` as no floo
 at all, and no gate can enforce a rule nobody wrote down. Fill it rather than
 setting `AGY_ALLOW_UNFILLED=1`.
 
+## Planning dispatch — optional, and it inverts who reviews what
+
+The plan is the artifact that carries most of the defects. In one project's
+ledger across eleven tasks, almost every real defect lived in the plan's own
+reference code and almost none in the implementer's transcription of it. The
+protocol installs an independent reviewer for the implementation and, by
+default, none for the plan — the controller writes it and the controller
+reviews it, which is the one arrangement this protocol elsewhere forbids.
+
+Dispatching the *planning* fixes that from the other side. The implementer
+writes the plan; you review it. You stop being its author, so your review is
+finally independent, and the plan gets read adversarially before any quota is
+spent on tasks.
+
+```bash
+AGY_MODEL=gemini-3.1-pro-high .agy/dispatch --file .agy/work/<m>/plan-prompt.md
+```
+
+Copy `plan-dispatch.template.md` to `plan-prompt.md`, fill `{{SPEC}}` and
+`{{MILESTONE}}`, and dispatch. `--file` is the right entry point: the label is
+not `task-N`, so the report contract and the claims comparison correctly do not
+apply to a run that produces a plan rather than code. The unfilled-marker
+refusal still applies, so an unfilled `{{SPEC}}` cannot reach the planner.
+
+Use a reasoning model, not a fast one. Planning is the one job in this protocol
+where the model is choosing rather than transcribing, and it is also the job
+whose defects are cheapest to catch and most expensive to miss.
+
+**The plan is interfaces and prose, not implementation bodies.** This is what
+makes the arrangement work at all. A plan carrying complete code *is* the
+implementation, so reviewing it coarsely is rubber-stamping and reviewing it
+properly costs what writing it would have — and the task dispatch that follows
+degrades into transcription, which is where the delegation stops earning
+anything. Interfaces and prose keep your review cheap and give the implementer
+real work to do.
+
+### Reviewing the plan
+
+Four things, in this order. They are where plan defects actually live, and all
+four are checkable without reading an implementation.
+
+1. **Spec coverage** — walk the spec, point at the task that implements each
+   requirement. List the gaps. This is the failure mode that survives to the end
+   of a milestone.
+2. **Interface consistency** — a name produced in Task 3 spelled identically in
+   Task 7; nothing consumed before it is produced. Implementers see only their
+   own task, so a rename between tasks is a build break nobody can see locally.
+3. **Task independence** — each task separately testable and separately
+   rejectable. A task with no independent deliverable will take its neighbour
+   down with it in the fix loop.
+4. **Exact values present** — no requirement reaching an implementer as a
+   paraphrase. Every literal the spec fixes appears in the task that needs it.
+
+Read Open Questions first and rule on every entry before dispatching Task 1. An
+ambiguity the planner surfaced and you left unresolved is inherited by every
+implementer on the plan, exactly like an unfilled marker.
+
+What you are **not** doing is grading prose quality or rewriting to taste. If
+you find yourself editing sentences, you have stopped reviewing.
+
 ## The cycle
 
 1. **Record BASE** — `git rev-parse HEAD`. The review package needs it. Never
