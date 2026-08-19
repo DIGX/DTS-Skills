@@ -27,6 +27,13 @@ TITLE_TOP_PCT = 0.34
 LINE_GAP = 1.06
 BLOCK_GAP = 22
 
+# Every number above is in units of the 1376px reference width - the size the
+# WordPress card CSS has always been fed. The master the model produces is
+# wider (the WordPress.org banner is 1544 and derive refuses to upscale), so
+# the lockup is scaled to whatever master it is handed and lands in the same
+# place once derive brings the card back down.
+REFERENCE_WIDTH = 1376
+
 
 def _rgb(hex_colour):
     h = hex_colour.lstrip("#")
@@ -52,8 +59,9 @@ def compose(art_path, subject, brand, fonts_root, out_path):
     img = Image.open(art_path).convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    margin = brand["geometry"]["margin"]
-    column = brand["geometry"]["column"]
+    scale = img.width / float(REFERENCE_WIDTH)
+    margin = int(round(brand["geometry"]["margin"] * scale))
+    column = int(round(brand["geometry"]["column"] * scale))
     paper = _rgb(brand["palette"]["paper"])
     primary = _rgb(brand["palette"]["primary"])
 
@@ -63,30 +71,39 @@ def compose(art_path, subject, brand, fonts_root, out_path):
     # Tracking eats horizontal room, so fit() is given the column minus the
     # worst case it could add. Without this the longest title fits at measure
     # time and overflows at draw time.
-    title_budget = column - TITLE_TRACKING * 12
+    title_tracking = TITLE_TRACKING * scale
+    tagline_tracking = TAGLINE_TRACKING * scale
+
+    title_budget = column - title_tracking * 12
     title_lines, title_font = fit(
-        draw, subject["title"], display_path, title_budget, TITLE_LINES, TITLE_HI, TITLE_LO
+        draw,
+        subject["title"],
+        display_path,
+        title_budget,
+        TITLE_LINES,
+        int(round(TITLE_HI * scale)),
+        int(round(TITLE_LO * scale)),
     )
 
-    tagline_budget = column - TAGLINE_TRACKING * 12
+    tagline_budget = column - tagline_tracking * 12
     tagline_lines, tagline_font = fit(
         draw,
         subject["tagline"],
         body_path,
         tagline_budget,
         TAGLINE_LINES,
-        TAGLINE_SIZE_HI,
-        TAGLINE_SIZE_LO,
+        int(round(TAGLINE_SIZE_HI * scale)),
+        int(round(TAGLINE_SIZE_LO * scale)),
     )
 
     y = int(img.height * TITLE_TOP_PCT)
     for line in title_lines:
-        draw_tracked(draw, (margin, y), line, title_font, paper, TITLE_TRACKING)
+        draw_tracked(draw, (margin, y), line, title_font, paper, title_tracking)
         y += int(title_font.size * LINE_GAP)
 
-    y += BLOCK_GAP
+    y += int(round(BLOCK_GAP * scale))
     for line in tagline_lines:
-        draw_tracked(draw, (margin, y), line, tagline_font, primary, TAGLINE_TRACKING)
+        draw_tracked(draw, (margin, y), line, tagline_font, primary, tagline_tracking)
         y += int(tagline_font.size * LINE_GAP)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

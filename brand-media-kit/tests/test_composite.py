@@ -75,3 +75,38 @@ def test_ink_stays_inside_the_left_column(art_factory, fonts_root, tmp_path):
     column = BRAND["geometry"]["column"]
     assert left >= margin - 4          # a few px of glyph bearing is fine
     assert right <= margin + column + 4
+
+
+def test_the_lockup_scales_with_the_master(art_factory, fonts_root, tmp_path):
+    # brand.json states margin, column and type sizes in units of the 1376px
+    # reference width - the size the WordPress card CSS has always been fed.
+    # The master itself is 1920 wide, because the WordPress.org banner is
+    # 1544 and derive refuses to upscale. So the lockup has to be drawn at
+    # master scale and land in exactly the same place once derive brings the
+    # card back down to 1376. Without that, every banner's type is 28% small.
+    small_art = art_factory(1376, 768, (0, 0, 0), "small.png")
+    big_art = art_factory(1920, 1080, (0, 0, 0), "big.png")
+
+    small = compose(small_art, SUBJECT, BRAND, fonts_root, tmp_path / "s.png")
+    big = compose(big_art, SUBJECT, BRAND, fonts_root, tmp_path / "b.png")
+
+    reference = Image.open(small).convert("RGB").getbbox()
+    scaled = Image.open(big).convert("RGB").resize((1376, 768), Image.LANCZOS).getbbox()
+
+    assert reference is not None and scaled is not None
+    assert all(abs(a - b) <= 6 for a, b in zip(reference, scaled)), (reference, scaled)
+
+
+def test_ink_stays_inside_the_left_column_on_a_full_size_master(art_factory, fonts_root, tmp_path):
+    art = art_factory(1920, 1080, (0, 0, 0), "art.png")
+    long_title = dict(SUBJECT, title="ABANDONED CART RECOVERY", tagline="Recover lost sales automatically for stores")
+    out = compose(art, long_title, BRAND, fonts_root, tmp_path / "out.png")
+
+    bbox = Image.open(out).convert("RGB").getbbox()
+    assert bbox is not None, "compose drew nothing"
+    left, _, right, _ = bbox
+    scale = 1920 / 1376.0
+    margin = BRAND["geometry"]["margin"] * scale
+    column = BRAND["geometry"]["column"] * scale
+    assert left >= margin - 6
+    assert right <= margin + column + 6
