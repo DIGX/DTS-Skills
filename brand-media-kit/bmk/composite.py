@@ -6,12 +6,28 @@ hold typography constant across thirteen separate generations. The art carries
 the mood; this module carries the identity.
 """
 
+# `python bmk/<stage>.py` - the form SKILL.md documents - puts bmk/ on sys.path
+# rather than the skill root, so `import bmk` would fail on the next line, long
+# before main() is reached. This has to sit above the package imports for that
+# reason.
+if __name__ == "__main__" and __package__ in (None, ""):
+    import pathlib as _pathlib
+    import sys as _sys
+
+    _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+
 import pathlib
 
 from PIL import Image, ImageDraw
 
 from bmk.fonts import load_font
 from bmk.layout import fit, measure
+import sys
+
+from bmk import project
+from bmk.config import ConfigError
+from bmk.fonts import FontError
+from bmk.layout import LayoutError
 
 TITLE_HI = 96
 TITLE_LO = 48
@@ -109,3 +125,37 @@ def compose(art_path, subject, brand, fonts_root, out_path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
     return out_path
+
+
+def main(argv=None):
+    p = project.parser("Draw the text lockup onto each art master.")
+    p.add_argument("slugs", nargs="*", help="subjects to act on (default: all)")
+    args = p.parse_args(argv)
+
+    try:
+        proj = project.load(args.project)
+        subjects = proj.select(args.slugs)
+
+        missing = [s["slug"] for s in subjects if not proj.art(s["slug"]).is_file()]
+        if missing:
+            print(
+                "brand-media-kit: no art for: {} - run python bmk/generate.py first".format(
+                    ", ".join(missing)
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
+        for subject in subjects:
+            out = proj.build(subject["slug"]) / "master.png"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            compose(proj.art(subject["slug"]), subject, proj.brand, proj.fonts_dir, out)
+            print("composited {}".format(out))
+        return 0
+    except (project.ProjectError, ConfigError, FontError, LayoutError) as exc:
+        print("brand-media-kit: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

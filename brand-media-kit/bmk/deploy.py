@@ -6,10 +6,25 @@ the point: an over-budget banner is invisible in review and obvious to anyone
 loading the WordPress admin over a slow link.
 """
 
+# `python bmk/<stage>.py` - the form SKILL.md documents - puts bmk/ on sys.path
+# rather than the skill root, so `import bmk` would fail on the next line, long
+# before main() is reached. This has to sit above the package imports for that
+# reason.
+if __name__ == "__main__" and __package__ in (None, ""):
+    import pathlib as _pathlib
+    import sys as _sys
+
+    _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+
 import pathlib
 import shutil
 
 from PIL import Image
+import sys
+
+from bmk import project
+from bmk.config import ConfigError
+from bmk.derive import FORMATS
 
 
 class BudgetError(Exception):
@@ -49,3 +64,51 @@ def fan_out(src, targets, name):
         shutil.copyfile(src, dest)
         written.append(dest)
     return written
+
+
+def output_name(slug, fmt):
+    """The filename a deployed asset carries in every target.
+
+    Each target holds the media for every product, not just its own - the card
+    grid on any one plugin's screen shows all of them - so the slug has to be in
+    the filename or the last product copied would win.
+    """
+    return "{}-{}.webp".format(slug, fmt)
+
+
+def main(argv=None):
+    p = project.parser("Encode every derived format to WebP and copy it into each target.")
+    p.add_argument("slugs", nargs="*", help="subjects to act on (default: all)")
+    args = p.parse_args(argv)
+
+    try:
+        proj = project.load(args.project)
+        subjects = proj.select(args.slugs)
+        budget = proj.brand["budget_bytes"]
+        targets = proj.targets
+
+        count = 0
+        for subject in subjects:
+            slug = subject["slug"]
+            build = proj.build(slug)
+            for fmt in FORMATS:
+                png = build / "{}.png".format(fmt)
+                if not png.is_file():
+                    print(
+                        "brand-media-kit: {} missing - run python bmk/derive.py first".format(png),
+                        file=sys.stderr,
+                    )
+                    return 1
+                webp = build / "{}.webp".format(fmt)
+                to_webp(png, webp, budget)
+                fan_out(webp, targets, output_name(slug, fmt))
+                count += 1
+        print("deployed {} file(s) to {} target(s)".format(count, len(targets)))
+        return 0
+    except (project.ProjectError, ConfigError, BudgetError) as exc:
+        print("brand-media-kit: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

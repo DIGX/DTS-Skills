@@ -9,9 +9,23 @@ The tightest format here is 4:1, which keeps roughly 28%-72% of the master's
 height, and that is exactly the band the generation prompt asks for.
 """
 
+# `python bmk/<stage>.py` - the form SKILL.md documents - puts bmk/ on sys.path
+# rather than the skill root, so `import bmk` would fail on the next line, long
+# before main() is reached. This has to sit above the package imports for that
+# reason.
+if __name__ == "__main__" and __package__ in (None, ""):
+    import pathlib as _pathlib
+    import sys as _sys
+
+    _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+
 import pathlib
 
 from PIL import Image
+import sys
+
+from bmk import project
+from bmk.config import ConfigError
 
 FORMATS = {
     "card": (1376, 768),
@@ -75,3 +89,38 @@ def derive(master_path, out_dir, formats=None):
         written[key] = out
 
     return written
+
+
+def main(argv=None):
+    p = project.parser("Crop every delivery format out of each composited master.")
+    p.add_argument("slugs", nargs="*", help="subjects to act on (default: all)")
+    args = p.parse_args(argv)
+
+    try:
+        proj = project.load(args.project)
+        subjects = proj.select(args.slugs)
+
+        missing = [
+            s["slug"] for s in subjects if not (proj.build(s["slug"]) / "master.png").is_file()
+        ]
+        if missing:
+            print(
+                "brand-media-kit: no composite for: {} - run python bmk/composite.py first".format(
+                    ", ".join(missing)
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
+        for subject in subjects:
+            out_dir = proj.build(subject["slug"])
+            written = derive(out_dir / "master.png", out_dir)
+            print("derived {} format(s) for {}".format(len(written), subject["slug"]))
+        return 0
+    except (project.ProjectError, ConfigError, DeriveError) as exc:
+        print("brand-media-kit: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

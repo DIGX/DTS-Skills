@@ -10,8 +10,22 @@ API access; AI Studio keys are billed separately. Both paths call
 build_prompt, so the manual route cannot drift from the automated one.
 """
 
+# `python bmk/<stage>.py` - the form SKILL.md documents - puts bmk/ on sys.path
+# rather than the skill root, so `import bmk` would fail on the next line, long
+# before main() is reached. This has to sit above the package imports for that
+# reason.
+if __name__ == "__main__" and __package__ in (None, ""):
+    import pathlib as _pathlib
+    import sys as _sys
+
+    _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
+
 import os
 import pathlib
+import sys
+
+from bmk import project
+from bmk.config import ConfigError
 
 STYLE = (
     "Dark technical illustration, deep navy-to-black gradient background, "
@@ -101,3 +115,50 @@ def generate_via_api(subject, brand, out_path, model="gemini-3-pro-image"):
             return out_path
 
     raise GenerateError("the model returned no image for {}".format(subject["slug"]))
+
+
+def main(argv=None):
+    p = project.parser("Produce one 16:9 art master per subject.")
+    p.add_argument("--handoff", action="store_true", help="write PROMPTS.md and stop, even when a key is set")
+    p.add_argument("--check", action="store_true", help="report which masters are missing; write nothing")
+    p.add_argument("--model", default="gemini-3-pro-image", help="image model for the API path")
+    p.add_argument("slugs", nargs="*", help="subjects to act on (default: all)")
+    args = p.parse_args(argv)
+
+    try:
+        proj = project.load(args.project)
+        subjects = proj.select(args.slugs)
+        missing = missing_art(subjects, proj.art_dir)
+
+        if args.check:
+            if missing:
+                print("missing art: {}".format(", ".join(missing)))
+                return 1
+            print("art present for all {} subject(s)".format(len(subjects)))
+            return 0
+
+        if not missing:
+            print("art present for all {} subject(s); nothing to generate".format(len(subjects)))
+            return 0
+
+        wanted = [s for s in subjects if s["slug"] in set(missing)]
+
+        if args.handoff or not has_api_key():
+            out = handoff(wanted, proj.brand, proj.art_dir)
+            print("wrote {} for {} subject(s)".format(out, len(wanted)))
+            if not args.handoff:
+                print("no API key in the environment - see reference/manual-handoff.md")
+            return 0
+
+        for subject in wanted:
+            out = proj.art(subject["slug"])
+            generate_via_api(subject, proj.brand, out, model=args.model)
+            print("generated {}".format(out))
+        return 0
+    except (project.ProjectError, ConfigError, GenerateError) as exc:
+        print("brand-media-kit: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
