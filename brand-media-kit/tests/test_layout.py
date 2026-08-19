@@ -1,0 +1,59 @@
+import pytest
+from PIL import Image, ImageDraw
+
+from bmk.fonts import load_font
+from bmk.layout import LayoutError, fit, measure, wrap
+
+
+@pytest.fixture
+def draw():
+    return ImageDraw.Draw(Image.new("RGB", (1376, 768)))
+
+
+def test_measure_grows_with_the_string(draw, font_path):
+    font = load_font(font_path, 64)
+    assert measure(draw, "DTS", font) < measure(draw, "DTS INVOICE", font)
+
+
+def test_wrap_keeps_one_line_when_it_fits(draw, font_path):
+    font = load_font(font_path, 48)
+    assert wrap(draw, "GST INVOICE", font, 10000) == ["GST INVOICE"]
+
+
+def test_wrap_breaks_on_words_not_characters(draw, font_path):
+    font = load_font(font_path, 96)
+    lines = wrap(draw, "ABANDONED CART RECOVERY", font, 400)
+    assert len(lines) > 1
+    assert " ".join(lines) == "ABANDONED CART RECOVERY"
+    assert all(line == line.strip() for line in lines)
+
+
+def test_a_single_word_wider_than_the_column_still_returns_it(draw, font_path):
+    # Better to overflow visibly on one word than to hyphenate a product name.
+    # fit() is what turns this into a shrink; wrap() must not lose characters.
+    font = load_font(font_path, 200)
+    assert wrap(draw, "SUPERCALIFRAGILISTIC", font, 50) == ["SUPERCALIFRAGILISTIC"]
+
+
+def test_fit_shrinks_until_it_fits(draw, font_path):
+    lines, font = fit(draw, "ABANDONED CART RECOVERY", font_path, 517, 2, 120, 40)
+    assert len(lines) <= 2
+    assert all(measure(draw, line, font) <= 517 for line in lines)
+    assert font.size <= 120
+
+
+def test_fit_never_grows_a_short_title(draw, font_path):
+    _, small = fit(draw, "GST", font_path, 517, 2, 96, 40)
+    _, big = fit(draw, "ABANDONED CART RECOVERY", font_path, 517, 2, 96, 40)
+    assert small.size == 96
+    assert big.size <= small.size
+
+
+def test_fit_raises_when_nothing_fits(draw, font_path):
+    with pytest.raises(LayoutError, match="does not fit"):
+        fit(draw, "ABANDONED CART RECOVERY", font_path, 40, 1, 120, 100)
+
+
+def test_fit_rejects_a_backwards_size_range(draw, font_path):
+    with pytest.raises(LayoutError, match="size_hi"):
+        fit(draw, "X", font_path, 517, 2, 40, 120)
