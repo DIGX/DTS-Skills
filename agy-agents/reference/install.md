@@ -237,7 +237,7 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_MODEL` | primary implementer (`gemini-3.7-flash-high`) |
 | `AGY_FALLBACK_MODEL` | reserve, weekly exhaustion only (`claude-opus-4-6-thinking`) |
 | `AGY_FALLBACK` | `auto` \| `force` \| `off` |
-| `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
+| `AGY_EFFORT` | `--effort` value. Sent to Gemini models only — see below |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |
 | `AGY_IDLE_TIMEOUT` | seconds of event-stream silence before a run is presumed hung (`300`; `0` disables) |
 | `AGY_MAX_WALL` | seconds of total run time before a livelocked run is capped, silent or not (`2700`; `0` disables) |

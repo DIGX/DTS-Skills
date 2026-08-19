@@ -88,6 +88,27 @@ cat > "$BIN/agy" <<'STUB'
 #!/usr/bin/env bash
 model=""; prev=""
 for a in "$@"; do [ "$prev" = "--model" ] && model="$a"; prev="$a"; done
+
+# Every argv this stub was called with, one invocation per line, so a test can
+# assert on the command line that was actually built rather than on the run's
+# outcome. Nothing else records it: the flags a dispatch assembles are otherwise
+# visible only to a process that is deliberately fake.
+[ -n "${AGY_ARGV_LOG:-}" ] && printf '%s\n' "$*" >> "$AGY_ARGV_LOG"
+
+# --effort is Gemini-only, and the real binary does not take it politely: off the
+# Gemini line it exits immediately, having run zero turns. This stub used to
+# accept every flag on every model, which is exactly why the suite stayed green
+# through a reserve path that could not run anywhere. A test double more
+# permissive than the thing it doubles does not test the thing it doubles.
+case "$model" in
+	gemini*) ;;
+	*) for a in "$@"; do
+		[ "$a" = "--effort" ] || continue
+		printf 'error: unknown flag --effort for model %s\n' "$model" >&2
+		exit 2
+	done ;;
+esac
+
 printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
 
 # A real run reports token usage on its result event; this one does it only when
@@ -582,6 +603,67 @@ FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d9.log" 2>&1
 want "a failing gate fails the dispatch" 1 $?
 has  "  the verdict says so" "FAILING" "$TMP/d9.log"
 cp "$TMP/gates.rc.bak" .agy/gates
+
+# =========================================================== --effort routing
+# The stub above now refuses `--effort` off the Gemini line, the way the real
+# binary does, so every reserve-path test in the section above is already a
+# detector for this: send the flag to a Claude model and those runs stop dead.
+# That is the important half of the fix and it is invisible here — a suite that
+# only gained this section would have gained a lot less than it looks.
+#
+# What this section adds is the reason a failure would be legible. Without it a
+# regression reports "the reserve path broke" and a reader goes hunting through
+# quota classification; with it, the command line that was actually built is on
+# screen next to the model it was built for.
+printf '\n=== --effort routing ===============================================\n'
+
+effort_run() { # effort_run <log-name> [env assignments...] — argv-logging dispatch
+	local name="$1"; shift
+	rm -f "$TMP/$name.argv"
+	env AGY_ARGV_LOG="$TMP/$name.argv" FAKE_ERROR=none AGY_SKIP_GATES=1 "$@" \
+		bash .agy/dispatch 9 >"$TMP/$name.log" 2>&1
+	return 0
+}
+
+effort_run eff_gemini
+has   "a Gemini model is sent --effort"        "--effort high" "$TMP/eff_gemini.argv"
+has   "  and the banner says so"               "effort high"   "$TMP/eff_gemini.log"
+
+# The reserve attempt is the one that was unrunnable everywhere. Both attempts
+# append to the same argv log, so the log has to be split by model before it is
+# read: an unsplit `hasnt --effort` sees the Gemini attempt that legitimately
+# carries the flag and fails against correct code. Split, the pair says
+# something the single log cannot — that ONE dispatch routed the flag two
+# different ways according to which model each attempt reached.
+effort_run eff_reserve AGY_FALLBACK=auto FAKE_ERROR=weekly
+grep -F -- 'claude-opus-4-6-thinking' "$TMP/eff_reserve.argv" > "$TMP/eff_reserve.res.argv"
+grep -F -- 'gemini' "$TMP/eff_reserve.argv" > "$TMP/eff_reserve.pri.argv"
+has   "the reserve attempt still runs after the fallback" "claude-opus-4-6-thinking" "$TMP/eff_reserve.res.argv"
+hasnt "  and carries no --effort"              "--effort" "$TMP/eff_reserve.res.argv"
+has   "  while the Gemini attempt before it did" "--effort high" "$TMP/eff_reserve.pri.argv"
+
+effort_run eff_force AGY_FALLBACK=force
+has   "a forced reserve start reaches the model" "claude-opus-4-6-thinking" "$TMP/eff_force.argv"
+hasnt "  with no --effort"                     "--effort" "$TMP/eff_force.argv"
+hasnt "  and a banner that does not claim one" "effort high" "$TMP/eff_force.log"
+has   "  saying plainly there is none"         "no --effort" "$TMP/eff_force.log"
+
+# The groups are not fixed to their slots. A repo may make Claude primary and
+# keep Gemini as the reserve — that inversion is supported, it is in the field,
+# and it is the configuration a slot-keyed fix would silently get backwards.
+effort_run eff_inverted \
+	AGY_MODEL=claude-opus-4-6-thinking AGY_FALLBACK_MODEL=gemini-3.7-flash-high
+has   "an inverted config runs Claude as primary" "claude-opus-4-6-thinking" "$TMP/eff_inverted.argv"
+hasnt "  and sends it no --effort"             "--effort" "$TMP/eff_inverted.argv"
+
+# The first attempted fix, pinned as a dead end so it is not attempted twice.
+# `.agy/config` writes `: "${AGY_EFFORT:=high}"`, and `:=` fires on null as well
+# as unset, so an empty AGY_EFFORT re-supplies the default rather than clearing
+# it. No value in that file — and no value in the environment — can suppress the
+# flag. That is why the routing is keyed on the model name and nothing else.
+effort_run eff_empty AGY_EFFORT=
+has   "AGY_EFFORT= cannot suppress the flag (:= fires on null)" \
+	"--effort high" "$TMP/eff_empty.argv"
 
 printf '\n=== watchdog (trap 4) ==============================================\n'
 # A run that finishes its work and then never emits `result` is indistinguishable

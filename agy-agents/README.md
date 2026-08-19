@@ -532,7 +532,7 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_MODEL` | primary implementer (`gemini-3.7-flash-high`) |
 | `AGY_FALLBACK_MODEL` | reserve, weekly exhaustion only (`claude-opus-4-6-thinking`) |
 | `AGY_FALLBACK` | `auto` \| `force` \| `off` |
-| `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
+| `AGY_EFFORT` | `--effort` value. Sent to Gemini models only — see below |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |
 | `AGY_IDLE_TIMEOUT` | seconds of stream silence before a run is presumed hung (`300`; `0` disables) |
 | `AGY_MAX_WALL` | seconds of total run time before a livelocked run is capped, silent or not (`2700`; `0` disables) |
@@ -576,9 +576,21 @@ gpt-oss-120b-medium
 ```
 
 Effort appears in two places — as a suffix on the Gemini IDs, and as a real
-session flag (`--effort low|medium|high`). `.agy/dispatch` passes `--effort` on
-**every** model, including the suffixed ones. Which wins when they disagree is
-not pinned down, so keep them consistent.
+session flag (`--effort low|medium|high`). **The flag is Gemini-only.** Claude
+and GPT reject it: the process exits in seconds having taken zero turns, which
+reads as a fast crash rather than a bad flag. `.agy/dispatch` therefore sends
+`--effort` only to models whose ID starts `gemini`, keyed on the model itself
+rather than on which config slot it came from — so an inverted setup (Claude
+primary, Gemini reserve) routes it correctly too. An unrecognised model gets no
+flag, because a model that runs at default effort beats one that cannot run.
+
+Setting `AGY_EFFORT=` does not suppress it. `.agy/config` writes
+`: "${AGY_EFFORT:=high}"`, and `:=` fires on null as well as unset, so an empty
+value re-supplies the default. There is no configuration that turns the flag
+off; the model name is the only key.
+
+Where the suffix and the flag disagree on a Gemini model, which wins is not
+pinned down — so keep them consistent.
 
 ---
 

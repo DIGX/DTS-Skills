@@ -320,12 +320,51 @@ printf 'dispatching  %s\n' "$LABEL"
 # `agy` on PATH — the real, quota-spending one — answers instead. Printing the
 # resolved path is the whole fix; you cannot misread an absolute path.
 printf 'binary       %s\n' "$AGY"
+# ------------------------------------------------------- --effort is Gemini-only
+# `--effort` is a real session flag, and `agy --help` lists it without
+# qualification — but only the Gemini models accept it. Claude and GPT reject it
+# outright: the process exits within seconds having taken zero turns, which on
+# the way past looks like a fast crash with no cause rather than a bad flag.
+#
+# Passing it unconditionally made the reserve path unrunnable in every repository
+# this skill has ever installed. Nothing caught it because the fallback is rare,
+# and when it did fire the symptom — a reserve attempt that dies instantly after
+# a quota failure — is indistinguishable from the quota failure continuing.
+#
+# Keyed off the model string at the point of use, NOT off which config slot the
+# model arrived in. AGY_MODEL and AGY_FALLBACK_MODEL may each hold either family:
+# a repo that makes Claude primary and keeps Gemini as the reserve is a supported
+# inversion, and the flag has to follow the model through it in both directions.
+#
+# An unrecognised model gets NO flag. A model that could have run at high effort
+# and ran at default is a worse run; a model sent a flag it rejects is no run at
+# all. Every model outside the Gemini line this skill has seen rejects it, so the
+# default falls toward the side that still executes.
+#
+# This cannot be moved into configuration. `.agy/config` sets AGY_EFFORT with
+# `:=`, which fires on null as well as unset, so `AGY_EFFORT=` re-supplies the
+# default instead of clearing it — there is no value a user can put in that file
+# that suppresses the flag. That dead end is why the key is the model name.
+effort_args() { # <model> — the --effort flag pair, or nothing at all
+	case "$1" in
+		gemini*) printf -- '--effort %s' "$AGY_EFFORT" ;;
+		*)       ;;
+	esac
+}
+
+effort_label() { # <model> — what the banner is allowed to claim
+	case "$1" in
+		gemini*) printf 'effort %s' "$AGY_EFFORT" ;;
+		*)       printf 'no --effort (rejected off the Gemini line)' ;;
+	esac
+}
+
 if [ "$AGY_FALLBACK" = "force" ]; then
 	FIRST_MODEL="$AGY_FALLBACK_MODEL"
-	printf 'model        %s (RESERVE, forced) effort %s, timeout %s\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"
+	printf 'model        %s (RESERVE, forced) %s, timeout %s\n' "$FIRST_MODEL" "$(effort_label "$FIRST_MODEL")" "$AGY_TIMEOUT"
 else
 	FIRST_MODEL="$AGY_MODEL"
-	printf 'model        %s (effort %s, timeout %s)\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"
+	printf 'model        %s (%s, timeout %s)\n' "$FIRST_MODEL" "$(effort_label "$FIRST_MODEL")" "$AGY_TIMEOUT"
 fi
 if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
 	printf 'watchdog     kill after %ss of stream silence\n' "$AGY_IDLE_TIMEOUT"
@@ -419,7 +458,8 @@ trap 'on_interrupt SIGTERM 143' TERM
 # ------------------------------------------------------------------ one attempt
 # $1 model, $2 output base, $3 extra continue flag ("" or "--continue")
 run_attempt() {
-	local model="$1" out="$2" cont="$3" started elapsed
+	local model="$1" out="$2" cont="$3" started elapsed effort
+	effort="$(effort_args "$model")"
 
 	started=$SECONDS
 
@@ -431,7 +471,7 @@ run_attempt() {
 		--add-dir "$REPO_WIN" \
 		--output-format stream-json \
 		--model "$model" \
-		--effort "$AGY_EFFORT" \
+		$effort \
 		--mode accept-edits \
 		--dangerously-skip-permissions \
 		--print-timeout "$AGY_TIMEOUT" \

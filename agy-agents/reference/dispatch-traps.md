@@ -246,13 +246,30 @@ The 1.1.12 release notes advertise `--output-format json` on `models` and
 `agents`. The 1.1.12 binary rejects it (`flags provided but not defined`), so
 parse the tab-separated form above.
 
-Effort appears in two places: as a suffix on the Gemini IDs, and as a real
-session flag — `agy --help` lists `--effort (low|medium|high)`. `.agy/dispatch`
-passes `--effort "$AGY_EFFORT"` on **every** model, including the suffixed ones.
+`--effort` is the same shape of trap one paragraph further on. `agy --help`
+lists `--effort (low|medium|high)` without qualification, and it is real — on
+Gemini. Claude and GPT reject it outright: the process exits within seconds
+having taken **zero turns**, with no message that names the flag. Two runs were
+lost to this before the cause was found, and both looked like the quota failure
+that preceded them rather than like a bad command line.
 
-Which one wins when they disagree is not something this project has pinned down,
-so keep them consistent: if you set `AGY_MODEL=gemini-3.7-flash-low`, set
-`AGY_EFFORT=low` too rather than relying on one to override the other.
+Through 1.8.10 `.agy/dispatch` passed it on every model, which made the reserve
+path unrunnable in every repository this skill had installed — invisibly, since
+the fallback is rare and its symptom is indistinguishable from the exhaustion
+that triggers it. It is now sent only to models whose ID starts `gemini`, keyed
+on the model string at the call site rather than on the config slot, so the
+supported inversion (Claude primary, Gemini reserve) routes correctly in both
+directions. Unrecognised models get no flag.
+
+`AGY_EFFORT=` is not an off switch and never was: `.agy/config` writes
+`: "${AGY_EFFORT:=high}"`, and `:=` fires on null as well as unset, so an empty
+value re-supplies the default rather than clearing it. That dead end is why the
+routing is keyed on the model name.
+
+Where the suffix and the flag disagree on a Gemini model, which one wins is not
+something this project has pinned down, so keep them consistent: if you set
+`AGY_MODEL=gemini-3.7-flash-low`, set `AGY_EFFORT=low` too rather than relying
+on one to override the other.
 
 ## Reading a verdict block
 
