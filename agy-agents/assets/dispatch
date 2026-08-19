@@ -314,6 +314,17 @@ SNAP="$BASE.fence"
 REPO_WIN="$(cygpath -w "$PWD" 2>/dev/null)" || REPO_WIN="$PWD"
 
 printf 'dispatching  %s\n' "$LABEL"
+# Which version of the skill wrote this file, stamped by the installer on every
+# copy. Nothing in an installed repo recorded it before, and without it a stale
+# install is indistinguishable from a current one: two field reports against
+# this harness described behaviour that had been fixed several versions earlier,
+# and the only way to establish that was to compare their script's line count
+# against ours. A report that quotes this line is adjudicated in one read.
+#
+# If `{{SKILL_VERSION}}` appears here instead of a number, the asset was copied
+# by hand rather than installed — worth seeing for exactly the same reason.
+AGY_SKILL_VERSION='{{SKILL_VERSION}}'
+printf 'skill        agy-agents %s\n' "$AGY_SKILL_VERSION"
 # Which binary this resolved to, always, because on MSYS it is not always the
 # one you think: a Windows-form PATH entry (C:\...) is accepted by `export` and
 # then never searched, so the entry you added is skipped in silence and the next

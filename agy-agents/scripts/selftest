@@ -1319,6 +1319,52 @@ bash "$SKILL_DIR/scripts/install" >/dev/null 2>&1
 has "re-install keeps an edited config" "EDITED BY THE USER" .agy/config
 has "re-install keeps an edited gate runner" "EDITED BY THE USER" .agy/gates
 
+# ================================================================ version stamp
+printf '\n=== version stamp ==================================================\n'
+# Nothing in an installed repo used to record which version of the skill wrote
+# it, so a repo could not tell it was stale and a field report could not be
+# trusted to describe the current asset. Two reports arrived against this
+# harness describing behaviour fixed several versions earlier; establishing that
+# meant diffing their script against ours by line count, twice. The stamp turns
+# that into one line of a run banner.
+VER="$(sed -n 's/^version: *//p' "$SKILL_DIR/SKILL.md" | head -1)"
+[ -n "$VER" ] && ok "the skill declares a version" \
+	|| bad "the skill declares a version" "no version: line in SKILL.md"
+has   "the installed dispatch carries it" "AGY_SKILL_VERSION='$VER'" .agy/dispatch
+# The marker surviving means the file was copied by hand rather than installed,
+# which is the same class of problem one level down.
+hasnt "  and not the unsubstituted marker" "{{SKILL_VERSION}}" .agy/dispatch
+FAKE_ERROR=none AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ver.log" 2>&1
+has   "a run banner names the version it is running" "agy-agents $VER" "$TMP/ver.log"
+
+# The installer's own account of what it just did. "Installed" and "upgraded"
+# are different facts and were previously both reported as silence.
+VF="$TMP/vstamp"
+mkdir -p "$VF/src"
+(
+	cd "$VF" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project VF >install1.log 2>&1
+) || bad "version fixture installs" "setup failed"
+has   "a first install says it is installing" "installing $VER" "$VF/install1.log"
+
+( cd "$VF" && bash "$SKILL_DIR/scripts/install" --project VF >install2.log 2>&1 )
+has   "a re-install of the same version says so" "reinstalling $VER" "$VF/install2.log"
+
+sed -i "s/^AGY_SKILL_VERSION='.*'/AGY_SKILL_VERSION='0.0.1'/" "$VF/.agy/dispatch"
+( cd "$VF" && bash "$SKILL_DIR/scripts/install" --project VF >install3.log 2>&1 )
+has   "an upgrade names both versions" "upgrading 0.0.1 → $VER" "$VF/install3.log"
+has   "  and the new stamp replaces the old" "AGY_SKILL_VERSION='$VER'" "$VF/.agy/dispatch"
+
+# A repo installed before stamping existed. It cannot report its version, and
+# saying that plainly is the whole point — an unknown version is not a current
+# one, the same way an absent measurement is not a zero.
+sed -i "/^AGY_SKILL_VERSION=/d" "$VF/.agy/dispatch"
+( cd "$VF" && bash "$SKILL_DIR/scripts/install" --project VF >install4.log 2>&1 )
+has   "an install over an unstamped copy says it is unstamped" \
+	"unstamped" "$VF/install4.log"
+
 # ================================================== config key migration
 printf '\n=== config key migration ===========================================\n'
 # "A config that exists is kept" is right about the values and wrong about the

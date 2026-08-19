@@ -27,6 +27,15 @@ set -uo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETS="$SKILL_DIR/assets"
+# The version being shipped, read from the skill's own frontmatter so there is
+# one place to bump and nothing to keep in sync. Stamped into .agy/dispatch at
+# copy time, below.
+# tr -d because this skill is checked out on Windows as often as not, and a
+# CRLF SKILL.md would carry a carriage return into the stamp — where it would
+# corrupt the banner, break the PRIOR_VERSION comparison so every install looked
+# like an upgrade, and never once say why.
+SKILL_VERSION="$(sed -n 's/^version: *//p' "$SKILL_DIR/SKILL.md" | head -1 | tr -d '\r')"
+[ -n "$SKILL_VERSION" ] || SKILL_VERSION='unknown'
 
 ROOT=""; PROJECT=""; MILESTONE=""; WORKSPACE=""; GATES=""; GUARD_TREE=""
 PLAN=""; FORCE=0; DRY=0; COAUTHOR_OPT=""
@@ -318,9 +327,30 @@ printf -- '--- writing --------------------------------------------------------\
 if do_it; then mkdir -p .agy "$WORKSPACE/logs"; fi
 say mkdir ".agy/ and $WORKSPACE/logs/"
 
+# What is installed here already, read before the copy overwrites it. An install
+# that cannot say whether it upgraded is how a repo ends up running a version
+# nobody can name — which is how two long-fixed defects were reported against
+# this harness as current, costing a full adjudication each to disprove.
+PRIOR_VERSION=''
+if [ -f .agy/dispatch ]; then
+	PRIOR_VERSION="$(sed -n "s/^AGY_SKILL_VERSION='\(.*\)'/\1/p" .agy/dispatch | head -1 | tr -d '\r')"
+	[ -n "$PRIOR_VERSION" ] || PRIOR_VERSION='unstamped (predates version stamping)'
+fi
+if [ -z "$PRIOR_VERSION" ]; then
+	say version "installing $SKILL_VERSION"
+elif [ "$PRIOR_VERSION" = "$SKILL_VERSION" ]; then
+	say version "reinstalling $SKILL_VERSION — unchanged"
+else
+	say version "upgrading $PRIOR_VERSION → $SKILL_VERSION"
+fi
+
 for f in dispatch tripwire review-pkg fingerprint-tree.ps1; do
 	if do_it; then
-		cp "$ASSETS/$f" ".agy/$f" || exit 1
+		# Substituted rather than copied, because the version has to reach the
+		# installed file and only the installer knows it. These scripts are the
+		# skill's to own and are refreshed on every install, so the stamp cannot
+		# go stale the way a kept .agy/config key would.
+		sed "s|{{SKILL_VERSION}}|$SKILL_VERSION|g" "$ASSETS/$f" > ".agy/$f" || exit 1
 		case "$f" in *.ps1) ;; *) chmod +x ".agy/$f" ;; esac
 	fi
 	say script ".agy/$f"
