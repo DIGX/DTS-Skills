@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# Offline. Spends no API quota and needs no key: CI runs this on every push,
+# and a selftest that could bill someone is a selftest nobody runs.
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$here" || exit 1
+
+# Pick the first interpreter that can actually import the deps, not the first
+# one on PATH. A Windows dev box routinely has several pythons - the Store
+# alias, a python.org install, a venv - and the one PATH answers with first is
+# usually not the one holding Pillow. Probing by name alone reports "PIL
+# missing" at a machine that has it installed.
+py=""
+found=""
+for c in python3 python py; do
+	command -v "$c" >/dev/null 2>&1 || continue
+	found="${found:+$found }$c"
+	if "$c" -c "import PIL, pytest" >/dev/null 2>&1; then
+		py="$c"
+		break
+	fi
+done
+
+if [ -z "$found" ]; then
+	echo "FAIL: no python on PATH" >&2
+	exit 1
+fi
+if [ -z "$py" ]; then
+	echo "FAIL: no python with Pillow and pytest (tried: $found)" >&2
+	echo "      pip install -r requirements.txt" >&2
+	exit 1
+fi
+
+"$py" -m pytest tests -q
+rc=$?
+[ "$rc" -eq 0 ] && echo "brand-media-kit selftest: OK"
+exit "$rc"

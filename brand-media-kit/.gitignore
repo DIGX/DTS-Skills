@@ -1,0 +1,5 @@
+# Byte-compiled tests and pytest state are build artefacts of running the
+# selftest, not part of the skill an adopter installs.
+__pycache__/
+*.pyc
+.pytest_cache/

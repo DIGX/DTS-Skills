@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# Stub. Task 10 of docs/superpowers/plans/2026-08-19-brand-media-kit.md
+# replaces this with the .brandkit scaffolder.
+set -uo pipefail
+
+echo "brand-media-kit: install not implemented yet" >&2
+exit 78
