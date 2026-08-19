@@ -19,6 +19,8 @@ agy-agents/assets/tripwire      text eol=lf
 agy-agents/scripts/install      text eol=lf
 agy-agents/scripts/selftest     text eol=lf
 scripts/install-skill           text eol=lf
+brand-media-kit/scripts/install     text eol=lf
+brand-media-kit/scripts/selftest    text eol=lf
 
 # Markdown and config: normalize to LF in the repository, let git decide the
 # working copy. These are never executed, so a stray CR is harmless.
@@ -26,3 +28,9 @@ scripts/install-skill           text eol=lf
 *.yml       text
 *.yaml      text
 *.json      text
+
+# The vendored test font and any generated media are binary; normalization
+# would corrupt them.
+*.ttf       binary
+*.webp      binary
+*.png       binary

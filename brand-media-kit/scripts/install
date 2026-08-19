@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Scaffold .brandkit/ into an adopting project.
+#
+# Refuses to overwrite by default. An operator re-running install after months
+# of tuning the roster must not silently lose it; refusing is recoverable,
+# clobbering is not.
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")/.." && pwd)"
+
+dry_run=0
+force=0
+target="."
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--dry-run) dry_run=1 ;;
+		--force)   force=1 ;;
+		-h|--help)
+			echo "usage: install [--dry-run] [--force] [target-dir]"
+			exit 0
+			;;
+		-*)
+			echo "unknown option: $1" >&2
+			exit 2
+			;;
+		*) target="$1" ;;
+	esac
+	shift
+done
+
+dest="$target/.brandkit"
+
+for name in brand assets; do
+	src="$here/assets/$name.example.json"
+	if [ ! -f "$src" ]; then
+		echo "missing example config: $src" >&2
+		exit 1
+	fi
+	if [ -e "$dest/$name.json" ] && [ "$force" -eq 0 ]; then
+		echo "$dest/$name.json exists; pass --force to overwrite" >&2
+		exit 1
+	fi
+done
+
+if [ "$dry_run" -eq 1 ]; then
+	echo "would write $dest/brand.json"
+	echo "would write $dest/assets.json"
+	exit 0
+fi
+
+mkdir -p "$dest" || exit 1
+for name in brand assets; do
+	cp "$here/assets/$name.example.json" "$dest/$name.json" || exit 1
+	echo "wrote $dest/$name.json"
+done
+
+echo "Now edit $dest/assets.json: one entry per product, one target per plugin directory."

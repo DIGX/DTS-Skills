@@ -10,6 +10,7 @@ one Claude already knows.
 | Skill | What it is |
 |---|---|
 | [`agy-agents`](agy-agents/) | Delegate implementation to Google's Antigravity CLI (Gemini) while keeping planning and review with Claude — with a fence, gates and a self-test that make the delegation *checkable*. |
+| [`brand-media-kit`](brand-media-kit/) | Generate a consistent banner set for a family of products — one art master each, all type drawn in code, every delivery size cut from that one file, and a checker that re-reads the disk. |
 
 ---
 
@@ -112,6 +113,81 @@ Builds a throwaway repository and exercises the whole harness against a stubbed
 `agy` — fence arm/violate/refuse, the zero-gates fail-safe, git fast-forward vs
 branch switch, all four quota routes, adoption, idempotency. **It spends no
 quota**, and it aborts rather than run if `agy` resolves to the real CLI.
+
+---
+
+## `brand-media-kit`
+
+**One art master per product. All type drawn in code. Every size cut from that
+one file.**
+
+Thirteen plugins, each with a banner made when that plugin shipped. Every one
+reasonable on its own; together, thirteen unrelated products. Consistency by
+discipline does not survive the fourteenth product, or the second person, or the
+six-month gap — so none of the consistency here depends on discipline:
+
+- **The style prompt is one constant string.** Every product's prompt is those
+  exact bytes plus a single subject clause. Assemble the style per product and
+  the products drift apart again.
+- **Type is never in the art.** The model is asked to leave the left 45% of the
+  frame quiet; the title and tagline are drawn there afterwards by one function
+  at fixed sizes, tracking and position. Long titles shrink to fit; short ones
+  never grow to fill.
+- **Every format is a centred crop of the same master** — product card, page
+  header, hero strip, and both WordPress.org listing sizes. Nothing is drawn
+  twice, and nothing is ever upscaled: a master too small for a format is a hard
+  error, because upscaled art looks fine at review size and soft in the listing.
+- **Deployed files are encoded down to a byte budget** and copied into every
+  target directory.
+- **`verify` imports nothing else in the kit.** Every other stage reports what it
+  believes it did; this one re-reads the files — sizes, budgets, and whether the
+  copies in each target are still byte-identical. It refuses to pass when handed
+  an empty expected set, because a fence that reports clean on nothing is worse
+  than no fence.
+
+Art comes from Gemini, by API key if you have one and by a generated
+`PROMPTS.md` to paste into the app if you do not — both routes build the same
+prompt, since a consumer subscription not including API access should not mean a
+different prompt.
+
+**One step is deliberately human**: before saving a master, look at it and
+reject it if it contains lettering. Image models produce letterforms unprompted,
+and OCR was rejected as the automation — a cloud vision call would break the
+rule that the selftest runs offline and spends no quota, and a local Tesseract
+would silently stop enforcing on every machine lacking the binary.
+
+### Requirements
+
+| | |
+|---|---|
+| Python | 3.9+ with Pillow (`pip install -r brand-media-kit/requirements.txt`) |
+| Fonts | your own, licensed; the suite vendors Bebas Neue (SIL OFL) for tests only |
+| A Gemini key | optional — without one, the manual handoff path does the same work |
+| Claude Code | this is a Claude Code skill |
+
+### Install
+
+```bash
+bash scripts/install-skill brand-media-kit
+```
+
+Then, in Claude Code, from the project you want set up:
+
+```
+/brand-media-kit
+```
+
+With no argument it routes on what it finds: no `.brandkit/` means scaffold one,
+configs but no art means generate, art in place means composite and onward.
+
+### Verify
+
+```bash
+bash ~/.claude/skills/brand-media-kit/scripts/selftest
+```
+
+Runs the whole suite offline against a vendored test font. It never calls a
+model and spends no quota.
 
 ---
 

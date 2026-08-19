@@ -7,6 +7,64 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## brand-media-kit
+
+### [1.0.0] — 2026-08-19
+
+First release. A banner set for a family of products, where the consistency is
+structural rather than a matter of care.
+
+#### Added
+- **One art master per product**, 16:9, from a locked style prompt. `STYLE` in
+  `bmk/generate.py` is a constant, not a template: every prompt is those exact
+  bytes plus one subject clause, because a style assembled per product drifts
+  per product. Two routes to the same prompt — the API when a key is present,
+  and a generated `PROMPTS.md` when it is not, since a consumer Gemini
+  subscription does not include API access and should not mean a different
+  prompt.
+- **All typography composited in code.** The model is asked for a quiet left
+  45%; `bmk/composite.py` draws the title and tagline into it at fixed sizes,
+  tracking and position. Fitting shrinks and never grows — a two-word product
+  name set larger than a five-word one to fill the space is the exact drift this
+  kit removes. Pillow has no letterspacing, so `draw_tracked` paints glyph by
+  glyph, and `layout.measure` counts those n-1 gaps so a line that measures as
+  fitting also draws as fitting.
+- **Geometry in 1376-unit reference space**, scaled to whatever master it is
+  handed. The master is 1920 x 1080 because `hero` is 1920 wide and nothing is
+  ever upscaled; the card-sized master everyone reaches for first is rejected
+  with the format that could not be cut from it.
+- **Five formats, all centred crops of the one master**: `card` 1376x768,
+  `header` 1376x400, `hero` 1920x480, `wporg-banner` 1544x500,
+  `wporg-banner-sm` 772x250. `subject_band_pct` `[28, 72]` is derived from the
+  widest of them — the slice every crop is guaranteed to keep.
+- **WebP under a byte budget**, quality descending until it fits, then copied
+  into every target as `<slug>-<format>.webp`. Every target holds every
+  product's media, because the card grid on any one product's screen shows the
+  whole range.
+- **`bmk/verify.py`, which imports no other module in the kit.** Missing files,
+  missing target directories, wrong dimensions, over budget, unreadable, copies
+  that differ between targets, two different assets that are byte-identical. It
+  fails when handed an empty expected set or no roots: a fence that reports
+  clean because it was given nothing is worse than no fence, because it is
+  trusted.
+- `scripts/install` — scaffolds `.brandkit/` from the example configs, refuses
+  to clobber without `--force`, `--dry-run` to see what it would write.
+- `scripts/selftest` — the full suite, offline, against a vendored test font.
+  It picks the first interpreter on PATH that can import both Pillow and pytest
+  rather than the first named `python3`, which on Windows is often a Store stub
+  with neither.
+- `reference/config-schema.md`, `reference/layout-grid.md`,
+  `reference/prompt-recipe.md`, `reference/manual-handoff.md`.
+
+#### Known limitation
+- **The no-lettering check is human.** Before saving a master, look at it and
+  reject it if it contains any lettering. OCR was the obvious automation and was
+  rejected twice over: a cloud vision call breaks the rule that the selftest is
+  offline and spends no quota, and a local Tesseract would skip itself on every
+  machine without the binary — a check that disables itself quietly is worse
+  than a documented one that does not. `verify` checks bytes and sizes; it
+  cannot read.
+
 ## agy-agents
 
 ### [1.8.1] — 2026-08-14

@@ -1,0 +1,20 @@
+{
+  "subjects": [
+    {
+      "slug": "example-invoicing",
+      "title": "INVOICING",
+      "tagline": "Compliant invoices for WooCommerce",
+      "art": "a stylised invoice document floating in space, edges catching light"
+    },
+    {
+      "slug": "example-shipping",
+      "title": "SHIPPING",
+      "tagline": "Track every parcel from one screen",
+      "art": "a parcel mid-flight along a luminous route line"
+    }
+  ],
+  "targets": [
+    "wp-content/plugins/example-invoicing/assets/images/dts-plugins",
+    "wp-content/plugins/example-shipping/assets/images/dts-plugins"
+  ]
+}

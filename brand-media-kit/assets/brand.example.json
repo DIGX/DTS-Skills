@@ -1,0 +1,21 @@
+{
+  "name": "DTS",
+  "palette": {
+    "primary": "#2271b1",
+    "primary_dark": "#135e96",
+    "ink": "#0a1e3c",
+    "paper": "#ffffff"
+  },
+  "fonts": {
+    "display": "BebasNeue-Regular.ttf",
+    "body": "Montserrat-SemiBold.ttf",
+    "mono": "JetBrainsMono-Regular.ttf"
+  },
+  "geometry": {
+    "master": [1920, 1080],
+    "margin": 96,
+    "column": 517,
+    "subject_band_pct": [28, 72]
+  },
+  "budget_bytes": 90000
+}
