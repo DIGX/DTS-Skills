@@ -17,17 +17,14 @@ if __name__ == "__main__" and __package__ in (None, ""):
     _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 
 import pathlib
+import sys
 
 from PIL import Image, ImageDraw
 
-from bmk.fonts import load_font
-from bmk.layout import fit, measure
-import sys
-
 from bmk import project
 from bmk.config import ConfigError
-from bmk.fonts import FontError
-from bmk.layout import LayoutError
+from bmk.fonts import FontError, load_font
+from bmk.layout import LayoutError, fit, measure
 
 TITLE_HI = 96
 TITLE_LO = 48

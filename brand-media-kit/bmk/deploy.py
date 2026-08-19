@@ -18,9 +18,9 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 import pathlib
 import shutil
+import sys
 
 from PIL import Image
-import sys
 
 from bmk import project
 from bmk.config import ConfigError

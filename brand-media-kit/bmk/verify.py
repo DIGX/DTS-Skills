@@ -21,9 +21,9 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 import hashlib
 import pathlib
+import sys
 
 from PIL import Image
-import sys
 
 
 def _digest(path):

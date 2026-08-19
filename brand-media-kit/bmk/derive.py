@@ -20,9 +20,9 @@ if __name__ == "__main__" and __package__ in (None, ""):
     _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1]))
 
 import pathlib
+import sys
 
 from PIL import Image
-import sys
 
 from bmk import project
 from bmk.config import ConfigError
