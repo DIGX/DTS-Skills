@@ -1,7 +1,7 @@
 import pytest
 from PIL import Image, ImageDraw
 
-from bmk.composite import compose, draw_tracked
+from bmk.composite import REFERENCE_WIDTH, compose, draw_tracked
 from bmk.fonts import load_font
 
 BRAND = {
@@ -110,3 +110,25 @@ def test_ink_stays_inside_the_left_column_on_a_full_size_master(art_factory, fon
     column = BRAND["geometry"]["column"] * scale
     assert left >= margin - 6
     assert right <= margin + column + 6
+
+
+def test_a_long_title_stays_inside_the_lockup_column(tmp_path, fonts_root):
+    # The art is black and the type is not, so the bounding box of what is not
+    # black is the drawn lockup. It has to end inside margin + column: past
+    # that is the busy side of the frame the prompt did not keep quiet.
+    art = tmp_path / "art.png"
+    Image.new("RGB", (1920, 1080), (0, 0, 0)).save(art)
+    out = tmp_path / "out.png"
+
+    subject = {
+        "slug": "long",
+        "title": "WOOCOMMERCE SHIPMENT TRACKING PRO",
+        "tagline": "Track every parcel from one screen and tell the customer before they ask",
+        "art": "",
+    }
+    compose(art, subject, BRAND, fonts_root, out)
+
+    scale = 1920 / float(REFERENCE_WIDTH)
+    limit = (BRAND["geometry"]["margin"] + BRAND["geometry"]["column"]) * scale
+    right = Image.open(out).convert("RGB").getbbox()[2]
+    assert right <= limit, (right, limit)

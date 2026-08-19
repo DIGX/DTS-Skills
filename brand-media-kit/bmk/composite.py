@@ -81,32 +81,33 @@ def compose(art_path, subject, brand, fonts_root, out_path):
     display_path = fonts_root / brand["fonts"]["display"]
     body_path = fonts_root / brand["fonts"]["body"]
 
-    # Tracking eats horizontal room, so fit() is given the column minus the
-    # worst case it could add. Without this the longest title fits at measure
-    # time and overflows at draw time.
+    # fit() is told the tracking so it measures the line the way draw_tracked
+    # will paint it. Deducting a fixed allowance from the column instead only
+    # works until a title is longer than the allowance assumed, and then the
+    # type runs out of the quiet zone and into the art.
     title_tracking = TITLE_TRACKING * scale
     tagline_tracking = TAGLINE_TRACKING * scale
 
-    title_budget = column - title_tracking * 12
     title_lines, title_font = fit(
         draw,
         subject["title"],
         display_path,
-        title_budget,
+        column,
         TITLE_LINES,
         int(round(TITLE_HI * scale)),
         int(round(TITLE_LO * scale)),
+        tracking=title_tracking,
     )
 
-    tagline_budget = column - tagline_tracking * 12
     tagline_lines, tagline_font = fit(
         draw,
         subject["tagline"],
         body_path,
-        tagline_budget,
+        column,
         TAGLINE_LINES,
         int(round(TAGLINE_SIZE_HI * scale)),
         int(round(TAGLINE_SIZE_LO * scale)),
+        tracking=tagline_tracking,
     )
 
     y = int(img.height * TITLE_TOP_PCT)

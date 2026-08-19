@@ -57,3 +57,26 @@ def test_fit_raises_when_nothing_fits(draw, font_path):
 def test_fit_rejects_a_backwards_size_range(draw, font_path):
     with pytest.raises(LayoutError, match="size_hi"):
         fit(draw, "X", font_path, 517, 2, 40, 120)
+
+
+def test_measure_counts_the_tracking_between_glyphs(draw, font_path):
+    from bmk.fonts import load_font
+
+    font = load_font(font_path, 40)
+    plain = measure(draw, "SHIPPING", font)
+    tracked = measure(draw, "SHIPPING", font, tracking=3)
+    # Seven gaps in an eight-glyph word: tracking sits between glyphs, not
+    # after the last one, which is what draw_tracked actually paints.
+    assert tracked == plain + 3 * 7
+
+
+def test_fit_honours_tracking_when_it_shrinks(draw, font_path):
+    # Same text, same column: with tracking asked for, the type has to come
+    # down a size or wrap, because the tracked run is genuinely wider.
+    lines_plain, font_plain = fit(draw, "WOOCOMMERCE SHIPMENT TRACKING", font_path, 600, 2, 96, 40)
+    lines_tracked, font_tracked = fit(
+        draw, "WOOCOMMERCE SHIPMENT TRACKING", font_path, 600, 2, 96, 40, tracking=6
+    )
+    assert font_tracked.size <= font_plain.size
+    for line in lines_tracked:
+        assert measure(draw, line, font_tracked, tracking=6) <= 600
