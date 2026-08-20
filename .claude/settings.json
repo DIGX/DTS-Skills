@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(agy --version)",
+      "Bash(agy models)",
+      "Bash(.agy/tripwire check)",
+      "Bash(bash .agy/tripwire check)",
+      "Bash(.agy/tripwire surfaces)",
+      "Bash(bash .agy/tripwire surfaces)",
+      "Bash(.agy/tripwire verify *)",
+      "Bash(bash .agy/tripwire verify *)",
+      "Bash(git check-ignore *)",
+      "Bash(git rev-list *)",
+      "Bash(git merge-base *)"
+    ]
+  }
+}

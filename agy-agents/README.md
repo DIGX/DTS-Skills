@@ -52,13 +52,16 @@ event-shape docs did not match the wire.
 
 ---
 
-## The five CLI traps
+## The six CLI traps
 
 They share one property: **the failure is invisible from the outside.**
 
 Traps 1–3 make a completely broken run report `SUCCESS` with exit code `0`.
 Trap 4 makes a *finished* run look like a hung one for 45 minutes. Trap 5 makes
-a fence you believe you have fail open silently.
+a fence you believe you have fail open silently. Trap 6 runs the other way — it
+reports failure on a run that finished, committed and passed its gates — which
+costs the same in the end, because a verdict word that fires on good runs stops
+being read.
 
 Full detail, with the probe transcripts: [`reference/dispatch-traps.md`](reference/dispatch-traps.md).
 
@@ -130,6 +133,14 @@ WATCHDOG  event stream silent for 300s - killing agy (pid 12345).
 WATCHDOG  the verdict now rests on the fence, the gates and the report.
 ```
 
+The same `schedule` call has a second failure mode, and it is the one the
+watchdog cannot see: the run wakes, finds its task unfinished, and re-arms. The
+stream keeps growing, so nothing reads as idle, and the wrapper waits on a
+process that will never exit — the fence, the gates and the verdict never print.
+`AGY_MAX_WALL` (default 2700s) caps total elapsed time regardless of what the
+stream is doing, and reports `WALL-CAPPED` rather than `WATCHDOG-KILLED`,
+because "it went quiet" and "it would not stop" are different problems.
+
 The watchdog catches the silent form. The **chatty** form emits events the whole
 time it is stuck, so the stream keeps growing, the watchdog never fires, and the
 run dies of agy's own `--print-timeout` with `timeout waiting for response` —
@@ -180,6 +191,27 @@ not a security boundary, in either direction.** `allow` fails closed where you
 wanted it open; `deny` fails open where you wanted it closed. The harness
 therefore skips it and derives its safety from `.agy/tripwire`, which checks the
 filesystem *after the fact* rather than trying to predict a command.
+
+### 6. One failed call condemns a finished run
+
+`write_to_file` is sandboxed to the agent's own workspace and refuses a path
+outside it — including `.agy/work/mN/task-N-report.md`, the one file every
+dispatch is required to produce. agy downgrades the whole session to
+`status ERROR` for that single call. The run then recovers through
+`run_command`, writes the report, and commits, and the status never comes back
+up.
+
+Reported from the field on the reserve model: the recovered run and a quota
+failure forty minutes earlier that committed nothing exited identically, so
+every reserve run had to be adjudicated by hand.
+
+**Answer:** the tool error becomes evidence rather than the verdict, and
+recovery is proven out of measurements the dispatch already takes — a fresh
+report with its contract sections, a clean fence, gates that were *run* and
+green, a measured commit, uncontradicted numbers, the right co-author trailer,
+and nothing in the stream about conduct. All of them, or the run stays
+`PROBLEMS`. A denial or a bypass is never recovered from at all. Full detail in
+[`reference/dispatch-traps.md`](reference/dispatch-traps.md).
 
 ### Event stream shape
 
@@ -244,8 +276,8 @@ All three are handled by refusing to proceed:
 ```
 .agy/
 ├── config                     the only file that differs between projects
-├── dispatch                   the sanctioned way to call agy  (~760 lines)
-├── tripwire                   the integrity fence             (~430 lines)
+├── dispatch                   the sanctioned way to call agy (~1430 lines)
+├── tripwire                   the integrity fence             (~470 lines)
 ├── gates                      your verification suite — a starter; make it real
 ├── review-pkg                 builds a review package from a diff range
 ├── fingerprint-tree.ps1       fast metadata fingerprints (Windows)
@@ -253,6 +285,7 @@ All three are handled by refusing to proceed:
     ├── progress.md            the ledger
     ├── dispatch-context.md    shared context, pointed at rather than quoted
     ├── task-dispatch.template.md
+    ├── plan-dispatch.template.md  optional: dispatch the planning too
     └── logs/                  raw event streams + per-run responses
 
 .claude/skills/agy-task-cycle/ thin project skill holding this repo's bindings
@@ -265,7 +298,8 @@ The four scripts are **the skill's to own** — refreshed on every install.
 ### `.agy/dispatch` — the event-stream judge
 
 The only sanctioned way to call `agy`. Its header comment is organised around
-traps 1–4 in order, because each one shaped a specific part of it.
+traps 1–4 in order, because each one shaped a specific part of it; trap 6 is
+answered further down the file, after the artefacts its answer reads.
 
 It:
 
@@ -274,7 +308,8 @@ It:
 - passes `--add-dir` with the correct native path form (trap 1);
 - streams and parses the nested NDJSON event log with Node, counting tool calls,
   denials and tool errors, and judges the run from that rather than from `$?`
-  (trap 2);
+  (trap 2) — a denial is conduct and fails outright, a tool error is evidence
+  about the path and is settled below against what actually landed (trap 6);
 - carries `--dangerously-skip-permissions` internally, coupled to the fence, so
   the flag can never be used bare (trap 3);
 - watchdogs a stream that goes silent, and defers on any run that ends without a
@@ -373,6 +408,60 @@ would have pushed the real content past the reviewer's read limit. The manifests
 themselves (`composer.json`, `package.json`, …) are always included in full, so
 nothing a reviewer must judge is hidden.
 
+It prints the package's size, and says so when the size is more than one
+reviewer session can carry:
+
+```
+.agy/work/m1/review-task-3.diff (2140 lines)
+WARNING: 2140 lines, over the 1200-line review budget.
+         One reviewer session may not finish this. Split the task, or
+         send a scoped review and record the scoping in the ledger.
+```
+
+The budget is real arithmetic, not caution. A reviewer reads this package *plus*
+the brief, the report and `dispatch-context.md`, and re-executes every command
+the report pastes as proof — so the package is the floor of the cost, not the
+whole of it. A milestone in the field lost three consecutive tasks to reviewers
+hitting their session limit mid-review, each having read everything and returned
+a file `--check` then rejected. The number was always there to be read; nobody
+read it, which is why it now says something.
+
+It warns rather than refuses. A controller may have a good reason for a large
+task, and a gate here would be routed around instead of obeyed. Raise or lower
+the line with `AGY_REVIEW_MAX`. What to do about it is in `protocol.md`, under
+*Size the review to a session, not to the task*.
+
+#### `--check` — is the review finished?
+
+```bash
+.agy/review-pkg --check <workspace>/task-3-review.md --ac 12
+# reviewed: brief=ok spec=pass quality=approved ac=12/12 (…/task-3-review.md)
+```
+
+The package tells the reviewer to end its file with one line:
+
+```
+REVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>
+```
+
+`--check` tests for its **absence** and exits non-zero. A reviewer killed
+mid-write leaves a file that reads exactly like a review which found nothing —
+the verdict table is written before the findings are, so what survives is a
+complete-looking table with every row MET and no findings section. The
+controller's only signal was the presence of a table, which is what the
+truncated file has. An unfinished artefact must not borrow the vocabulary of a
+finished one.
+
+Three other things fail on the way past, all of them arithmetic rather than
+judgement: a spec `pass` reported alongside criteria that were not met, more
+criteria met than issued, and — with `--ac <n>` — a reconciled total that does
+not match the count the brief handed out. That last one is how a dropped row
+becomes visible: an optimistic table is still a checklist, wrong but auditable,
+where a table that can lose rows shows the reader nothing about what is gone.
+
+The line it prints on success is what goes in the ledger, so a review nobody
+checked is a review with no verdict to record.
+
 ---
 
 ## Installing
@@ -450,7 +539,9 @@ Nothing is deleted, moved or rewritten. Order of operations:
 
 1. `--dry-run` and read the plan it prints.
 2. Install.
-3. Open `.agy/gates` and make it the real suite — **the step that matters**.
+3. Open the runner `.agy/config` now points at — `.agy/gates` on a fresh install,
+   your own on adoption — and confirm it is the real suite. **The step that
+   matters.**
 4. `.agy/tripwire check` — confirm every required surface fingerprints a
    non-zero number of files.
 5. Move project-specific task-cycle knowledge into
@@ -489,11 +580,12 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_LEDGER` | the progress file; guarded as a file surface |
 | `AGY_GATES` | path to the gate runner. **Empty is a hard failure**, not a pass |
 | `AGY_MODEL` | primary implementer (`gemini-3.7-flash-high`) |
-| `AGY_FALLBACK_MODEL` | reserve, weekly exhaustion only (`claude-opus-4-6-thinking`) |
+| `AGY_FALLBACK_MODEL` | reserve, long-bucket exhaustion only (`claude-opus-4-6-thinking`) |
 | `AGY_FALLBACK` | `auto` \| `force` \| `off` |
-| `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
+| `AGY_EFFORT` | `--effort` value. Sent to Gemini models only — see below |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |
 | `AGY_IDLE_TIMEOUT` | seconds of stream silence before a run is presumed hung (`300`; `0` disables) |
+| `AGY_MAX_WALL` | seconds of total run time before a livelocked run is capped, silent or not (`2700`; `0` disables) |
 | `AGY_IDLE_POLL` | how often the stream is measured (`15`) |
 | `AGY_GUARD_DIRS` | directories fenced by content hash |
 | `AGY_GUARD_FILES` | individual files fenced by content hash; `~` expands |
@@ -534,9 +626,21 @@ gpt-oss-120b-medium
 ```
 
 Effort appears in two places — as a suffix on the Gemini IDs, and as a real
-session flag (`--effort low|medium|high`). `.agy/dispatch` passes `--effort` on
-**every** model, including the suffixed ones. Which wins when they disagree is
-not pinned down, so keep them consistent.
+session flag (`--effort low|medium|high`). **The flag is Gemini-only.** Claude
+and GPT reject it: the process exits in seconds having taken zero turns, which
+reads as a fast crash rather than a bad flag. `.agy/dispatch` therefore sends
+`--effort` only to models whose ID starts `gemini`, keyed on the model itself
+rather than on which config slot it came from — so an inverted setup (Claude
+primary, Gemini reserve) routes it correctly too. An unrecognised model gets no
+flag, because a model that runs at default effort beats one that cannot run.
+
+Setting `AGY_EFFORT=` does not suppress it. `.agy/config` writes
+`: "${AGY_EFFORT:=high}"`, and `:=` fires on null as well as unset, so an empty
+value re-supplies the default. There is no configuration that turns the flag
+off; the model name is the only key.
+
+Where the suffix and the flag disagree on a Gemini model, which wins is not
+pinned down — so keep them consistent.
 
 ---
 
@@ -557,7 +661,9 @@ Full protocol: [`reference/protocol.md`](reference/protocol.md). One pass:
    for files touched that the dispatch did not name.
 7. **Package the review** — `.agy/review-pkg <BASE> task-N`.
 8. **Dispatch a fresh Claude subagent reviewer** — three verdicts: brief
-   integrity, spec compliance, code quality.
+   integrity, spec compliance, code quality. Then
+   `.agy/review-pkg --check <workspace>/task-N-review.md --ac <n>` before
+   reading it: a review that was cut off looks like one that found nothing.
 9. **Fix loop** — rounds 1–3 back to the implementer via
    `.agy/dispatch --continue --file <correction>`; rounds 4–5 escalate to Claude.
    Five rounds maximum.
@@ -637,36 +743,79 @@ identically. It is deliberately not `PROBLEMS`: the work landing and the session
 dying are different facts, and a harness with one word for both teaches you to
 discount that word.
 
+`run  clean, but N TOOL ERROR(S) the run worked around` is trap 6. A tool call
+failed and the run did the task anyway — most often `write_to_file` refusing a
+path outside the agent's own workspace, which includes
+`.agy/work/mN/task-N-report.md`, the one file this contract requires. agy
+downgrades the whole session's status for a single failed call, so before this
+line existed a run that recovered and a run that committed nothing exited
+identically, and every one had to be adjudicated by hand.
+
+Recovery is never inferred from how confident the report sounds. Each of these
+was measured on the run before the line is printed: the report was written
+*during* it and carries its contract sections, the fence is clean, the gates
+were **run** and green, a commit was measured, no number in the report
+contradicts the gates, and the co-author trailer is the configured one. Miss one
+and the run stays `PROBLEMS` — an absent measurement is never a pass, and
+`gates  not run` least of all. A blocked call or a bypass is never recovered
+from however green everything else is: that is a fact about the boundary, not
+about the path the run took.
+
+The errors stay printed above the verdict and counted in the sidecar as
+`tool_errors=N`. Read them anyway — a path a run had to work around once will be
+there again next time.
+
 ---
 
 ## Quota and the reserve policy
 
-Antigravity meters two buckets, each with **its own weekly and 5-hour limit**:
+Antigravity meters two groups, each with **its own long-horizon and
+short-horizon limit**:
 
-| Group | Members | Role |
-|---|---|---|
-| `GEMINI MODELS` | Gemini Flash, Gemini Pro | primary |
-| `CLAUDE AND GPT MODELS` | Claude Opus, Claude Sonnet, GPT | reserve |
+| Group | Members |
+|---|---|
+| `GEMINI MODELS` | Gemini Flash, Gemini Pro |
+| `CLAUDE AND GPT MODELS` | Claude Opus, Claude Sonnet, GPT |
+
+Which group is primary is a config decision, not a property of the vendors:
+`AGY_MODEL` is tried first, `AGY_FALLBACK_MODEL` is the reserve, and either slot
+may hold either group. Both arrangements are in the field.
 
 The reserve drains far faster for the same work, so it is never a co-equal.
-Fallback happens **only on a clear weekly exhaustion of the Gemini group**. A
-spent 5-hour window refreshes on its own within hours — the dispatch reports and
+Fallback happens **only on a clear exhaustion of the primary's long bucket**. A
+spent short window refreshes on its own within hours — the dispatch reports and
 holds rather than burning the reserve on a window that would have healed itself.
 
 **Quota is not queryable headlessly** — `agy quota` produces nothing and no quota
 verb appears in `agy --help`; it exists only in the interactive panel. So
 exhaustion is detected from the failure itself, not polled in advance.
 
-**Nothing about being in fallback is persisted.** Every dispatch starts on Gemini
-again, which is what makes "switch back the moment it is available" automatic —
-there is no sticky flag that can strand you on the reserve.
+**Nothing about being in fallback is persisted.** Every dispatch starts on the
+primary again, which is what makes "switch back the moment it is available"
+automatic — there is no sticky flag that can strand you on the reserve.
 
-The classifier is deliberately conservative: a quota-shaped error that does not
-clearly say *weekly* does **not** trigger fallback. It stops and prints the raw
-text, so the first genuine occurrence tells you the exact string.
+### Which bucket, without asking the vendor
+
+The classifier reads the **reset horizon the error states about itself**, which
+is the one vocabulary every vendor shares. A bucket coming back in hours is
+short and worth waiting out; one coming back in more than 12 hours is long and
+worth the reserve. An explicit bucket word (*week*, *month*, *5-hour*) outranks
+the horizon — that is the vendor naming the bucket rather than us inferring it.
+
+It reads horizons because it used to read one vendor's wording, and that was a
+bug worth naming: the reserve-authorising class was reached only by matching the
+literal word *week*. Anthropic's individual quota says `Individual quota reached.
+... Resets in 3h27m2s` and never says week, so with `AGY_MODEL=claude-*` every
+quota failure classified as `unknown` and `AGY_FALLBACK=auto` was unreachable
+code — a fallback that could fire only for the group the harness was not
+configured to use. Reported from the field as GST-40.
+
+Still deliberately conservative: an error that names no bucket **and** states no
+reset time does **not** trigger fallback. It stops and prints the raw text, so
+the first genuine occurrence tells you the exact string.
 
 ```bash
-AGY_FALLBACK=force .agy/dispatch 4    # panel already shows the weekly bucket spent
+AGY_FALLBACK=force .agy/dispatch 4    # panel already shows the long bucket spent
 AGY_FALLBACK=off   .agy/dispatch 4    # never touch the reserve
 ```
 
@@ -699,7 +848,7 @@ Start with [`reference/dispatch-traps.md`](reference/dispatch-traps.md), then:
 1. Read `<workspace>/logs/task-N-<stamp>.events.ndjson` — the raw stream. It is
    the only account of the run that cannot be summarised away.
 2. `git log BASE..HEAD` and `git status --short` — what actually landed.
-3. `.agy/gates` yourself — never the implementer's claim about them.
+3. `( . .agy/config && bash $AGY_GATES )` yourself — never the implementer's claim about them.
 4. `.agy/tripwire check` — proves the fence still fingerprints real files.
 5. `bash ~/.claude/skills/agy-agents/scripts/selftest` — proves the harness
    itself still works, spending no quota.
@@ -716,7 +865,7 @@ agy-agents/
 │   ├── setup.md                   install & authenticate agy; headless smoke test
 │   ├── install.md                 installing, adopting, full config reference
 │   ├── protocol.md                the task cycle, reviewer contract, fix loop
-│   └── dispatch-traps.md          the five traps, event shape, quota, debugging
+│   └── dispatch-traps.md          the six traps, event shape, quota, debugging
 ├── assets/
 │   ├── dispatch                   ─┐
 │   ├── tripwire                    │ copied into .agy/ on install

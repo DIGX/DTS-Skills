@@ -21,6 +21,7 @@ nothing.
 .agy/work/<slug>/progress.md    the ledger
 .agy/work/<slug>/dispatch-context.md
 .agy/work/<slug>/task-dispatch.template.md
+.agy/work/<slug>/plan-dispatch.template.md   optional — see protocol.md
 .claude/skills/agy-task-cycle/  thin project skill holding this repo's bindings
 ```
 
@@ -57,8 +58,96 @@ overrides the refusal for that run.
 | `--gates <path>` | bind to an existing gate runner instead of writing one |
 | `--guard-tree <path>` | fence an external read-only tree (a dev site, a data dir) |
 | `--plan <path>` | the plan the ledger should reference |
+| `--coauthor <trailer>` | the one `Co-Authored-By:` value landed commits may carry (see below) |
 | `--force` | overwrite config, gates and templates |
 | `--dry-run` | print, change nothing |
+
+## The co-author trailer
+
+Every commit an implementer lands carries a `Co-Authored-By:` trailer, and
+`.agy/dispatch` **fails the run** on any address that is not the configured
+one. GitHub resolves those trailers to accounts by email — the display name is
+ignored — and counts them on the repository's contributor graph, so the address
+is a public claim that a specific account helped write the code.
+
+The default credits nobody: `Antigravity <antigravity@antigravity.invalid>`.
+`.invalid` is reserved by RFC 2606 and can never be registered. This is the
+default precisely because the installer runs in other people's repositories,
+and a default that credits somebody credits the wrong somebody.
+
+To credit your own account or organisation instead:
+
+```bash
+# this repository only
+scripts/install --coauthor 'Antigravity <agy@example.com>'
+
+# every repository you install into, from now on
+export AGY_COAUTHOR='Antigravity <agy@example.com>'
+```
+
+Prefer a dedicated mailbox over a personal or general one — `agy@` reads as
+machine authorship in `git log`, where `you@` quietly inflates a human's
+contribution graph with work a model did.
+
+Both the value in `.agy/config` and the trailer block in `dispatch-context.md`
+are written from this one setting. Change one without the other and dispatch
+refuses to run: the implementer would be judged against a rule it was never
+given. Fix both, or re-install.
+
+Already installed? `--coauthor` changes it in place — the `AGY_COAUTHOR` line
+in `.agy/config` and the `Co-Authored-By:` line in the current milestone's
+`dispatch-context.md`, both, in one run. Nothing else in either file is
+touched, and the installer re-reads the config afterwards to confirm the new
+value is what the harness will actually resolve. If it cannot, it says so and
+tells you to edit by hand rather than reporting a change it did not make.
+
+`AGY_COAUTHOR=` (empty) switches the check off. Opt out that way, never by
+widening it to a value that matches anything.
+
+### Which value wins
+
+Four sources, most specific first:
+
+| | source | when it applies |
+|---|---|---|
+| 1 | `--coauthor` on this run | always — this is how you change a decided project |
+| 2 | `AGY_COAUTHOR` in `.agy/config` | the project already chose; `--force` does not override it |
+| 3 | `AGY_COAUTHOR` in the environment | first install into this repository |
+| 4 | the shipped default | nothing else was said |
+
+An existing config outranks your environment on purpose. Exporting
+`AGY_COAUTHOR` and then installing into somebody else's repository must not
+rewrite their shared context to name your mailbox — and a milestone advance
+re-scaffolds `dispatch-context.md`, so without that rule it would.
+
+## Re-installing an existing repository
+
+The four scripts (`dispatch`, `tripwire`, `review-pkg`, the gate runner) are
+refreshed on every install. `.agy/config`, the gate file and the templates are
+kept unless you pass `--force`.
+
+Keeping the config wholesale used to mean a key introduced by a later version
+never reached a repository installed before it existed — while the *code* that
+reads that key arrived anyway. `AGY_COAUTHOR` is how that surfaced: 1.8.4
+shipped the trailer check into repositories with no value for it to check
+against, and an unset `AGY_COAUTHOR` means off. The check landed and did
+nothing.
+
+So a kept config is now compared against the one this version would write, and
+any key missing from yours is **appended** in a dated block at the end, with
+the comment paragraph that explains it. Nothing above that block is read for
+its value, rewritten, or reordered — it stays yours. Appending is safe on its
+own terms too: every binding is `${VAR:=…}` or `${VAR=…}`, so a value set
+earlier in the file wins over anything below it. The installer names each key
+it adds.
+
+One of those additions has a consequence worth stating: adding `AGY_COAUTHOR`
+to a config that never carried it turns the trailer check **on**, and dispatch
+then refuses to run until the milestone context names the same address. That
+refusal is correct, but meeting it on your next dispatch — in a repository
+where nothing looked like it changed the rules — reads as a broken harness. So
+the install that causes it says so, and either rewrites the template's
+`Co-Authored-By:` line for you or prints the exact line to paste.
 
 ## Advancing to the next milestone
 
@@ -119,7 +208,9 @@ Order of operations when adopting a repo mid-flight:
 
 1. `--dry-run` and read the plan it prints.
 2. Install.
-3. Open `.agy/gates` and make it the real suite — this is the step that matters.
+3. Open the runner `.agy/config` now points at — `.agy/gates` on a fresh
+   install, your own on adoption — and confirm it is the real suite. This is
+   the step that matters.
 4. `.agy/tripwire check` — confirm every required surface fingerprints a
    non-zero number of files.
 5. Move the project's task-cycle knowledge into
@@ -145,11 +236,12 @@ AGY_MODEL=gemini-3.1-pro-high .agy/dispatch 4
 | `AGY_LEDGER` | the progress file; guarded as a file surface |
 | `AGY_GATES` | path to the gate runner. **Empty is a hard failure**, not a pass |
 | `AGY_MODEL` | primary implementer (`gemini-3.7-flash-high`) |
-| `AGY_FALLBACK_MODEL` | reserve, weekly exhaustion only (`claude-opus-4-6-thinking`) |
+| `AGY_FALLBACK_MODEL` | reserve, long-bucket exhaustion only (`claude-opus-4-6-thinking`) |
 | `AGY_FALLBACK` | `auto` \| `force` \| `off` |
-| `AGY_EFFORT` | `--effort` value; passed on every model, suffixed or not |
+| `AGY_EFFORT` | `--effort` value. Sent to Gemini models only — see below |
 | `AGY_TIMEOUT` | per-run wall clock (`45m`) |
 | `AGY_IDLE_TIMEOUT` | seconds of event-stream silence before a run is presumed hung (`300`; `0` disables) |
+| `AGY_MAX_WALL` | seconds of total run time before a livelocked run is capped, silent or not (`2700`; `0` disables) |
 | `AGY_IDLE_POLL` | how often the stream is measured (`15`) |
 | `AGY_GUARD_DIRS` | directories fenced by content hash |
 | `AGY_GUARD_FILES` | individual files fenced by content hash; `~` expands |

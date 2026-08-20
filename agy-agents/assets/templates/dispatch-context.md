@@ -51,9 +51,26 @@ Verbatim from the plan or spec — not paraphrased. These bind every task.
 
 1. Every step in your brief carried out.
 2. `{{GATES}}` — all gates green. Not "should pass": run it.
-3. Committed as `{{feat(m1): task N — <what>}}`, with a `Co-Authored-By:`
-   trailer naming whoever actually wrote the change. The trailer is a record of
-   authorship and the reviewer relies on it; do not copy the other agent's.
+3. Committed as `{{feat(m1): task N — <what>}}`, with this trailer **exactly**:
+
+   ```
+   Co-Authored-By: {{COAUTHOR}}
+   ```
+
+   Copy it exactly. Do not use an address of your own, one you have seen in
+   this repository's history, or one you think is more correct. **This one is
+   checked**: the harness reads the trailers off every commit the run landed
+   and fails the run on any other address, so a substitution here costs a
+   `git commit --amend`, not a discussion.
+
+   It is checked because guessing it has already gone wrong. GitHub resolves
+   co-author trailers to accounts **by email** — the display name is cosmetic
+   and ignored — and counts them on the repository's Insights contributor
+   graph. So a plausible-looking address is not a harmless one: it publishes a
+   claim that a specific real account helped write this code. This project's
+   address was chosen deliberately by whoever set the harness up, and it is
+   the only one that carries their intent. Yours does not, however reasonable
+   it looks.
 4. Nothing committed under {{vendor/, node_modules/, or other generated dirs}}.
 
 ## Write your report incrementally

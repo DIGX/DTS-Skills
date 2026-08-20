@@ -12,6 +12,10 @@
 #   --guard-tree <path>  an external read-only tree to fence (a dev site, a
 #                        data dir). Fingerprinted by size+mtime, not content.
 #   --plan <path>        the plan the ledger should reference
+#   --coauthor <trailer> the one Co-Authored-By: value landed commits may carry,
+#                        e.g. 'Antigravity <agy@example.com>'. Also read from
+#                        AGY_COAUTHOR; empty switches the check off. Defaults to
+#                        an address nobody can own — see .agy/config.
 #   --force              overwrite config, gates and templates that already exist
 #   --dry-run            print what would happen, change nothing
 #
@@ -23,9 +27,18 @@ set -uo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETS="$SKILL_DIR/assets"
+# The version being shipped, read from the skill's own frontmatter so there is
+# one place to bump and nothing to keep in sync. Stamped into .agy/dispatch at
+# copy time, below.
+# tr -d because this skill is checked out on Windows as often as not, and a
+# CRLF SKILL.md would carry a carriage return into the stamp — where it would
+# corrupt the banner, break the PRIOR_VERSION comparison so every install looked
+# like an upgrade, and never once say why.
+SKILL_VERSION="$(sed -n 's/^version: *//p' "$SKILL_DIR/SKILL.md" | head -1 | tr -d '\r')"
+[ -n "$SKILL_VERSION" ] || SKILL_VERSION='unknown'
 
 ROOT=""; PROJECT=""; MILESTONE=""; WORKSPACE=""; GATES=""; GUARD_TREE=""
-PLAN=""; FORCE=0; DRY=0
+PLAN=""; FORCE=0; DRY=0; COAUTHOR_OPT=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -36,6 +49,7 @@ while [ $# -gt 0 ]; do
 	--gates)      GATES="$2"; shift 2 ;;
 	--guard-tree) GUARD_TREE="$2"; shift 2 ;;
 	--plan)       PLAN="$2"; shift 2 ;;
+	--coauthor)   COAUTHOR_OPT="$2"; COAUTHOR_SET=1; shift 2 ;;
 	--force)      FORCE=1; shift ;;
 	--dry-run)    DRY=1; shift ;;
 	-h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
@@ -57,6 +71,66 @@ ROOT="$PWD"
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 TODAY="$(date +%Y-%m-%d)"
+
+# The commit trailer, resolved once, here. It is written into .agy/config for the
+# check to read and substituted into dispatch-context.md for the model to copy —
+# one source, two renderings, so the rule and its enforcement cannot drift.
+#
+# Four sources, most specific first:
+#   1. --coauthor    you said so, on this run
+#   2. .agy/config   this project already decided, and committed the decision
+#   3. AGY_COAUTHOR  one machine's preference, for repos with no opinion yet
+#   4. the shipped default
+#
+# A config that already names it outranking the environment is the one that
+# looks backwards, because the config's own header promises the environment
+# always wins. That promise is about *runtime*: `${VAR:=x}` is how a single
+# dispatch gets overridden. This is install time, and the question is a
+# different one — what address to write into dispatch-context.md, a file that
+# is committed and read by everyone on the project. A maintainer with
+# AGY_COAUTHOR exported, installing into somebody else's repo, must not rewrite
+# that repo's shared context to name their own mailbox. Their export still wins
+# at runtime, where the drift refusal will stop them dispatching against a rule
+# the context does not carry — which is that refusal working, not fighting it.
+#
+# The consequence, and it is the intended one: once a project has decided, only
+# an explicit --coauthor changes it. Not --force, which regenerates scaffolding
+# and has no business silently repointing who gets credited on a contributor
+# graph. Whatever resolves, it is printed, so no run leaves it to be guessed.
+#
+# The shipped default is unroutable ON PURPOSE, and changing it is not a
+# housekeeping edit. This installer runs in other people's repositories, so
+# whatever address is baked in here is stamped on the contributor graph of every
+# repo any stranger installs it into. That is the exact bug this check exists to
+# stop, and putting a maintainer's own address here would only reverse who it is
+# done to. A default must credit nobody; an address that credits *someone* is a
+# choice each project makes for itself.
+#
+# `.invalid` is reserved by RFC 2606 and can never be registered, so no account
+# can ever verify an address there. Empty switches the check off.
+COAUTHOR="Antigravity <antigravity@antigravity.invalid>"
+COAUTHOR_SRC="the shipped default — credits nobody"
+# Sourced rather than parsed: the value may be set by any shell form, and the
+# config is a file we already execute on every dispatch. `grep` first because an
+# absent key and a key deliberately set empty are different answers — empty is
+# how a project switches the check off, and sourcing alone cannot tell them
+# apart.
+CFG_HAS_CA=0
+CFG_CA=""
+if [ -f .agy/config ] && grep -qE '\bAGY_COAUTHOR\b' .agy/config 2>/dev/null; then
+	CFG_HAS_CA=1
+	CFG_CA="$( unset AGY_COAUTHOR; . ./.agy/config >/dev/null 2>&1
+	           printf '%s' "${AGY_COAUTHOR-}" )"
+	COAUTHOR="$CFG_CA"
+	COAUTHOR_SRC="already set in .agy/config"
+elif [ -n "${AGY_COAUTHOR+set}" ]; then
+	COAUTHOR="$AGY_COAUTHOR"
+	COAUTHOR_SRC="AGY_COAUTHOR in the environment"
+fi
+if [ -n "$COAUTHOR_OPT" ] || [ -n "${COAUTHOR_SET:-}" ]; then
+	COAUTHOR="$COAUTHOR_OPT"
+	COAUTHOR_SRC="--coauthor on this run"
+fi
 
 say()  { printf '  %-8s %s\n' "$1" "$2"; }
 do_it() { [ "$DRY" -eq 1 ] && return 1; return 0; }
@@ -253,9 +327,30 @@ printf -- '--- writing --------------------------------------------------------\
 if do_it; then mkdir -p .agy "$WORKSPACE/logs"; fi
 say mkdir ".agy/ and $WORKSPACE/logs/"
 
+# What is installed here already, read before the copy overwrites it. An install
+# that cannot say whether it upgraded is how a repo ends up running a version
+# nobody can name — which is how two long-fixed defects were reported against
+# this harness as current, costing a full adjudication each to disprove.
+PRIOR_VERSION=''
+if [ -f .agy/dispatch ]; then
+	PRIOR_VERSION="$(sed -n "s/^AGY_SKILL_VERSION='\(.*\)'/\1/p" .agy/dispatch | head -1 | tr -d '\r')"
+	[ -n "$PRIOR_VERSION" ] || PRIOR_VERSION='unstamped (predates version stamping)'
+fi
+if [ -z "$PRIOR_VERSION" ]; then
+	say version "installing $SKILL_VERSION"
+elif [ "$PRIOR_VERSION" = "$SKILL_VERSION" ]; then
+	say version "reinstalling $SKILL_VERSION — unchanged"
+else
+	say version "upgrading $PRIOR_VERSION → $SKILL_VERSION"
+fi
+
 for f in dispatch tripwire review-pkg fingerprint-tree.ps1; do
 	if do_it; then
-		cp "$ASSETS/$f" ".agy/$f" || exit 1
+		# Substituted rather than copied, because the version has to reach the
+		# installed file and only the installer knows it. These scripts are the
+		# skill's to own and are refreshed on every install, so the stamp cannot
+		# go stale the way a kept .agy/config key would.
+		sed "s|{{SKILL_VERSION}}|$SKILL_VERSION|g" "$ASSETS/$f" > ".agy/$f" || exit 1
 		case "$f" in *.ps1) ;; *) chmod +x ".agy/$f" ;; esac
 	fi
 	say script ".agy/$f"
@@ -296,14 +391,21 @@ else
 fi
 
 # Config: the one file that is genuinely the project's. Never silently rewritten.
+#
+# The text is generated on every run whether or not it will be installed, into a
+# temp file, because a kept config has to be compared against it. Otherwise a key
+# introduced by a later version of this skill never reaches a repo installed
+# before it existed — and the repos that most need a new control are exactly the
+# ones already running the harness. AGY_COAUTHOR is what made that visible: the
+# four scripts ARE refreshed on every install, so an old repo got the trailer
+# check and no value for it to check against, and an unset AGY_COAUTHOR means
+# off. The check arrived and did nothing, which is worse than not shipping it.
 CONFIG_KEPT=0
 REPOINT_FAILED=0
-if [ -f .agy/config ] && [ "$FORCE" -eq 0 ]; then
-	CONFIG_KEPT=1
-	say keep '.agy/config (already present — pass --force to regenerate)'
-else
-	if do_it; then
-		cat > .agy/config <<CONFIG
+CFG_ADDED=""
+CA_MOVED=0
+CFG_NEW="${TMPDIR:-/tmp}/agy-config.$$"
+cat > "$CFG_NEW" <<CONFIG
 # .agy/config — sourced by every .agy script.
 #
 # Every value uses the \`: "\${VAR:=default}"\` form, so an environment variable
@@ -318,9 +420,10 @@ else
 : "\${AGY_GATES:=$GATES}"
 
 # ------------------------------------------------------------------------- models
-# Gemini is primary. The Claude/GPT group is a separate quota bucket that
-# drains much faster for the same work, so it is a reserve, entered only on a
-# clear *weekly* Gemini exhaustion. See .agy/dispatch's header.
+# Gemini is the default primary and the Claude/GPT group the default reserve —
+# a separate quota bucket that drains much faster for the same work, entered
+# only on a clear exhaustion of the primary's LONG bucket. Either slot may hold
+# either group; nothing downstream assumes this arrangement. See .agy/dispatch.
 : "\${AGY_MODEL:=gemini-3.7-flash-high}"
 : "\${AGY_FALLBACK_MODEL:=claude-opus-4-6-thinking}"
 : "\${AGY_FALLBACK:=auto}"
@@ -353,6 +456,41 @@ else
 # broke — and a broken fence reporting "clean" is worse than no fence.
 : "\${AGY_REQUIRE:=$REQUIRE}"
 
+# ------------------------------------------------------------------ attribution
+# The one \`Co-Authored-By:\` address a landed commit may carry. This value was
+# substituted into dispatch-context.md at install, so the instruction the model
+# reads and the check the harness runs come from here — one source, two
+# renderings, nothing to drift apart. Change it in one place and the other stops
+# matching, which \`.agy/dispatch\` refuses to run on; change both, or re-install.
+#
+# GitHub matches co-author trailers to accounts BY EMAIL — the display name is
+# cosmetic and ignored — and counts them on the contributor graph. So there are
+# exactly two defensible answers here, and the space between them is the bug:
+#
+#   AN ADDRESS YOU OWN. Credits your account or your organisation for work your
+#   harness produced. True, and visible as such. Prefer a dedicated mailbox
+#   (agy@example.com) over a personal or general one: it reads as machine
+#   authorship in \`git log\` instead of quietly inflating a human's graph.
+#
+#   AN ADDRESS NOBODY CAN OWN. Credits no account at all. \`.invalid\` is
+#   reserved by RFC 2606 and can never be registered, so nobody can ever verify
+#   an address there. This is the shipped default, because a default that
+#   credits somebody credits the wrong somebody.
+#
+# What is never right is an address belonging to a third party. This defaulted
+# to antigravity@google.com once, and every repo the harness touched published a
+# claim of authorship against a live account whose owner had never had access.
+# \`<name>@users.noreply.github.com\` is not the safe-looking middle: that form
+# resolves to the GitHub user of that name, and \`antigravity\` is a real one.
+#
+# Set empty to switch the check off entirely — \`AGY_COAUTHOR=\` here, or in the
+# environment. Note the assignment below is \`=\` and not \`:=\` for exactly that
+# reason: with \`:=\` an empty value is indistinguishable from an unset one and
+# the default would come straight back, so there would be no way to opt out
+# short of deleting the check. Opt out by emptying it, never by widening it to
+# something that matches anything.
+: "\${AGY_COAUTHOR=$COAUTHOR}"
+
 # --------------------------------------------------------------- project environment
 # Anything the gates and the implementer both need. \`.agy/dispatch\` sources
 # this file before it runs \`$GATES\`, so exports here reach the gates on every
@@ -361,8 +499,91 @@ else
 # export PATH="\$PWD/dev-tools/php:\$PATH"
 # export APP_ENV=test
 CONFIG
+
+if [ -f .agy/config ] && [ "$FORCE" -eq 0 ]; then
+	CONFIG_KEPT=1
+	say keep '.agy/config (already present — pass --force to regenerate)'
+
+	# Additions only. Nothing already in the file is read for its value,
+	# rewritten, or reordered — it stays the project's. Appending is safe on its
+	# own terms too: every binding is `${VAR:=...}` or `${VAR=...}`, so a value
+	# set earlier in the file wins over an assignment below it and a late block
+	# cannot override a deliberate edit even if the name match were wrong.
+	for key in $(sed -n 's/^:[[:space:]]*"\${\([A-Z_][A-Z_0-9]*\)[:=].*/\1/p' "$CFG_NEW"); do
+		grep -qE "\b$key\b" .agy/config 2>/dev/null || CFG_ADDED="$CFG_ADDED $key"
+	done
+	# --coauthor against a config that already carries one. The flag is the most
+	# specific source there is, and the docs name it as the way to change this
+	# address — so it cannot be the one thing a kept config silently ignores.
+	# That would be the migration trap again, one level up: the documented fix
+	# doing nothing on the only repos that need it. Same surgery as the
+	# milestone repoint — one line, in place, verified by re-reading.
+	if [ "$CFG_HAS_CA" -eq 1 ] && [ "$COAUTHOR" != "$CFG_CA" ]; then
+		if do_it; then
+			tmp_cfg=".agy/config.coauthor.$$"
+			awk -v new="$COAUTHOR" '
+				/^[[:space:]]*:[[:space:]]*"\$\{AGY_COAUTHOR=/ {
+					print ": \"${AGY_COAUTHOR=" new "}\""; next
+				}
+				{ print }
+			' .agy/config > "$tmp_cfg" && mv "$tmp_cfg" .agy/config
+			rm -f "$tmp_cfg"
+			now="$( unset AGY_COAUTHOR; . ./.agy/config >/dev/null 2>&1
+			        printf '%s' "${AGY_COAUTHOR-}" )"
+			if [ "$now" = "$COAUTHOR" ]; then
+				say repoint "AGY_COAUTHOR: ${CFG_CA:-<empty>} -> ${COAUTHOR:-<empty>}"
+				CA_MOVED=1
+			else
+				say repoint "COULD NOT REPOINT — AGY_COAUTHOR still resolves to '${now:-<empty>}'"
+				say ''      'Edit .agy/config by hand. The trailer check reads that'
+				say ''      'value, and dispatch refuses while it and the context differ.'
+				REPOINT_FAILED=1
+			fi
+		else
+			say repoint "AGY_COAUTHOR: ${CFG_CA:-<empty>} -> ${COAUTHOR:-<empty>}"
+		fi
 	fi
+
+	if [ -n "$CFG_ADDED" ]; then
+		for key in $CFG_ADDED; do
+			say add ".agy/config: $key — new in this version, was not set here"
+		done
+		if do_it; then
+			{
+				printf '\n# ------------------------------------- added by the installer on %s\n' "$TODAY"
+				printf '# Keys this version of agy-agents defines that this file did not carry.\n'
+				printf '# Appended, never merged: nothing above this line was read or changed.\n'
+				# A key's comment block is the run of `#` lines directly above it,
+				# and it travels with the key. A control that arrives without the
+				# paragraph explaining it is a line somebody deletes later for
+				# looking like noise.
+				awk -v want=" $CFG_ADDED " '
+					/^#/             { buf = buf $0 "\n"; next }
+					/^[[:space:]]*$/ { buf = ""; next }
+					{
+						if (match($0, /\$\{[A-Z_][A-Z_0-9]*/)) {
+							k = substr($0, RSTART + 2, RLENGTH - 2)
+							if (index(want, " " k " ")) printf "\n%s%s\n", buf, $0
+						}
+						buf = ""
+					}
+				' "$CFG_NEW"
+			} >> .agy/config
+		fi
+	fi
+else
+	if do_it; then cp "$CFG_NEW" .agy/config; fi
 	say write '.agy/config'
+fi
+rm -f "$CFG_NEW"
+
+# Printed on every run, kept or written. This value lands on a contributor
+# graph, and which of four sources supplied it is not something to leave the
+# reader to work out from what they did not pass.
+if [ -n "$COAUTHOR" ]; then
+	say trailer "$COAUTHOR ($COAUTHOR_SRC)"
+else
+	say trailer "none — the co-author check is OFF ($COAUTHOR_SRC)"
 fi
 
 # Advancing a milestone. `--milestone m6` used to scaffold .agy/work/m6 and then
@@ -410,12 +631,14 @@ subst() {
 		-e "s#{{PROTOCOL}}#$SKILL_DIR/reference/protocol.md#g" \
 		-e "s#{{MODEL}}#gemini-3.7-flash-high#g" \
 		-e "s#{{FALLBACK_MODEL}}#claude-opus-4-6-thinking#g" \
+		-e "s#{{COAUTHOR}}#$COAUTHOR#g" \
 		"$1"
 }
 
 for pair in "dispatch-context.md:$WORKSPACE/dispatch-context.md" \
 	"progress.md:$WORKSPACE/progress.md" \
-	"task-dispatch.md:$WORKSPACE/task-dispatch.template.md"; do
+	"task-dispatch.md:$WORKSPACE/task-dispatch.template.md" \
+	"plan-dispatch.md:$WORKSPACE/plan-dispatch.template.md"; do
 	src="${pair%%:*}"; dst="${pair#*:}"
 	if [ -f "$dst" ] && [ "$FORCE" -eq 0 ]; then
 		say keep "$dst"
@@ -506,6 +729,40 @@ if [ "${unfilled:-0}" -gt 0 ]; then
 	problems=$((problems + 1))
 else
 	say context "$CTX is filled in"
+fi
+
+# Adding AGY_COAUTHOR to a config that never carried it turns the trailer check
+# on, and `.agy/dispatch` refuses to run while the context does not name the
+# same address. That refusal is correct, and arriving at it on the next dispatch
+# — in a repo where nothing about this install looked like it changed the rules
+# — is how a correct refusal gets read as a broken harness. So it is said here,
+# with the line to paste, by the run that caused it.
+ca_changed=0
+case " $CFG_ADDED " in *' AGY_COAUTHOR '*) ca_changed=1 ;; esac
+[ "$CA_MOVED" -eq 1 ] && ca_changed=1
+if [ "$ca_changed" -eq 1 ] && [ -n "$COAUTHOR" ] && [ -f "$CTX" ]; then
+	ca_addr="$(printf '%s' "$COAUTHOR" |
+		sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr 'A-Z' 'a-z')"
+	[ -n "$ca_addr" ] || ca_addr="$(printf '%s' "$COAUTHOR" | tr 'A-Z' 'a-z')"
+	if ! tr 'A-Z' 'a-z' <"$CTX" | grep -qF -- "$ca_addr"; then
+		# The context is a kept file, so it is repaired only where its shape is
+		# ours to know: a `Co-Authored-By:` line came from our template and is
+		# safe to rewrite. Anything else is the user's prose, and the most this
+		# can honestly do there is say what to paste.
+		if grep -q '^[[:space:]]*Co-Authored-By:' "$CTX" 2>/dev/null && do_it; then
+			tmp_ctx="$CTX.coauthor.$$"
+			sed "s#^\([[:space:]]*\)Co-Authored-By:.*#\1Co-Authored-By: $COAUTHOR#" \
+				"$CTX" > "$tmp_ctx" && mv "$tmp_ctx" "$CTX"
+			rm -f "$tmp_ctx"
+			say trailer "rewrote the trailer in $CTX to match"
+		else
+			say trailer "the co-author check is now ON and $CTX does not carry it"
+			say ''      '.agy/dispatch REFUSES to run until it does. Add this to the'
+			say ''      '"Definition of done" block, exactly:'
+			say ''      "Co-Authored-By: $COAUTHOR"
+			problems=$((problems + 1))
+		fi
+	fi
 fi
 
 printf '\n'

@@ -4,9 +4,11 @@
 # -U10 diff for BASE..HEAD, in one file a reviewer can read in a single call.
 #
 #   .agy/review-pkg <base> <name> [head]
+#   .agy/review-pkg --check <review-file> [--ac <n>]
 #
 #   .agy/review-pkg 17dd100 task-3      -> <workspace>/review-task-3.diff
 #   .agy/review-pkg dfafed2 task-3-r1   -> <workspace>/review-task-3-r1.diff
+#   .agy/review-pkg --check .agy/work/m1/task-3-review.md --ac 12
 #
 # Lockfiles are excluded. On the first package built by hand for this workflow,
 # composer.lock and package-lock.json ran to 3,476 of 4,261 lines, which would
@@ -16,8 +18,136 @@
 
 set -euo pipefail
 
+# --check: is this review file finished?
+#
+# A reviewer killed mid-write — session limit, dispatch failure — leaves a file
+# that reads exactly like a review which found nothing: the verdict table is
+# already there, every row says MET, and the findings section never existed.
+# The controller's only signal was the presence of a table, which is precisely
+# what the truncated file has. So the contract now ends the review with one
+# machine-readable line, and this verb tests for its ABSENCE. Deterministic, so
+# it fails rather than warns: a file either ends with that line or it does not.
+#
+# Runs before git and config are touched. A review is a file; checking one
+# should not require a repository.
+if [ "${1:-}" = "--check" ]; then
+	shift
+	want_ac=""
+	file=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--ac)
+				[ $# -ge 2 ] || { echo "review-pkg: --ac needs a number" >&2; exit 64; }
+				want_ac="$2"
+				shift 2
+				;;
+			-*) echo "review-pkg: unknown option '$1'" >&2; exit 64 ;;
+			*)  file="$1"; shift ;;
+		esac
+	done
+	[ -n "$file" ] || {
+		echo "usage: .agy/review-pkg --check <review-file> [--ac <n>]" >&2
+		exit 64
+	}
+	if [ -n "$want_ac" ] && ! printf '%s' "$want_ac" | grep -qE '^[0-9]+$'; then
+		echo "review-pkg: --ac takes a count, got '$want_ac'" >&2
+		exit 64
+	fi
+
+	if [ ! -f "$file" ] || [ ! -s "$file" ]; then
+		printf 'review-pkg: no review at %s\n' "$file" >&2
+		printf '\nThe reviewer wrote nothing. An absent review is not a pass — the\n' >&2
+		printf 'task is unreviewed, and the protocol calls that HELD, not done.\n' >&2
+		exit 2
+	fi
+
+	# Trailing whitespace stripped before the emptiness filter so a line of
+	# spaces — or a CRLF file's bare \r — cannot pass for content and hide the
+	# real last line. CR is in [:space:], which is the whole reason this works
+	# on a review written on Windows.
+	last="$(sed -e 's/[[:space:]]*$//' "$file" | grep -v '^$' | tail -n 1 || true)"
+
+	case "$last" in
+	REVIEW-END\ *) ;;
+	*)
+		printf 'review-pkg: %s is UNFINISHED.\n' "$file" >&2
+		printf '\n  its last line: %s\n' "${last:-<the file is blank>}" >&2
+		printf '\nA review is finished only when its final line is the REVIEW-END\n' >&2
+		printf 'summary. This one has none, so it was cut off — most often a\n' >&2
+		printf 'reviewer that hit a session limit mid-write.\n' >&2
+		printf '\nDo not read it and do not record a verdict from it. What is on\n' >&2
+		printf 'disk looks like a review that found nothing, because the verdict\n' >&2
+		printf 'table is written before the findings are. Dispatch a fresh\n' >&2
+		printf 'reviewer over the same package.\n' >&2
+		exit 1
+		;;
+	esac
+
+	# Each key is preceded by whitespace on a line that begins `REVIEW-END `, so
+	# a leading [[:space:]] is enough to stop `ac=` matching inside another token.
+	kv() { printf '%s\n' "$last" | sed -n "s/.*[[:space:]]$1=\\([^[:space:]]*\\).*/\\1/p"; }
+	v_brief="$(kv brief)"
+	v_spec="$(kv spec)"
+	v_qual="$(kv quality)"
+	v_ac="$(kv ac)"
+
+	bad=""
+	case "$v_brief" in ok|findings)      ;; *) bad="$bad brief" ;; esac
+	case "$v_spec"  in pass|fail)        ;; *) bad="$bad spec" ;; esac
+	case "$v_qual"  in approved|changes) ;; *) bad="$bad quality" ;; esac
+	printf '%s' "$v_ac" | grep -qE '^[0-9]+/[0-9]+$' || bad="$bad ac"
+
+	if [ -n "$bad" ]; then
+		printf 'review-pkg: %s ends with a REVIEW-END line this cannot read.\n' "$file" >&2
+		printf '\n  %s\n' "$last" >&2
+		printf '\nUnreadable or missing:%s\n' "$bad" >&2
+		printf '\nRequired, as the last line of the file:\n' >&2
+		printf '  REVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>\n' >&2
+		exit 1
+	fi
+
+	# Leading zeros stripped before any arithmetic: $((08)) is not eight, it is
+	# an invalid octal constant and a fatal error.
+	ac_met="$(printf '%s' "${v_ac%%/*}" | sed 's/^0*\([0-9]\)/\1/')"
+	ac_tot="$(printf '%s' "${v_ac##*/}" | sed 's/^0*\([0-9]\)/\1/')"
+
+	if [ "$ac_tot" -eq 0 ]; then
+		printf 'review-pkg: %s reconciles against zero acceptance criteria.\n' "$file" >&2
+		printf '\nA task brief issues criteria. Nought means the reviewer never found\n' >&2
+		printf 'the section, and a review that graded nothing cannot report a verdict.\n' >&2
+		exit 1
+	fi
+	if [ "$ac_met" -gt "$ac_tot" ]; then
+		printf 'review-pkg: %s claims %s of %s criteria met.\n' "$file" "$ac_met" "$ac_tot" >&2
+		exit 1
+	fi
+	if [ -n "$want_ac" ] && [ "$ac_tot" -ne "$want_ac" ]; then
+		printf 'review-pkg: %s reconciles %s criteria; the brief issued %s.\n' \
+			"$file" "$ac_tot" "$want_ac" >&2
+		printf '\nRows went missing. A table that can lose rows is not a checklist,\n' >&2
+		printf 'because nothing in it shows the reader what is gone — and the row\n' >&2
+		printf 'that goes is as likely to be the non-negotiable one as any other.\n' >&2
+		printf 'A criterion that was not met is reported NOT MET with a reason.\n' >&2
+		exit 1
+	fi
+	if [ "$v_spec" = "pass" ] && [ "$ac_met" -ne "$ac_tot" ]; then
+		printf 'review-pkg: %s passes spec compliance with %s of %s criteria met.\n' \
+			"$file" "$ac_met" "$ac_tot" >&2
+		printf '\nThose cannot both be true. Either the unmet criteria are met — say\n' >&2
+		printf 'so in the count — or spec compliance is fail.\n' >&2
+		exit 1
+	fi
+
+	# Printed so the ledger line comes from the check rather than from reading
+	# the review. A controller that skips this has nothing to paste.
+	printf 'reviewed: brief=%s spec=%s quality=%s ac=%s/%s (%s)\n' \
+		"$v_brief" "$v_spec" "$v_qual" "$ac_met" "$ac_tot" "$file"
+	exit 0
+fi
+
 if [ $# -lt 2 ]; then
 	echo "usage: .agy/review-pkg <base-commit> <name> [head]" >&2
+	echo "       .agy/review-pkg --check <review-file> [--ac <n>]" >&2
 	exit 64
 fi
 
@@ -75,6 +205,32 @@ fi
 	echo
 	echo "Answer all three explicitly, even when the answer is 'no findings'."
 	echo
+	echo "## End the review with this line, exactly"
+	echo
+	echo '    REVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>'
+	echo
+	echo "Last line of the file, nothing after it. \`ac\` is criteria met over"
+	echo "criteria the brief issued: reconcile row for row, and report one that"
+	echo "was not met as NOT MET with a reason. Dropping its row is not an"
+	echo "available move — an optimistic table is still a checklist, wrong but"
+	echo "auditable, where a table that can lose rows shows the reader nothing"
+	echo "about what is gone."
+	echo
+	echo "The line is checked mechanically and a review without it is thrown"
+	echo "away unread. That is not pedantry. A reviewer killed mid-write leaves"
+	echo "a file whose verdict table is complete and whose findings section"
+	echo "never existed, and it reads exactly like a review that found nothing."
+	echo
+	echo "## Write each finding down as you reach it"
+	echo
+	echo "Append findings to your review file as you find them, and write the"
+	echo "verdict table and the REVIEW-END line last. You are the agent in this"
+	echo "cycle most likely to be cut off — you run last, on whatever budget is"
+	echo "left. Composing the whole review and writing it in one pass at the end"
+	echo "means being cut off loses all of it. Writing findings first means"
+	echo "being cut off still leaves behind the expensive half, and the review"
+	echo "can resume from there instead of being bought twice."
+	echo
 	echo "## Commits"
 	git log --oneline "$base..$head"
 	echo
@@ -94,4 +250,26 @@ fi
 		':(exclude)go.sum'
 } >"$out"
 
-printf '%s (%s lines)\n' "$out" "$(wc -l <"$out" | tr -d ' ')"
+lines="$(wc -l <"$out" | tr -d ' ')"
+printf '%s (%s lines)\n' "$out" "$lines"
+
+# The review is a unit of work with a budget, and this is the only moment its
+# size is known before a reviewer has been spent on it. The package is the floor
+# of that cost, not the whole of it: the reviewer also reads the brief, the
+# report and dispatch-context.md, and re-executes every command the report
+# pastes as proof. A milestone in the field lost three consecutive tasks to
+# reviewers hitting their session limit mid-review, each of which had read
+# everything and returned a file the --check rejected.
+#
+# So the size is stated rather than estimated. A controller asked to judge by eye
+# whether one session can carry a diff will answer optimistically every time,
+# and the cost of being wrong is the whole review.
+max="${AGY_REVIEW_MAX:-1200}"
+case "$max" in ''|*[!0-9]*) max=1200 ;; esac
+if [ "$lines" -gt "$max" ]; then
+	{
+		echo "WARNING: $lines lines, over the $max-line review budget."
+		echo "         One reviewer session may not finish this. Split the task, or"
+		echo "         send a scoped review and record the scoping in the ledger."
+	} >&2
+fi

@@ -3,7 +3,7 @@
 # Dispatch one task to the implementer model through the Antigravity CLI,
 # headlessly. This is the only sanctioned way to call `agy` in this project.
 #
-# Four things about agy shape this whole script.
+# Five things about agy shape this whole script.
 #
 # First, `--add-dir` is not optional. agy's default CLI project has no
 # resources attached (projectResources is {}), so a headless run gets a scratch
@@ -52,19 +52,42 @@
 # not on whether we did the killing. Status, an empty response and an exit code
 # from a session that died describe the death, not the work.
 #
+# Fifth, one failed tool call condemns the whole run. write_to_file is
+# sandboxed to the agent's own workspace and refuses any path outside it —
+# including .agy/work/mN/task-N-report.md, the one file this contract requires.
+# agy downgrades the session to status ERROR for that single call and never
+# takes it back, so a run that recovered through run_command, wrote 564 accurate
+# lines and committed exits exactly like the quota failure forty minutes earlier
+# that committed nothing. One bit cannot carry two questions, and the fault
+# injection behind the quota work had already found the same defect from the
+# other side: an assertion that a run exited 0 passed against a run that never
+# ran. So a tool error is recorded as evidence about the PATH the run took
+# rather than taken as the verdict, and the `recovered` section below proves the
+# outcome out of measurements this script is already making — a fresh report
+# carrying its contract sections, a clean fence, GREEN gates, a measured commit,
+# uncontradicted numbers, the configured trailer, and nothing in the stream
+# about conduct. All of them, or the run stays failed. A denial is not in that
+# class and never recovers from anything: it is a fact about the boundary, not
+# about the path.
+#
 # ---------------------------------------------------------------------------
 # MODEL GROUPS AND FALLBACK
 #
-# Antigravity meters two independent buckets, each with its own weekly and
-# 5-hour limit:
+# Antigravity meters two independent groups, each with its own long-horizon
+# and short-horizon limit:
 #
-#   GEMINI MODELS          Gemini Flash, Gemini Pro          <- primary
-#   CLAUDE AND GPT MODELS  Claude Opus, Claude Sonnet, GPT   <- reserve
+#   GEMINI MODELS          Gemini Flash, Gemini Pro
+#   CLAUDE AND GPT MODELS  Claude Opus, Claude Sonnet, GPT
 #
-# Gemini is always tried first. The Claude group drains much faster for the
-# same work, so it is a reserve and never a co-equal: we fall back only when
-# Gemini's *weekly* limit is gone. A spent 5-hour window is not a reason to
-# burn the reserve — it refreshes on its own within hours, so we report and
+# Which group is primary and which is reserve is a config decision, not a fact
+# about the vendors: AGY_MODEL is tried first and AGY_FALLBACK_MODEL is the
+# reserve, and either slot may hold either group. Both inversions are in the
+# field. Nothing below may assume the Gemini-primary arrangement — that
+# assumption is what GST-40 was.
+#
+# The reserve is never a co-equal, whichever group it holds: we fall back only
+# when the primary's LONG bucket is gone. A spent short window is not a reason
+# to burn the reserve — it refreshes on its own within hours, so we report and
 # hold instead.
 #
 # `agy` exposes quota only in its interactive panel; there is no subcommand to
@@ -73,16 +96,16 @@
 # polled in advance.
 #
 # Nothing about being in fallback is ever persisted. Every dispatch starts on
-# Gemini again, which is what makes "switch back the moment it is available"
-# automatic — there is no sticky flag that could strand you on the reserve.
+# the primary again, which is what makes "switch back the moment it is
+# available" automatic — there is no sticky flag that could strand you on the
+# reserve.
 #
-# CAVEAT, and it is load-bearing: the classifier below is written against the
-# vocabulary these errors normally use, not against a captured Antigravity
-# exhaustion event. It is therefore deliberately conservative. A quota-shaped
-# error that does not clearly say *weekly* does NOT trigger fallback; it stops
-# and prints the raw text, so the first genuine occurrence tells you the exact
-# string and this matcher gets corrected once. Use AGY_FALLBACK=force in the
-# meantime — the interactive panel shows the real number.
+# CAVEAT, and it is load-bearing: the classifier below reads each vendor's own
+# wording. It is deliberately conservative — a quota-shaped error that neither
+# names its bucket nor states when it resets does NOT trigger fallback; it
+# stops and prints the raw text, so the first genuine occurrence tells you the
+# exact string and this matcher gets corrected once. Use AGY_FALLBACK=force in
+# the meantime — the interactive panel shows the real number.
 # ---------------------------------------------------------------------------
 #
 # Usage:
@@ -94,9 +117,9 @@
 #   AGY_MODEL, AGY_FALLBACK_MODEL, AGY_EFFORT, AGY_TIMEOUT, AGY_ARGS
 #   AGY_SKIP_GATES=1               report only; do not run the gates
 #   AGY_FALLBACK=auto|force|off    default auto
-#     auto  - Gemini first; reserve only on a clear weekly exhaustion
+#     auto  - AGY_MODEL first; reserve only on a clear LONG exhaustion
 #     force - go straight to the reserve (use when the panel already shows the
-#             Gemini weekly bucket spent)
+#             primary's long bucket spent)
 #     off   - never use the reserve; fail instead
 
 set -uo pipefail
@@ -154,6 +177,21 @@ cd "$ROOT" || die 2 "cannot cd to the repository root ($ROOT)"
 : "${AGY_IDLE_TIMEOUT:=300}"
 : "${AGY_IDLE_POLL:=15}"
 
+# Total wall seconds before the run is presumed livelocked, whatever the stream
+# is doing. The idle watchdog above measures *silence*, so it cannot see a model
+# that has finished the work and then parked itself in a poll loop — one
+# observed failure scheduled a 5-second wake to check its own verify task, never
+# woke, and re-armed: the stream kept growing, the run stayed alive, and the
+# fence, gates and verdict never printed because the wrapper was still waiting.
+# The work had been committed eleven minutes earlier. A cap on elapsed time is
+# the only control that sees this, because it asks nothing of the stream.
+#
+# 2700 is well past any healthy run observed (the longest legitimate implement
+# phase measured under 20 minutes) and well short of an afternoon. Neither cap
+# is a verdict: both hand the judgement to the fence, the gates and the report,
+# all three of which are computable without the model's cooperation. 0 disables.
+: "${AGY_MAX_WALL:=2700}"
+
 LOGDIR="$AGY_WORKSPACE/logs"
 
 case "$AGY_FALLBACK" in
@@ -181,7 +219,20 @@ if [ "${1:-}" = "--file" ]; then
 	PROMPT="Read ${2} and execute it in full."
 	PROMPT_FILE="$2"
 	LABEL="$(basename "$2" | sed 's/\.[^.]*$//')"
-	REPORT=""
+	# A correction file is still a task. Every fix round is sent this way
+	# (`--continue --file task-7-fix3.md`), and an empty REPORT gates off both
+	# the report contract and the claims comparison — so the dispatches most
+	# likely to be cutting corners were the only ones running unchecked, and
+	# nothing said so. The label already carries the task number; recover the
+	# report path from it, and fall back to none only when the prompt file is
+	# not named after a task. Checks still require a report written during THIS
+	# run, so a correction that does not touch it is skipped exactly as before.
+	case "$LABEL" in
+	task-[0-9]*)
+		REPORT="$AGY_WORKSPACE/task-$(printf '%s' "$LABEL" |
+			sed 's/^task-\([0-9][0-9]*\).*/\1/')-report.md" ;;
+	*) REPORT="" ;;
+	esac
 elif [ -n "${1:-}" ]; then
 	N="$1"
 	DISPATCH="$AGY_WORKSPACE/task-$N-dispatch.md"
@@ -240,6 +291,44 @@ if [ "$unfilled" -ne 0 ] && [ "${AGY_ALLOW_UNFILLED:-0}" != "1" ]; then
 	die 2 'the brief is still a template' 'see the unfilled lines listed above'
 fi
 
+# The trailer rule exists in two renderings: AGY_COAUTHOR, which the check after
+# the run enforces, and the trailer block in the context, which is the only copy
+# the model ever sees. The installer writes both from one value. Edit one of them
+# afterwards — change the config, hand-edit the context, copy a context in from
+# another project — and the model is now told a different rule from the one it
+# will be judged by. Every run then fails on a trailer the implementer copied
+# faithfully, and the diagnosis points at the implementer, which is the one place
+# the fault is not.
+#
+# So it refuses here, before anything is dispatched, for the same reason the
+# unfilled check does: the cost is one edit, and it is a configuration fault, not
+# evidence about anybody's work.
+#
+# The comparison lowercases both sides through `tr` rather than asking grep for
+# `-i`, and `-F` is not optional — an address contains `.`, which is a regex
+# metacharacter, so a plain grep would match addresses that differ from this one.
+# `grep -iF` is the obvious way to write that pair and it is the one shape that
+# cannot be used: GNU grep 3.0 as shipped by Git for Windows ABORTS on `-i`
+# combined with `-F` (SIGABRT, rc 134), and an aborting check inside `if !`
+# reads as "no match" — so every dispatch on Windows would refuse. Either flag
+# alone is fine. This is why the normalisation is done by hand, the same way the
+# post-run attribution check does it.
+if [ -n "${AGY_COAUTHOR:-}" ] && [ -f "$AGY_CONTEXT" ]; then
+	ctx_addr="$(printf '%s' "$AGY_COAUTHOR" |
+		sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr 'A-Z' 'a-z')"
+	[ -n "$ctx_addr" ] || ctx_addr="$(printf '%s' "$AGY_COAUTHOR" | tr 'A-Z' 'a-z')"
+	if ! tr 'A-Z' 'a-z' <"$AGY_CONTEXT" | grep -qF -- "$ctx_addr"; then
+		printf '\ndispatch: the context does not carry the co-author the harness checks.\n' >&2
+		printf '  .agy/config wants   %s\n' "$AGY_COAUTHOR" >&2
+		printf '  %s never names it.\n' "$AGY_CONTEXT" >&2
+		printf '\nThe implementer copies the trailer out of that file, so it would be\n' >&2
+		printf 'judged against a rule it was never given. Put the same address in\n' >&2
+		printf 'both, or re-install to rewrite them from one value.\n' >&2
+		die 2 'the co-author rule and the context disagree' \
+			"config: $AGY_COAUTHOR" "context: $AGY_CONTEXT does not name it"
+	fi
+fi
+
 mkdir -p "$LOGDIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BASE="$LOGDIR/$LABEL-$STAMP"
@@ -248,21 +337,74 @@ SNAP="$BASE.fence"
 REPO_WIN="$(cygpath -w "$PWD" 2>/dev/null)" || REPO_WIN="$PWD"
 
 printf 'dispatching  %s\n' "$LABEL"
+# Which version of the skill wrote this file, stamped by the installer on every
+# copy. Nothing in an installed repo recorded it before, and without it a stale
+# install is indistinguishable from a current one: two field reports against
+# this harness described behaviour that had been fixed several versions earlier,
+# and the only way to establish that was to compare their script's line count
+# against ours. A report that quotes this line is adjudicated in one read.
+#
+# If `{{SKILL_VERSION}}` appears here instead of a number, the asset was copied
+# by hand rather than installed — worth seeing for exactly the same reason.
+AGY_SKILL_VERSION='{{SKILL_VERSION}}'
+printf 'skill        agy-agents %s\n' "$AGY_SKILL_VERSION"
 # Which binary this resolved to, always, because on MSYS it is not always the
 # one you think: a Windows-form PATH entry (C:\...) is accepted by `export` and
 # then never searched, so the entry you added is skipped in silence and the next
 # `agy` on PATH — the real, quota-spending one — answers instead. Printing the
 # resolved path is the whole fix; you cannot misread an absolute path.
 printf 'binary       %s\n' "$AGY"
+# ------------------------------------------------------- --effort is Gemini-only
+# `--effort` is a real session flag, and `agy --help` lists it without
+# qualification — but only the Gemini models accept it. Claude and GPT reject it
+# outright: the process exits within seconds having taken zero turns, which on
+# the way past looks like a fast crash with no cause rather than a bad flag.
+#
+# Passing it unconditionally made the reserve path unrunnable in every repository
+# this skill has ever installed. Nothing caught it because the fallback is rare,
+# and when it did fire the symptom — a reserve attempt that dies instantly after
+# a quota failure — is indistinguishable from the quota failure continuing.
+#
+# Keyed off the model string at the point of use, NOT off which config slot the
+# model arrived in. AGY_MODEL and AGY_FALLBACK_MODEL may each hold either family:
+# a repo that makes Claude primary and keeps Gemini as the reserve is a supported
+# inversion, and the flag has to follow the model through it in both directions.
+#
+# An unrecognised model gets NO flag. A model that could have run at high effort
+# and ran at default is a worse run; a model sent a flag it rejects is no run at
+# all. Every model outside the Gemini line this skill has seen rejects it, so the
+# default falls toward the side that still executes.
+#
+# This cannot be moved into configuration. `.agy/config` sets AGY_EFFORT with
+# `:=`, which fires on null as well as unset, so `AGY_EFFORT=` re-supplies the
+# default instead of clearing it — there is no value a user can put in that file
+# that suppresses the flag. That dead end is why the key is the model name.
+effort_args() { # <model> — the --effort flag pair, or nothing at all
+	case "$1" in
+		gemini*) printf -- '--effort %s' "$AGY_EFFORT" ;;
+		*)       ;;
+	esac
+}
+
+effort_label() { # <model> — what the banner is allowed to claim
+	case "$1" in
+		gemini*) printf 'effort %s' "$AGY_EFFORT" ;;
+		*)       printf 'no --effort (rejected off the Gemini line)' ;;
+	esac
+}
+
 if [ "$AGY_FALLBACK" = "force" ]; then
 	FIRST_MODEL="$AGY_FALLBACK_MODEL"
-	printf 'model        %s (RESERVE, forced) effort %s, timeout %s\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"
+	printf 'model        %s (RESERVE, forced) %s, timeout %s\n' "$FIRST_MODEL" "$(effort_label "$FIRST_MODEL")" "$AGY_TIMEOUT"
 else
 	FIRST_MODEL="$AGY_MODEL"
-	printf 'model        %s (effort %s, timeout %s)\n' "$FIRST_MODEL" "$AGY_EFFORT" "$AGY_TIMEOUT"
+	printf 'model        %s (%s, timeout %s)\n' "$FIRST_MODEL" "$(effort_label "$FIRST_MODEL")" "$AGY_TIMEOUT"
 fi
 if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
 	printf 'watchdog     kill after %ss of stream silence\n' "$AGY_IDLE_TIMEOUT"
+fi
+if [ "$AGY_MAX_WALL" -gt 0 ]; then
+	printf 'wall cap     kill after %ss total, silent or not\n' "$AGY_MAX_WALL"
 fi
 printf 'log          %s.ndjson\n\n' "$BASE"
 # Provisional. A fallback attempt writes to its own base, so the authoritative
@@ -285,10 +427,73 @@ if ! bash .agy/tripwire snapshot "$SNAP"; then
 	die 3 'the fence would not arm' 'the run auto-approves every tool call — unfenced is not an option'
 fi
 
+# ------------------------------------------------------- interrupted mid-flight
+# From here on the model can move the tree, so from here on this script owes a
+# verdict however it ends. Killed between the parser and the fence check it used
+# to leave nothing at all: a .class with an empty status, no .gates.log, no
+# .response.md, no verdict block — and a commit in history. On disk that is
+# indistinguishable from a dispatch that never ran, except HEAD had moved, which
+# is the one fact nobody was told. A silent exit after a commit is the same
+# failure as a fence that says "clean" without checking: the reader is left with
+# an account that reads like nothing happened.
+#
+# So an interrupt prints a verdict in the usual shape. It is neither a pass nor
+# a failure but an unfinished run, and it says so — naming the only thing still
+# knowable without the model's cooperation, which is what git holds.
+VERDICT_PRINTED=0
+AGY_CHILD_PID=""
+
+on_interrupt() { # on_interrupt <signal-name> <exit-code>
+	trap - INT TERM
+	[ "$VERDICT_PRINTED" -eq 1 ] && exit "$2"
+
+	# agy was started with & — a signal delivered to this script alone never
+	# reaches it, and it would go on writing to the log after the verdict said
+	# the run had stopped. Same TERM-then-KILL sequence the watchdog uses.
+	if [ -n "$AGY_CHILD_PID" ] && kill -0 "$AGY_CHILD_PID" 2>/dev/null; then
+		printf '\nINTERRUPT stopping agy (pid %s).\n' "$AGY_CHILD_PID"
+		kill -TERM "$AGY_CHILD_PID" 2>/dev/null
+		for _ in 1 2 3; do
+			kill -0 "$AGY_CHILD_PID" 2>/dev/null || break
+			sleep 1
+		done
+		kill -KILL "$AGY_CHILD_PID" 2>/dev/null
+	fi
+
+	int_was="$(awk -F'\t' '$1=="head"{print $2}' "$SNAP/git.txt" 2>/dev/null)"
+	int_now="$(git rev-parse HEAD 2>/dev/null)"
+	int_dirty="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+
+	printf -- '\n--- verdict --------------------------------------------------------\n'
+	printf '  %-7s %s\n' run "INTERRUPTED by $1 — this run did not finish"
+	if [ -n "$int_was" ] && [ -n "$int_now" ] && [ "$int_was" != "$int_now" ]; then
+		printf '  %-7s %s\n' landed \
+			"$(git rev-list --count "$int_was..$int_now" 2>/dev/null || printf '?') commit(s) — THE TREE MOVED"
+		printf '  %-7s %s\n' '' "$int_was..$int_now"
+	elif [ "${int_dirty:-0}" -gt 0 ]; then
+		printf '  %-7s %s\n' landed "no commit, $int_dirty uncommitted path(s)"
+	else
+		printf '  %-7s %s\n' landed 'nothing — no commit, clean tree'
+	fi
+	printf '  %-7s %s\n' fence 'NOT CHECKED'
+	printf '  %-7s %s\n' gates 'NEVER RAN'
+	printf '  %-7s %s\n' log "$LOG_BASE.ndjson"
+	printf '  %-7s %s\n' exit "$2"
+	printf '\n  Nothing here has been verified. The fence was armed and never\n'
+	printf '  compared, so no guarded surface has been cleared; the gates never\n'
+	printf '  ran, so nothing says the work is sound. If the tree moved, read that\n'
+	printf '  diff before dispatching again — the next run starts from it.\n'
+	printf '  Fence baseline kept at %s\n' "$SNAP"
+	exit "$2"
+}
+trap 'on_interrupt SIGINT 130' INT
+trap 'on_interrupt SIGTERM 143' TERM
+
 # ------------------------------------------------------------------ one attempt
 # $1 model, $2 output base, $3 extra continue flag ("" or "--continue")
 run_attempt() {
-	local model="$1" out="$2" cont="$3" started elapsed
+	local model="$1" out="$2" cont="$3" started elapsed effort
+	effort="$(effort_args "$model")"
 
 	started=$SECONDS
 
@@ -300,38 +505,56 @@ run_attempt() {
 		--add-dir "$REPO_WIN" \
 		--output-format stream-json \
 		--model "$model" \
-		--effort "$AGY_EFFORT" \
+		$effort \
 		--mode accept-edits \
 		--dangerously-skip-permissions \
 		--print-timeout "$AGY_TIMEOUT" \
 		${AGY_ARGS:-} \
 		> "$out.ndjson" 2> "$out.stderr" &
 	local agy_pid=$!
+	# Visible to the interrupt handler, which has to stop it before reporting.
+	AGY_CHILD_PID="$agy_pid"
 
 	# Watchdog for failure 4. Size, not mtime: the stream is append-only so size
 	# is monotone, and a one-second mtime granularity makes short gaps
 	# unreadable. Both files count, so a run writing only to stderr still reads
 	# as alive.
-	local killed=0 idle=0
-	if [ "$AGY_IDLE_TIMEOUT" -gt 0 ]; then
-		local last_seen=-1 last_change now size n f
-		last_change="$(date +%s)"
+	local killed=0 idle=0 capped=0
+	if [ "$AGY_IDLE_TIMEOUT" -gt 0 ] || [ "$AGY_MAX_WALL" -gt 0 ]; then
+		local last_seen=-1 last_change now size n f began wall
+		began="$(date +%s)"
+		last_change="$began"
 		while kill -0 "$agy_pid" 2>/dev/null; do
 			sleep "$AGY_IDLE_POLL"
 			now="$(date +%s)"
-			n=0
-			for f in "$out.ndjson" "$out.stderr"; do
-				[ -f "$f" ] && n=$(( n + $(wc -c < "$f" 2>/dev/null || echo 0) ))
-			done
-			size="$n"
-			if [ "$size" != "$last_seen" ]; then
-				last_seen="$size"; last_change="$now"; continue
+
+			# The wall cap is tested before the stream is read, because the run
+			# it exists to catch is one whose stream looks perfectly healthy.
+			wall=$(( now - began ))
+			if [ "$AGY_MAX_WALL" -gt 0 ] && [ "$wall" -ge "$AGY_MAX_WALL" ]; then
+				capped=1
+				printf '\nWALL CAP  run alive for %ss (cap %ss) - killing agy (pid %s).\n' \
+					"$wall" "$AGY_MAX_WALL" "$agy_pid"
+				printf 'WALL CAP  the stream may still be moving; a model polling itself\n'
+				printf 'WALL CAP  is not progress. The verdict now rests on the fence, the\n'
+				printf 'WALL CAP  gates and the report.\n'
+			else
+				n=0
+				for f in "$out.ndjson" "$out.stderr"; do
+					[ -f "$f" ] && n=$(( n + $(wc -c < "$f" 2>/dev/null || echo 0) ))
+				done
+				size="$n"
+				if [ "$size" != "$last_seen" ]; then
+					last_seen="$size"; last_change="$now"; continue
+				fi
+				[ "$AGY_IDLE_TIMEOUT" -gt 0 ] || continue
+				idle=$(( now - last_change ))
+				[ "$idle" -lt "$AGY_IDLE_TIMEOUT" ] && continue
+				killed=1
+				printf '\nWATCHDOG  event stream silent for %ss - killing agy (pid %s).\n' "$idle" "$agy_pid"
+				printf 'WATCHDOG  the verdict now rests on the fence, the gates and the report.\n'
 			fi
-			idle=$(( now - last_change ))
-			[ "$idle" -lt "$AGY_IDLE_TIMEOUT" ] && continue
-			killed=1
-			printf '\nWATCHDOG  event stream silent for %ss - killing agy (pid %s).\n' "$idle" "$agy_pid"
-			printf 'WATCHDOG  the verdict now rests on the fence, the gates and the report.\n'
+
 			kill -TERM "$agy_pid" 2>/dev/null
 			for _ in 1 2 3 4 5; do
 				kill -0 "$agy_pid" 2>/dev/null || break
@@ -344,14 +567,16 @@ run_attempt() {
 
 	wait "$agy_pid"
 	local rc=$?
+	AGY_CHILD_PID=""
 
 	elapsed=$(( SECONDS - started ))
 
-	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" <<'NODE'
+	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" "$capped" <<'NODE'
 const fs = require('fs');
-const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg] =
+const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg, cappedArg] =
 	process.argv.slice(2);
 const killed = killedArg === '1';
+const capped = cappedArg === '1';
 
 // Real event shape (verified against agy 1.1.12 — the published docs describe
 // a flattened form that does not match the wire):
@@ -433,7 +658,20 @@ for (const e of events) {
 		// A denial should be impossible, since permissions are skipped. If one
 		// appears anyway, the run is not what we think it is — so it stays a
 		// hard failure rather than a warning.
-		if (/denied permission|permission denied|not allowed|auto-denied/i.test(msg)) {
+		//
+		// The wording list is the load-bearing part, and it grew by field report.
+		// Antigravity auto-denied a write_to_file into its OWN scratch directory
+		// under --dangerously-skip-permissions, saying only `Matches
+		// user-configured deny rule` — no "permission", no "denied", no "not
+		// allowed". That phrasing matched none of the first four alternatives, so
+		// the denial would have been filed as a tool error, and since GST-41 a
+		// tool error is recoverable. A missed denial would have been handed the
+		// one exemption conduct must never get.
+		//
+		// So this test errs toward calling things denials. A false denial costs
+		// one hand-adjudication; a missed one costs the boundary, and the boundary
+		// is the only thing here that cannot be rebuilt from artifacts afterwards.
+		if (/denied permission|permission denied|not allowed|auto-denied|deny rule|denied by (?:user|policy|settings|config)|user-configured deny/i.test(msg)) {
 			denials.push(`${cmd || name}: ${msg}`.slice(0, 200));
 			if (cmd) deniedCmds.push(cmd);
 		} else {
@@ -466,31 +704,103 @@ const status = result.status || '';
 // Quota is a separate question from deferral, and keys on a different fact. A
 // run the WATCHDOG killed is never classified — that guarantee is what stops a
 // hang from spending the scarce reserve group. But a run that died on its own
-// still gets classified, because a genuine weekly exhaustion is one of the ways
+// still gets classified, because a genuine long-bucket exhaustion is one of the ways
 // a session dies without a result event, and the evidence for it is on stderr.
 const failed = !killed && (status !== 'SUCCESS' || Number(agyCode) !== 0);
 
 // Quota classification. Only ever consulted on a FAILED run: a successful run
 // whose report happens to discuss rate limiting must not be mistaken for an
 // exhausted bucket. Conservative by design — see the header. `unknown` means
-// "quota-shaped but it never said weekly", and does not authorise the reserve.
+// "quota-shaped, but it never said which bucket", and does not authorise the
+// reserve.
+//
+// The classes are `long` and `short`. They used to be `weekly` and `fivehour`,
+// and those names were the bug: they were Gemini's vocabulary, and the class
+// that authorises the reserve was reached only by matching the literal word
+// "week". Anthropic's individual quota says "Individual quota reached. ...
+// Resets in 3h27m2s" and never says week, so under AGY_MODEL=claude-* every
+// quota failure landed in `unknown` and AGY_FALLBACK=auto was unreachable code
+// — a fallback that could fire only for a model the harness was not configured
+// to use. Reported from the field as GST-40, and the same shape as the --effort
+// bug one layer up: routing that quietly assumed the Gemini line.
+//
+// So the message's own reset horizon is read as evidence, in the one vocabulary
+// every vendor shares: time. A bucket that comes back in hours is worth waiting
+// out; one that comes back in days is worth spending the scarce reserve on.
+const LONG_AFTER = 12 * 3600;
+function resetHorizon(hay) {
+	// Only within a phrase that is talking about coming back, so a duration
+	// somewhere else in a stack trace cannot be mistaken for a reset time.
+	// Every such phrase, not just the first. "Individual quota reached. Please
+	// try again later. Resets in 3h27m2s" leads with a phrase carrying no
+	// duration at all, so taking only the first match reads the one message
+	// this whole rewrite exists for as stating no reset time.
+	for (const m of hay.matchAll(/(?:resets?|refreshes?|renews?|retry|try again|available again)\b[^.\n]{0,60}/g)) {
+		const units = { d: 86400, h: 3600, m: 60, s: 1 };
+		let secs = 0, found = false;
+		// Longest-first, and deliberately no \b after the bare letters:
+		// "3h27m2s" has no word boundary anywhere inside it.
+		for (const p of m[0].matchAll(/([0-9]+)\s*(days?|hours?|minutes?|seconds?|d|h|m|s)/g)) {
+			const k = p[2][0];
+			if (!(k in units)) continue;
+			secs += Number(p[1]) * units[k];
+			found = true;
+		}
+		if (found) return secs;
+	}
+	return null;
+}
+
 let quota = 'none';
 let quotaRaw = '';
+let quotaResets = '';
 if (failed) {
 	const parts = [JSON.stringify(result.error || ''), status, stderr, response.slice(0, 4000)];
 	const hay = parts.join(' \n ').toLowerCase();
 	if (/quota|rate.?limit|resource.?exhausted|\b429\b|too many requests|usage limit|limit reached|exhausted/.test(hay)) {
-		if (/week/.test(hay)) quota = 'weekly';
-		else if (/5.?hour|five.?hour|hourly/.test(hay)) quota = 'fivehour';
+		const secs = resetHorizon(hay);
+		if (secs !== null) quotaResets = secs;
+		// An explicit bucket word outranks the horizon: that is the vendor
+		// saying which bucket it is, rather than us inferring it.
+		if (/week|month/.test(hay)) quota = 'long';
+		else if (/5.?hour|five.?hour|hourly/.test(hay)) quota = 'short';
+		else if (secs !== null) quota = secs > LONG_AFTER ? 'long' : 'short';
 		else quota = 'unknown';
 		quotaRaw = [JSON.stringify(result.error || ''), stderr].join(' ').replace(/\s+/g, ' ').trim().slice(0, 400);
 	}
 }
 
-fs.writeFileSync(classPath,
-	`quota=${quota}\ntools=${tools.size}\nstatus=${status}\n` +
-	`killed=${killed ? 1 : 0}\nidle=${idleArg || 0}\ndeferred=${deferred ? 1 : 0}\n` +
-	`raw=${quotaRaw.replace(/\n/g, ' ')}\n`);
+// Printed measurements are measurements the benchmark cannot read back. These
+// are the same numbers the summary prints below; they live here so a scraper
+// never has to re-derive them, and never has to guess a zero when it cannot.
+const uw = result.usage || {};
+const nz = v => (typeof v === 'number' && isFinite(v)) ? v : '';
+// Every value is sanitised by the same rule, at the one place values enter the
+// file. read_class is `sed -n 's/^key=//p' | head -1` — FIRST match wins — so a
+// value carrying a newline injects rows that beat the genuine ones further
+// down, and `status` comes straight off the agy stream. A lone \r does not
+// split the row but corrupts the value in every reader downstream, which is why
+// this collapses all whitespace rather than just \n. Rows are a list, not a
+// template, so the next key someone adds cannot be the one that forgot.
+const one = v => String(v === null || v === undefined ? '' : v).replace(/\s+/g, ' ').trim();
+const classRows = [
+	['quota', quota],
+	['quota_resets_in', quotaResets],
+	['tools', tools.size],
+	['status', status],
+	['killed', killed ? 1 : 0],
+	['idle', idleArg || 0],
+	['capped', capped ? 1 : 0],
+	['deferred', deferred ? 1 : 0],
+	['wall', wall],
+	['tokens_in', nz(uw.input_tokens)],
+	['tokens_out', nz(uw.output_tokens)],
+	['tokens_think', nz(uw.thinking_tokens)],
+	['tokens_total', nz(uw.total_tokens)],
+	['model', init.model],
+	['raw', quotaRaw],
+];
+fs.writeFileSync(classPath, classRows.map(([k, v]) => `${k}=${one(v)}\n`).join(''));
 
 const u = result.usage || {};
 const pad = s => String(s).padEnd(13);
@@ -517,18 +827,34 @@ console.log(pad('tools'), tools.size
 // that is on disk. Say which of the two it is.
 if (deferred) console.log(pad(''), 'floor, not a total — the stream ended before the run did');
 if (quota !== 'none') {
-	console.log(pad('quota'), quota === 'weekly'   ? 'WEEKLY bucket exhausted'
-	                        : quota === 'fivehour' ? '5-hour window exhausted (refreshes on its own)'
-	                        :                        'quota-shaped error, bucket UNCLEAR');
+	console.log(pad('quota'), quota === 'long'  ? 'LONG bucket exhausted — the reserve is authorised'
+	                        : quota === 'short' ? 'short window spent (refreshes on its own)'
+	                        :                     'quota-shaped error, bucket UNCLEAR');
+	if (quotaResets !== '') console.log(pad(''), `the error states its own reset: ${quotaResets}s away`);
 	if (quotaRaw) console.log(pad(''), quotaRaw);
 }
 
+// Two counters, not one. `problems` still decides this parser's exit status, so
+// nothing about the fallback decision downstream changes. `hardFails` is the
+// subset that is evidence about CONDUCT or about ABSENCE — a boundary walked
+// around, a call blocked, no tool calls at all, no report — and those are never
+// recovered from, however green everything else looks.
+//
+// The complement is a tool error, and the status and exit code agy downgrades
+// because of one. Those are facts about the PATH the run took, not about its
+// outcome, and this layer cannot see which. It reads a stream; whether the run
+// worked around the error is written on disk, in the report, the fence, the
+// gates and the commit. So it counts them, names them, and hands the question
+// to the shell. See the `recovered` section there, and GST-41.
 let problems = 0;
-const fail = (headline, lines) => {
+let hardFails = 0;
+const say = (headline, lines) => {
 	problems++;
 	console.log('\nFAIL  ' + headline);
 	(lines || []).slice(0, 15).forEach(l => console.log('      - ' + l));
 };
+const fail = (headline, lines) => { hardFails++; say(headline, lines); };
+const pathFail = (headline, lines) => say(headline, lines);
 
 if (bypasses.length) {
 	fail(`${bypasses.length} denied command(s) then ran under another name — BYPASS.`, bypasses);
@@ -542,20 +868,41 @@ if (denials.length) {
 	console.log('      The run still exited 0 with status SUCCESS. Report is unreliable.');
 }
 if (deferred) {
-	console.log(killed
+	console.log(capped
+		? `\nNOTE  the wall cap killed this run after ${wall}s. The stream was still`
+			+ '\n      moving, so the idle watchdog had nothing to see — a model that'
+			+ '\n      finishes and then polls itself looks identical to one working.'
+		: killed
 		? `\nNOTE  watchdog killed this run after ${idleArg}s of stream silence.`
 		: '\nNOTE  the session ended before its result event — agy stopped on its own.');
 	console.log('      status, response and exit code are not judged; the evidence');
 	console.log('      is now the fence, the gates and the report on disk.');
 } else if (status !== 'SUCCESS') {
-	fail('status is not SUCCESS', result.error ? [JSON.stringify(result.error)] : []);
+	// Attributed to the tool errors only when there ARE some. With none in the
+	// stream, nothing explains a non-SUCCESS status, and an unexplained failure
+	// is the last thing to soften — every quota failure lands here.
+	(errors.length ? pathFail : fail)('status is not SUCCESS',
+		result.error ? [JSON.stringify(result.error)] : []);
 }
-if (errors.length) fail(`${errors.length} tool error(s)`, errors);
+if (errors.length) {
+	pathFail(`${errors.length} tool error(s)`, errors);
+	console.log('      Whether the run worked around these is not decidable from the');
+	console.log('      stream. The report on disk, the fence, the gates and what');
+	console.log('      landed decide it — see the verdict below.');
+}
 if (!tools.size) fail(deferred
 	? 'no tool calls recorded before the stream ended — nothing evidences any work'
 	: 'no tool calls recorded — the implementer answered without doing the work');
 if (!deferred && !response.trim()) fail('empty response — the implementer produced no report');
-if (!deferred && Number(agyCode) !== 0) fail(`agy exited ${agyCode}`);
+if (!deferred && Number(agyCode) !== 0) {
+	(errors.length ? pathFail : fail)(`agy exited ${agyCode}`);
+}
+
+// Appended rather than folded into classRows above, because hardFails is only
+// known here and the sidecar must exist before this block runs: a parser that
+// throws half way through the summary would otherwise leave no .class at all,
+// and every reader downstream treats a missing sidecar as a missing run.
+fs.appendFileSync(classPath, `tool_errors=${errors.length}\nhard_fails=${hardFails}\n`);
 
 process.exit(problems ? 1 : 0);
 NODE
@@ -579,17 +926,23 @@ read_class() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
 LAST_CLASS="$BASE.class"
 
 quota_class="$(read_class "$BASE.class" quota)"
+quota_resets="$(read_class "$BASE.class" quota_resets_in)"
 tools_used="$(read_class "$BASE.class" tools)"
 
 # ------------------------------------------------------------------- attempt 2
-# Only a clear weekly exhaustion opens the reserve. A spent 5-hour window waits
-# it out; an unclear quota error stops and shows its raw text.
+# Only a clear LONG exhaustion opens the reserve. A spent short window waits it
+# out; an unclear quota error stops and shows its raw text.
+#
+# Which bucket it is comes from the classifier above, which reads the reset
+# horizon rather than one vendor's wording. Nothing below names a vendor: the
+# primary can be a Claude model with a Gemini reserve, and that inversion is in
+# the field.
 if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
 	case "$quota_class" in
-	weekly)
+	long)
 		printf -- '\n--- falling back to the reserve group -------------------------------\n'
-		printf 'The Gemini WEEKLY bucket is spent. Switching to %s.\n' "$AGY_FALLBACK_MODEL"
-		printf 'This group drains fast — the next dispatch starts on Gemini again.\n\n'
+		printf 'The LONG bucket for %s is spent. Switching to %s.\n' "$AGY_MODEL" "$AGY_FALLBACK_MODEL"
+		printf 'The reserve drains fast — the next dispatch starts on %s again.\n\n' "$AGY_MODEL"
 
 		# A run that already touched the tree must be handed over, not restarted:
 		# a cold retry would redo half-finished work on top of itself.
@@ -612,20 +965,24 @@ if [ "$stream_rc" -ne 0 ] && [ "$AGY_FALLBACK" = "auto" ]; then
 		# points at a failed run.
 		LOG_BASE="$BASE.reserve"
 		;;
-	fivehour)
+	short)
 		printf -- '\n--- holding --------------------------------------------------------\n'
-		printf 'The Gemini 5-hour window is spent but the weekly bucket is not. Holding:\n'
+		printf 'The short window for %s is spent; its long bucket is not. Holding:\n' "$AGY_MODEL"
 		printf 'that window refreshes within hours, and the reserve group is scarcer\n'
 		printf 'than the wait. Re-run this dispatch after the refresh, or override with\n'
 		printf 'AGY_FALLBACK=force if you need it done now.\n'
+		if [ -n "$quota_resets" ]; then
+			printf 'The error stated its own reset: %ss from the failure.\n' "$quota_resets"
+		fi
 		;;
 	unknown)
 		printf -- '\n--- holding --------------------------------------------------------\n'
-		printf 'A quota-shaped error came back that does not say which bucket it is.\n'
-		printf 'Not spending the reserve on a guess. The raw text is in the run report\n'
-		printf 'above and in %s.\n' "$BASE.class"
-		printf 'If the interactive panel shows the weekly bucket spent, re-run with\n'
-		printf 'AGY_FALLBACK=force — and fix the matcher in .agy/dispatch.\n'
+		printf 'A quota-shaped error came back that does not say which bucket it is,\n'
+		printf 'and does not state when it resets. Not spending the reserve on a guess.\n'
+		printf 'The raw text is in the run report above and in %s.\n' "$BASE.class"
+		printf 'If you know the long bucket is spent, re-run with AGY_FALLBACK=force —\n'
+		printf 'and add this wording to the matcher in .agy/dispatch, which classifies\n'
+		printf 'on the stated reset time and falls through to here without one.\n'
 		;;
 	esac
 fi
@@ -638,6 +995,7 @@ fi
 WATCHDOG_KILLED="$(read_class "$LAST_CLASS" killed)"
 DEFERRED="$(read_class "$LAST_CLASS" deferred)"
 WATCHDOG_IDLE="$(read_class "$LAST_CLASS" idle)"
+WALL_CAPPED="$(read_class "$LAST_CLASS" capped)"
 
 # Freshness is computed on every run, not just a deferred one: a report is only
 # evidence about THIS dispatch if this dispatch wrote it. Only the deferred path
@@ -672,6 +1030,7 @@ fi
 # Unlike the claims comparison below this is deterministic — a heading is there
 # or it is not — so it fails the run rather than warning. Warnings are for
 # checks that can be wrong. The fix is one `--continue` away.
+CONTRACT_RC=0
 if [ "$REPORT_FRESH" = "1" ]; then
 	printf -- '\n--- report contract ------------------------------------------------\n'
 	missing_section=0
@@ -691,6 +1050,7 @@ EOF
 		printf '      one saying there was nothing — only one of them tells you the\n'
 		printf '      implementer looked.\n'
 		stream_rc=1
+		CONTRACT_RC=1
 	fi
 fi
 
@@ -708,14 +1068,31 @@ trip_rc=$?
 # The workspace is excluded for the same reason the fence prunes it: it holds
 # the harness's own paper trail — the brief, the report, the logs — and a report
 # saying the work happened is not the work.
+#
+# LANDED_MEASURED separates "nothing landed" from "we could not tell". Both end
+# with LANDED_COMMITS at 0 — a missing snapshot, an unresolvable HEAD and a
+# rewritten history all leave the count unknown — and on screen that reads the
+# same as a run that landed nothing. It is not the same, and the sidecar below
+# is where the difference has to survive.
 LANDED_COMMITS=0
+LANDED_MEASURED=0
 LANDED_SUBJECT=""
 WAS_HEAD="$(awk -F'\t' '$1=="head"{print $2}' "$SNAP/git.txt" 2>/dev/null)"
 IS_HEAD="$(git rev-parse HEAD 2>/dev/null)"
-if [ -n "$WAS_HEAD" ] && [ -n "$IS_HEAD" ] && [ "$WAS_HEAD" != "$IS_HEAD" ] \
-	&& git merge-base --is-ancestor "$WAS_HEAD" "$IS_HEAD" 2>/dev/null; then
-	LANDED_COMMITS="$(git rev-list --count "$WAS_HEAD..$IS_HEAD" 2>/dev/null || printf 0)"
-	LANDED_SUBJECT="$(git --no-pager log -1 --format=%s "$IS_HEAD" 2>/dev/null)"
+if [ -n "$WAS_HEAD" ] && [ -n "$IS_HEAD" ]; then
+	if [ "$WAS_HEAD" = "$IS_HEAD" ]; then
+		# Both heads resolved and they match: a measured, genuine zero.
+		LANDED_MEASURED=1
+	elif git merge-base --is-ancestor "$WAS_HEAD" "$IS_HEAD" 2>/dev/null; then
+		landed_n="$(git rev-list --count "$WAS_HEAD..$IS_HEAD" 2>/dev/null)"
+		# A rev-list that failed or answered with something that is not a number
+		# has not measured anything either; do not launder it into a 0.
+		case "$landed_n" in
+		''|*[!0-9]*) ;;
+		*) LANDED_COMMITS="$landed_n"; LANDED_MEASURED=1 ;;
+		esac
+		LANDED_SUBJECT="$(git --no-pager log -1 --format=%s "$IS_HEAD" 2>/dev/null)"
+	fi
 fi
 LANDED_DIRTY="$(git status --porcelain -- . ":(exclude)$AGY_WORKSPACE" 2>/dev/null | grep -c . || true)"
 # Work on disk and nothing in history is not a judgement call: the brief's own
@@ -727,6 +1104,97 @@ LANDED_DIRTY="$(git status --porcelain -- . ":(exclude)$AGY_WORKSPACE" 2>/dev/nu
 # outside the workspace, so it never reaches here.
 LANDED_RC=0
 [ "${LANDED_COMMITS:-0}" -eq 0 ] && [ "${LANDED_DIRTY:-0}" -gt 0 ] && LANDED_RC=1
+
+# ------------------------------------------------------------- attribution
+# dispatch-context.md is full of behavioural rules, and until now every one of
+# them was enforced by the model choosing to comply. The fence checks file
+# scope and the gates check correctness; nothing checked conduct. The trailer
+# is the case where that gap had a victim: the context asked for a
+# `Co-Authored-By:` line without saying what to put in it, so implementers
+# supplied antigravity@google.com, and GitHub — which resolves co-author
+# trailers to accounts by email — put a real stranger on the contributor graph
+# of every repository this harness has ever run in.
+#
+# Telling the model harder is the wrong lever; that instruction was already
+# there and was already being ignored. This is deterministic — an address
+# either is the configured one or it is not — so it fails the run rather than
+# warning, per the same rule as the report contract. The remedy is an amend,
+# not a re-dispatch, and it is printed.
+COAUTHOR_RC=0
+BAD_TRAILERS=0
+if [ -n "${AGY_COAUTHOR:-}" ] && [ "${LANDED_COMMITS:-0}" -gt 0 ]; then
+	# Compare on the address alone. The display name is cosmetic and GitHub
+	# ignores it; two trailers differing only in the name are the same claim.
+	want_addr="$(printf '%s' "$AGY_COAUTHOR" |
+		sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr 'A-Z' 'a-z')"
+	[ -n "$want_addr" ] || want_addr="$(printf '%s' "$AGY_COAUTHOR" | tr 'A-Z' 'a-z')"
+	bad_lines=""
+	while IFS= read -r sha; do
+		[ -n "$sha" ] || continue
+		# Real trailers only. A `Co-Authored-By:` quoted in the body of a
+		# commit message is prose about a trailer, not a claim of authorship,
+		# and git's own parser is the only thing that reliably tells them
+		# apart. Reading them with grep would fail commits that discuss this
+		# very check.
+		while IFS= read -r addr; do
+			[ -n "$addr" ] || continue
+			[ "$addr" = "$want_addr" ] && continue
+			bad_lines="$bad_lines  $(printf '%.8s' "$sha")  $addr
+"
+			BAD_TRAILERS=$(( BAD_TRAILERS + 1 ))
+		done <<-ADDRS
+		$(git --no-pager log -1 --format='%(trailers:key=Co-authored-by,valueonly)' \
+			"$sha" 2>/dev/null | sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr 'A-Z' 'a-z')
+		ADDRS
+	done <<-SHAS
+	$(git rev-list "$WAS_HEAD..$IS_HEAD" 2>/dev/null)
+	SHAS
+	if [ "$BAD_TRAILERS" -gt 0 ]; then
+		printf -- '\n--- attribution ----------------------------------------------------\n'
+		printf 'WRONG CO-AUTHOR on %s commit(s):\n\n' "$BAD_TRAILERS"
+		printf '%s' "$bad_lines"
+		printf '\nExpected: %s\n\n' "$AGY_COAUTHOR"
+		printf 'A co-author trailer is resolved to an account BY EMAIL and counted on\n'
+		printf "the repository's contributor graph, so a wrong address publishes a\n"
+		printf 'false claim about who wrote this code — against a real person who has\n'
+		printf 'never had access to it. Amend before pushing:\n\n'
+		printf '  git commit --amend --trailer "Co-Authored-By: %s"\n\n' "$AGY_COAUTHOR"
+		printf 'or `git rebase` for more than one. If this project does not want the\n'
+		printf 'check, set AGY_COAUTHOR empty in .agy/config — do not widen it.\n'
+		COAUTHOR_RC=1
+	fi
+fi
+
+# The commit range is known only here — the node parser runs before the fence
+# is verified, so it cannot see what landed. Appended rather than rewritten so
+# the parser stays the sole owner of everything above it.
+#
+# Empty is not zero. `commits=0` is a claim that the run landed nothing, and it
+# is only made when both heads resolved and matched. Every other way of ending
+# up without a count — no snapshot to compare against, no HEAD to compare with,
+# a history rewritten under us — is written as `commits=`, because a reader that
+# cannot tell those apart will score an unreadable run as a run that did nothing.
+#
+# The measurement belongs to the RUN, not to an attempt: it is taken once, after
+# the fence, over the whole tree. So both sidecars a fallback leaves behind carry
+# the same answer. Keying this off LOG_BASE gave the first attempt's .class
+# neither key on the quota-fallback path, which is a third state — key absent —
+# that nothing downstream is written to expect.
+if [ "${LANDED_MEASURED:-0}" = "1" ]; then
+	CLASS_COMMITS="$LANDED_COMMITS"
+	if [ "$LANDED_COMMITS" -gt 0 ]; then
+		CLASS_RANGE="$WAS_HEAD..$IS_HEAD"
+	else
+		CLASS_RANGE=""
+	fi
+else
+	CLASS_COMMITS=""
+	CLASS_RANGE=""
+fi
+for class_file in "$BASE.class" "$BASE.reserve.class"; do
+	[ -f "$class_file" ] || continue
+	printf 'commits=%s\nrange=%s\n' "$CLASS_COMMITS" "$CLASS_RANGE" >> "$class_file"
+done
 
 # ------------------------------------------------------------------- run gates
 printf -- '\n--- gates ----------------------------------------------------------\n'
@@ -764,7 +1232,23 @@ const read = p => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { retur
 // Quantities a gate suite actually measures and a report actually claims.
 // Anything outside this list (minutes, commits, line numbers) is not compared.
 const UNITS = ['assertion', 'test', 'check', 'gate', 'spec', 'example', 'case', 'suite', 'failure', 'error', 'warning'];
-const singular = w => w.toLowerCase().replace(/e?s$/, '').replace(/^(assertion|test|check|gate|spec|example|case|suite|failure|error|warning)$/, '$1');
+
+// Strip at most a trailing "s", and only when doing so lands on a real unit.
+// The previous form stripped /e?s$/, which turned `failures` into `failur`,
+// `gates` into `gat`, and `cases`, `suites`, `examples` likewise — none of them
+// in UNITS, so they were dropped from BOTH sides and silently never compared.
+// Five of the eleven units were unreachable in the plural, `failure` among
+// them: the one number this check exists to catch a lie about. `76 tests, 0
+// failures` against `Tests: 76, Failures: 2` compared only the tests, matched,
+// and reported that nothing contradicted. The tests missed it because they
+// were written with `assertions`, which is the plural the old regex happened
+// to handle.
+const singular = w => {
+	const lw = w.toLowerCase();
+	if (UNITS.includes(lw)) return lw;
+	const s = lw.replace(/s$/, '');
+	return UNITS.includes(s) ? s : lw;
+};
 
 const grab = text => {
 	const found = new Map();
@@ -789,7 +1273,16 @@ const conflicts = [];
 for (const [unit, nums] of claimed) {
 	const got = measured.get(unit);
 	if (!got) continue;
-	for (const n of nums) if (!got.has(n)) conflicts.push({ unit, n, got: [...got] });
+	// A report naming several numbers for one unit is naming several scopes —
+	// "19 tests (--filter Gateway). Full unit suite: 76 tests" — and nothing in
+	// the gate log says which of them the gates measured. Comparing each number
+	// against the whole set flagged the scoped one every time, so a correctly
+	// labelled partial run could never pass. That is a checker that fires on
+	// accurate reports, which is the failure this section's own comment warns
+	// about. Only a single, unambiguous claim is comparable.
+	if (nums.size !== 1) continue;
+	const n = [...nums][0];
+	if (!got.has(n)) conflicts.push({ unit, n, got: [...got] });
 }
 
 if (!conflicts.length) {
@@ -807,11 +1300,74 @@ NODE
 	CLAIMS_RC=$?
 fi
 
+# ------------------------------------------------------------------- recovered
+# GST-41. A tool call can fail and the run can still do the work. Antigravity's
+# write_to_file is sandboxed to the agent's own brain directory and refuses a
+# path outside it — including .agy/work/mN/task-N-report.md, the one file this
+# contract names. The run recovered through run_command, wrote 564 accurate
+# lines, and committed. agy had already downgraded the result to ERROR by then,
+# and this harness turned that into exit 1, so at the exit code the run was
+# indistinguishable from the quota failure forty minutes earlier that committed
+# nothing at all. Every run had to be adjudicated by hand.
+#
+# The exit code was the wrong instrument, and the fault injection behind GST-40
+# had already said so from the other side: a `want 0` assertion passed there on
+# a run that never failed, because a run that never failed also exits 0. One bit
+# cannot carry two questions. So the tool error stops being the verdict and
+# becomes evidence, and recovery is PROVEN rather than inferred, out of
+# measurements this dispatch was already taking:
+#
+#   the report exists and THIS run wrote it   a stale one proves nothing
+#   it carries its contract sections          a truncated one proves nothing
+#   the fence is clean                        no guarded surface moved
+#   the gates are GREEN                       not skipped: absent is not green
+#   the work is committed, and measured so    not "we could not tell"
+#   no number in the report is contradicted   the gates outrank the account
+#   the co-author trailer is the configured one
+#   nothing in the stream is about conduct    a denial or a bypass is never
+#                                             recovered from, however green
+#                                             everything else looks
+#
+# Every one of those is a positive measurement, and every one of them must hold.
+# Miss any and the run stays failed, because an absent measurement is never a
+# pass. hard_fails defaults to 1 when the sidecar cannot be read, for the same
+# reason: a measurement that did not arrive must not authorise anything.
+RECOVERED=0
+TOOL_ERRORS="$(read_class "$LAST_CLASS" tool_errors)"
+HARD_FAILS="$(read_class "$LAST_CLASS" hard_fails)"
+case "$TOOL_ERRORS" in ''|*[!0-9]*) TOOL_ERRORS=0 ;; esac
+case "$HARD_FAILS"  in ''|*[!0-9]*) HARD_FAILS=1 ;; esac
+
+if [ "$stream_rc" -ne 0 ] && [ "$TOOL_ERRORS" -gt 0 ] && [ "$HARD_FAILS" -eq 0 ] \
+	&& [ "$REPORT_FRESH" = "1" ] && [ "$CONTRACT_RC" -eq 0 ] \
+	&& [ "$trip_rc" -eq 0 ] && [ "$gates_rc" -eq 0 ] \
+	&& [ "${LANDED_MEASURED:-0}" = "1" ] && [ "${LANDED_COMMITS:-0}" -gt 0 ] \
+	&& [ "$CLAIMS_RC" -eq 0 ] && [ "$COAUTHOR_RC" -eq 0 ]; then
+	RECOVERED=1
+	stream_rc=0
+	printf -- '\n--- recovered ------------------------------------------------------\n'
+	printf '%s tool call(s) errored and the run worked around them. Not inferred —\n' "$TOOL_ERRORS"
+	printf 'each of these was measured on this run:\n\n'
+	printf '  report    written during this run, contract sections present\n'
+	printf '  fence     clean\n'
+	printf '  gates     green (run, not skipped)\n'
+	printf '  landed    %s commit(s)\n' "$LANDED_COMMITS"
+	printf '  claims    no number in the report contradicts the gates\n'
+	printf '  conduct   no blocked call and no bypass in the stream\n\n'
+	printf 'The errors stay listed in the run report above and counted in the\n'
+	printf 'sidecar as tool_errors=%s. What changed is that they no longer decide\n' "$TOOL_ERRORS"
+	printf 'the verdict on their own. Read them anyway: a path the run had to work\n'
+	printf 'around once will be there again next time.\n'
+fi
+
 # --------------------------------------------------------------------- verdict
+# Set before the block prints, not after: an interrupt landing midway through
+# these lines must not append a second, contradictory verdict to a partial one.
+VERDICT_PRINTED=1
 printf -- '\n--- verdict --------------------------------------------------------\n'
 v() { printf '  %-7s %s\n' "$1" "$2"; }
 if [ "$FELL_BACK" -eq 1 ]; then
-	v model "$USED_MODEL  <- RESERVE GROUP BURNED (Gemini weekly exhausted)"
+	v model "$USED_MODEL  <- RESERVE GROUP BURNED (primary's long bucket exhausted)"
 	[ -n "$HANDOVER" ] && v '' "$HANDOVER"
 elif [ "$AGY_FALLBACK" = "force" ]; then
 	v model "$USED_MODEL  <- reserve group, forced"
@@ -820,6 +1376,19 @@ else
 fi
 if [ "$stream_rc" -ne 0 ]; then
 	v run 'PROBLEMS — see run report above'
+elif [ "${RECOVERED:-0}" = "1" ]; then
+	# The line GST-41 had no vocabulary for. Without it the only way to say
+	# "a tool call failed and the work still landed" was PROBLEMS — the same
+	# word as "nothing happened at all".
+	v run "clean, but $TOOL_ERRORS TOOL ERROR(S) the run worked around"
+	v '' 'proven by the report, the fence, the gates and the commit — see above'
+elif [ "$WALL_CAPPED" = "1" ]; then
+	# Distinct from the idle kill on purpose. WATCHDOG-KILLED says the run went
+	# quiet; WALL-CAPPED says it would not stop, which is where a model that has
+	# already committed its work parks itself in a poll loop. The two send the
+	# reader to different places, so they must not share a line.
+	v run "clean, but WALL-CAPPED at ${AGY_MAX_WALL}s — the run would not end"
+	v '' 'the work stands on the report, the fence and the gates below'
 elif [ "$WATCHDOG_KILLED" = "1" ]; then
 	v run "clean, but WATCHDOG-KILLED after ${WATCHDOG_IDLE}s idle (agy failure 4)"
 	v '' 'the work stands on the report, the fence and the gates below'
@@ -853,6 +1422,10 @@ else
 	v landed 'NOTHING — no commit, and nothing changed outside the workspace'
 	v '' 'a report is not the work. Read the diff before accepting the task.'
 fi
+if [ "$COAUTHOR_RC" -ne 0 ]; then
+	v trailer "WRONG CO-AUTHOR on $BAD_TRAILERS commit(s) — see attribution above"
+	v '' 'amend before pushing: the trailer names a real account, by email'
+fi
 # Printed here as well as in the header because the header's copy was written
 # before any attempt ran. On a fallback the two differ, and this is the one a
 # reader acts on: it names the attempt that produced the work rather than the
@@ -883,7 +1456,8 @@ if [ "$LANDED_RC" -ne 0 ]; then
 	printf 'before anything else: the report describes work that is not in history,\n'
 	printf 'and committing it yourself makes the next run start on your commit.\n'
 fi
-if [ "$stream_rc" -ne 0 ] || [ "$gates_rc" -gt 0 ] || [ "$LANDED_RC" -ne 0 ]; then
+if [ "$stream_rc" -ne 0 ] || [ "$gates_rc" -gt 0 ] || [ "$LANDED_RC" -ne 0 ] \
+	|| [ "$COAUTHOR_RC" -ne 0 ]; then
 	exit 1
 fi
 exit 0

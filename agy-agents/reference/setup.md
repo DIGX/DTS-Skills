@@ -133,9 +133,11 @@ harness guards that file rather than editing it.
 
 ## 6. Quota
 
-Antigravity meters two independent groups, each with its own weekly **and**
-5-hour limit: `GEMINI MODELS` (primary) and `CLAUDE AND GPT MODELS` (reserve,
-which drains far faster for the same work).
+Antigravity meters two independent groups, each with its own long-horizon
+**and** short-horizon limit: `GEMINI MODELS` and `CLAUDE AND GPT MODELS`. Which
+one is primary is a config decision, not a property of the vendors: `AGY_MODEL`
+is tried first and `AGY_FALLBACK_MODEL` is the reserve, which drains far faster
+for the same work. Either slot may hold either group.
 
 Quota is **not queryable headlessly** — `agy quota` produces nothing and no
 quota verb appears in `agy --help`. It exists only in the interactive panel. So

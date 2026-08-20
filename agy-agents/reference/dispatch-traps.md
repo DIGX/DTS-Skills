@@ -5,17 +5,21 @@ Read this before debugging a run, and before ever calling `agy` by hand.
 Verified against **Antigravity CLI v1.1.12**. If your version differs, re-verify
 before trusting any of it.
 
-## The five traps
+## The six traps
 
 They share one property: **the failure is invisible from the outside.** The
 first three make a broken run report SUCCESS with exit 0. The fourth makes a
 *finished* run look like a hung one for 45 minutes. The fifth makes a fence you
-believe you have fail open silently. None was found by reading documentation —
-all five came out of probes.
+believe you have fail open silently. The sixth does it the other way round — it
+makes a *finished, committed, gate-green* run report failure, which costs you
+the same thing in the end, because a verdict word that fires on good runs stops
+being read. None was found by reading documentation; all six came out of probes
+or the field.
 
 Traps 1–4 shape `.agy/dispatch` directly, in the same order as its header
 comment. Trap 5 shapes nothing, because the harness had already abandoned the
-mechanism it breaks.
+mechanism it breaks. Trap 6 is documented in its own section below rather than
+here, because the answer to it is longer than the trap.
 
 ### 1. `--add-dir` is not optional
 
@@ -56,6 +60,19 @@ implementer must never touch, before and after.
 be used without the fence attached. If the fence will not arm, the dispatch
 refuses to start (exit 3). Do not work around this.
 
+**The flag does not skip `deny` rules.** Reported from the field: a
+`write_to_file` into the CLI's *own* scratch directory was auto-denied under
+`--dangerously-skip-permissions`, with the reason `Matches user-configured deny
+rule` — and `agy` exited **0 with `status SUCCESS`** anyway, which is trap 2
+again. So "dangerously skip permissions" names half of what it does. A
+machine-wide `deny` rule you forgot about will silently amputate a run and
+report success, and the only trace is in the event stream. `.agy/dispatch`
+catches it; `agy` on its own does not.
+
+That is also the second reason `setup.md` tells you to keep fencing in your own
+repository rather than in the machine-wide `settings.json`: the rule reaches
+runs it was never written for, including this harness's.
+
 ### 4. A finished run can hang forever without emitting its result
 
 `agy` can do the work, write the report, make the commit — and then never emit
@@ -90,10 +107,12 @@ killing, is what the harness keys on.
 
 A run with no `result` event is **deferred**, not failed: it was stopped, so
 status, response and exit code describe *how it ended* rather than whether the
-work was done, and are not judged. Nothing else is relaxed — a
-denial, a tool error or zero tool calls still fail a deferred run, because each
-is recorded in the stream and is evidence of what actually happened. A deferred
-run is also never quota-classified, so a hang can never open the reserve bucket.
+work was done, and are not judged. Nothing else is relaxed — a denial or zero
+tool calls still fail a deferred run, because each is recorded in the stream and
+is evidence of what actually happened. (A tool error is evidence too, but of the
+*path* rather than the outcome; trap 6 below settles those against what landed,
+on a deferred run like any other.) A deferred run is also never
+quota-classified, so a hang can never open the reserve bucket.
 
 What replaces the missing result is a **report freshness check**: the report
 must exist *and* be newer than the moment this dispatch started. A stale report
@@ -110,6 +129,30 @@ regardless of how the process died. Set `AGY_IDLE_TIMEOUT=0` to disable the
 watchdog; `AGY_IDLE_POLL` (default 15s) sets how often the stream is measured.
 Size is used rather than mtime: the stream is append-only so size is monotone,
 and one-second mtime granularity makes short gaps unreadable.
+
+#### The variant the watchdog cannot see
+
+A run that finishes the work and then *polls itself* never goes silent. The
+observed shape: the implementer committed, then called `schedule` for a
+five-second wake to check on its own verify task, never woke, and re-armed. The
+stream grew the whole time, so there was nothing for the watchdog to measure,
+and the wrapper stayed blocked on a process that was never going to exit — so
+the fence, the gates and the verdict never printed at all. A run that was *done*
+read as incomplete.
+
+`AGY_MAX_WALL` (default 2700s, `0` disables) is the cap that catches it, because
+it asks the stream nothing:
+
+```
+WALL CAP  run alive for 2700s (cap 2700s) - killing agy (pid 12345).
+WALL CAP  the stream may still be moving; a model polling itself
+WALL CAP  is not progress. The verdict now rests on the fence, the
+WALL CAP  gates and the report.
+```
+
+The verdict says `WALL-CAPPED at Ns — the run would not end`, deliberately not
+borrowing the idle kill's wording: one says the run went quiet, the other says
+it would not stop, and the reader goes to a different place for each.
 
 ### 5. `permissions.deny` matches the literal command string
 
@@ -157,31 +200,50 @@ clean, empty run.
 
 ## Quota: two independent groups
 
-Antigravity meters two buckets, each with **its own weekly and 5-hour limit**:
+Antigravity meters two groups, each with **its own long-horizon and
+short-horizon limit**:
 
-| Group | Members | Role |
-|---|---|---|
-| `GEMINI MODELS` | Gemini Flash, Gemini Pro | primary |
-| `CLAUDE AND GPT MODELS` | Claude Opus, Claude Sonnet, GPT | reserve |
+| Group | Members |
+|---|---|
+| `GEMINI MODELS` | Gemini Flash, Gemini Pro |
+| `CLAUDE AND GPT MODELS` | Claude Opus, Claude Sonnet, GPT |
+
+Which group is primary is a config decision, not a property of the vendors:
+`AGY_MODEL` is tried first and `AGY_FALLBACK_MODEL` is the reserve, and either
+slot may hold either group. Both arrangements are in the field.
 
 The reserve drains far faster for the same work, so it is never a co-equal.
-Fallback happens **only on a clear weekly exhaustion of the Gemini group**. A
-spent 5-hour window refreshes on its own within hours — the dispatch reports
+
+Fallback happens **only on a clear exhaustion of the primary's long bucket**. A
+spent short window refreshes on its own within hours — the dispatch reports
 and holds rather than burning the reserve.
 
 **Quota is not queryable headlessly.** `agy quota` produces nothing and no quota
 verb appears in `agy --help`; it exists only in the interactive panel. So
 exhaustion is detected from the failure itself, not polled in advance.
 
-**Nothing about being in fallback is persisted.** Every dispatch starts on
-Gemini again, which is what makes "switch back the moment it is available"
+**Nothing about being in fallback is persisted.** Every dispatch starts on the
+primary again, which is what makes "switch back the moment it is available"
 automatic — there is no sticky flag that can strand you on the reserve.
 
-### The classifier is deliberately conservative
+### Which bucket, without asking the vendor
 
-It is written against the vocabulary these errors normally use, not against a
-captured Antigravity exhaustion event. So a quota-shaped error that does not
-clearly say *weekly* does **not** trigger fallback — it stops and prints the raw
+The classifier reads the **reset horizon the error states about itself**. That
+is the one vocabulary every vendor shares: a bucket coming back in hours is
+short and worth waiting out, one coming back in more than 12 hours is long and
+worth the reserve. An explicit bucket word (*week*, *month*, *5-hour*) outranks
+the horizon — that is the vendor naming the bucket rather than us inferring it.
+
+It reads horizons because it used to read one vendor's wording. The
+reserve-authorising class was reached only by matching the literal word *week*,
+which is Gemini's. Anthropic's individual quota says `Individual quota reached.
+... Resets in 3h27m2s` and never says week, so under `AGY_MODEL=claude-*` every
+quota failure classified as `unknown` and `AGY_FALLBACK=auto` was unreachable
+code — a fallback that could fire only for the group the harness was not
+configured to use. Reported from the field as GST-40.
+
+It is still deliberately conservative: an error that names no bucket **and**
+states no reset time does **not** trigger fallback. It stops and prints the raw
 text, so the first genuine occurrence tells you the exact string and the matcher
 gets corrected once.
 
@@ -189,7 +251,7 @@ Use `AGY_FALLBACK=force` in the meantime; the interactive panel shows the real
 number.
 
 ```bash
-AGY_FALLBACK=force .agy/dispatch 4    # panel already shows the weekly bucket spent
+AGY_FALLBACK=force .agy/dispatch 4    # panel already shows the long bucket spent
 AGY_FALLBACK=off   .agy/dispatch 4    # never touch the reserve
 ```
 
@@ -222,13 +284,30 @@ The 1.1.12 release notes advertise `--output-format json` on `models` and
 `agents`. The 1.1.12 binary rejects it (`flags provided but not defined`), so
 parse the tab-separated form above.
 
-Effort appears in two places: as a suffix on the Gemini IDs, and as a real
-session flag — `agy --help` lists `--effort (low|medium|high)`. `.agy/dispatch`
-passes `--effort "$AGY_EFFORT"` on **every** model, including the suffixed ones.
+`--effort` is the same shape of trap one paragraph further on. `agy --help`
+lists `--effort (low|medium|high)` without qualification, and it is real — on
+Gemini. Claude and GPT reject it outright: the process exits within seconds
+having taken **zero turns**, with no message that names the flag. Two runs were
+lost to this before the cause was found, and both looked like the quota failure
+that preceded them rather than like a bad command line.
 
-Which one wins when they disagree is not something this project has pinned down,
-so keep them consistent: if you set `AGY_MODEL=gemini-3.7-flash-low`, set
-`AGY_EFFORT=low` too rather than relying on one to override the other.
+Through 1.8.10 `.agy/dispatch` passed it on every model, which made the reserve
+path unrunnable in every repository this skill had installed — invisibly, since
+the fallback is rare and its symptom is indistinguishable from the exhaustion
+that triggers it. It is now sent only to models whose ID starts `gemini`, keyed
+on the model string at the call site rather than on the config slot, so the
+supported inversion (Claude primary, Gemini reserve) routes correctly in both
+directions. Unrecognised models get no flag.
+
+`AGY_EFFORT=` is not an off switch and never was: `.agy/config` writes
+`: "${AGY_EFFORT:=high}"`, and `:=` fires on null as well as unset, so an empty
+value re-supplies the default rather than clearing it. That dead end is why the
+routing is keyed on the model name.
+
+Where the suffix and the flag disagree on a Gemini model, which one wins is not
+something this project has pinned down, so keep them consistent: if you set
+`AGY_MODEL=gemini-3.7-flash-low`, set `AGY_EFFORT=low` too rather than relying
+on one to override the other.
 
 ## Reading a verdict block
 
@@ -288,6 +367,66 @@ own and the watchdog never fired. Read it identically. It is deliberately not
 `PROBLEMS`: the work landing and the session dying are different facts, and a
 harness with one word for both teaches you to discount that word.
 
+`run  clean, but N TOOL ERROR(S) the run worked around` is trap 6, below.
+
+## Trap 6: one failed call condemns a finished run
+
+`write_to_file` in Antigravity is sandboxed to the agent's own workspace and
+refuses a path outside it — including `.agy/work/mN/task-N-report.md`, the one
+file every dispatch is contractually required to produce. Observed in the field
+on the reserve model: the run recovered through `run_command`, wrote 564 accurate
+lines, and committed. agy had already downgraded the session to `status ERROR`
+for that one call, and the harness turned that into exit 1. At the exit code the
+run was indistinguishable from the quota failure forty minutes earlier that
+committed nothing, and every reserve run had to be adjudicated by hand.
+
+The exit code was the wrong instrument. It carries one bit and was being asked
+two questions — *did anything go wrong along the way* and *did the work land* —
+and the answers are independent. The fault injection behind the quota work had
+already found the same defect from the other side: an assertion that a run
+exited 0 passed against a run that never ran, because a run that never runs also
+exits 0.
+
+So a tool error stops being the verdict and becomes evidence, and recovery is
+**proven, not inferred**. Every one of these is measured on the run itself:
+
+| Measured | Why it is not enough on its own |
+|---|---|
+| the report exists, and *this* run wrote it | a stale one proves nothing |
+| it carries its contract sections | a truncated one proves nothing |
+| the fence is clean | no guarded surface moved |
+| the gates are **green** | `not run` is absent, and absent is never green |
+| the work is committed, and measured so | not "we could not tell" |
+| no number in the report is contradicted | the gates outrank the account |
+| the co-author trailer is the configured one | |
+| nothing in the stream is about conduct | see below |
+
+All of them must hold. Miss one and the run stays `PROBLEMS`, because an absent
+measurement is never a pass — including the sidecar itself, which is read back
+as *fail* when it cannot be read at all.
+
+**Conduct is never recovered from.** A blocked call or a bypass in the same
+stream fails the run however green everything else is, and the greenest possible
+tree does not answer it: the report will describe the work as done, accurately.
+A denial is a fact about the boundary holding; a tool error is a fact about the
+path the run took to get around something. Only the second is recoverable.
+
+Which puts the whole weight of that distinction on one regex, and the field
+promptly leaned on it. Antigravity's auto-denial for a `deny` rule says
+`Matches user-configured deny rule` — no *permission*, no *denied*, no *not
+allowed*. Under the wording list as it stood, that denial would have been filed
+as a tool error, and a tool error is now recoverable: the one exemption conduct
+must never get. The list was widened, with the field's verbatim sentence as the
+fixture.
+
+It errs toward calling things denials on purpose. A false denial costs one
+hand-adjudication. A missed one costs the boundary, and the boundary is the
+only thing here that cannot be rebuilt out of artifacts afterwards.
+
+The errors stay printed in the run report above the verdict and counted in the
+sidecar as `tool_errors=N`, next to `hard_fails=N`. Read them: a path a run had
+to work around once will be there again next time.
+
 ## When the dispatch refuses to start
 
 Refusals happen before `agy` is ever called. Each is the harness telling you it
@@ -336,7 +475,7 @@ from the binary you intended. See `setup.md`.
 1. Read `<workspace>/logs/task-N-<stamp>.events.ndjson` — the raw stream. It
    is the only account of the run that cannot be summarised away.
 2. `git log BASE..HEAD` and `git status --short` — what actually landed.
-3. `.agy/gates` yourself — never the implementer's claim about them.
+3. `( . .agy/config && bash $AGY_GATES )` yourself — never the implementer's claim about them.
 4. `.agy/tripwire check` — proves the fence still fingerprints real files. An
    empty surface guards nothing and reports clean.
 5. `bash ~/.claude/skills/agy-agents/scripts/selftest` — proves the harness

@@ -26,8 +26,9 @@ sizing rules. This file is only what is specific to this project.
 | Gates | `{{GATES}}` |
 | Dispatch | `.agy/dispatch <N>` |
 | Review package | `.agy/review-pkg <BASE> task-<N>` |
+| Review finished? | `.agy/review-pkg --check <review file> --ac <n>` — run it before reading one |
 | Implementer | `{{MODEL}}` |
-| Reserve | `{{FALLBACK_MODEL}}` — weekly exhaustion only |
+| Reserve | `{{FALLBACK_MODEL}}` — long-bucket exhaustion only |
 
 The workspace is the one binding this file deliberately does **not** spell out.
 It carries the milestone slug, so it moves — and a copy of it written here at

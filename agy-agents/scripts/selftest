@@ -35,6 +35,41 @@ has()  { # has <label> <needle> <file>
 hasnt() {
 	if grep -qF -- "$2" "$3" 2>/dev/null; then bad "$1" "unexpected '$2'"; else ok "$1"; fi
 }
+# Not `hasnt "$(printf '\r')"`. grep here strips a CR that sits at a line ending,
+# so a search for one cannot see the very case this asserts against: a forged
+# value whose CR precedes the newline it injected. That assertion passed against
+# a file with the carriage return still in it, under the mutation built to break
+# it — found by predicting the red labels first and finding this one green.
+# Count the bytes instead; `tr` has no notion of a line.
+no_cr() { # no_cr <label> <file>
+	n_cr="$(tr -cd '\r' < "$2" 2>/dev/null | wc -c | tr -d ' ')"
+	if [ "${n_cr:-0}" = "0" ]; then ok "$1"
+	else bad "$1" "$n_cr carriage return(s) survived into $(basename "$2")"; fi
+}
+# `has key=` is a substring search, so it passes on a key whose value is empty —
+# which is exactly how a run that measured nothing looks. These three read the
+# value the way dispatch's own read_class does, through one reader, so a test
+# cannot disagree with the thing it is testing about what a key says.
+class_val() { # class_val <file> <key>
+	sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1
+}
+hasval() { # hasval <label> <key> <file> — present AND carrying a value
+	# Absent and empty are different defects: one means the writer never ran,
+	# the other means it ran and had nothing to say. Say which.
+	if ! grep -q -- "^$2=" "$3" 2>/dev/null; then
+		bad "$1" "no '$2=' line at all in $(basename "$3")"
+	elif [ -z "$(class_val "$3" "$2")" ]; then
+		bad "$1" "'$2=' is present but empty in $(basename "$3")"
+	else ok "$1"; fi
+}
+noval() { # noval <label> <key> <file> — present AND deliberately empty
+	if ! grep -q -- "^$2=" "$3" 2>/dev/null; then
+		bad "$1" "no '$2=' line at all in $(basename "$3")"
+	else
+		nv="$(class_val "$3" "$2")"
+		if [ -z "$nv" ]; then ok "$1"; else bad "$1" "'$2=' is '$nv', expected empty"; fi
+	fi
+}
 
 cleanup() {
 	if [ "$KEEP" -eq 1 ]; then
@@ -46,14 +81,51 @@ cleanup() {
 trap cleanup EXIT
 
 # --------------------------------------------------------------- the fake agy
-# Gemini models report an exhausted bucket (FAKE_ERROR picks which); every
-# other model succeeds. That is enough to drive all four routing paths.
+# One model reports an exhausted bucket (FAKE_ERROR picks which wording) and
+# every other model succeeds. FAKE_QUOTA_MODEL is the case glob naming which
+# one, defaulting to *gemini*.
+#
+# That glob used to be hardcoded, and the hardcoding was the bug: a Claude
+# primary could not fail on quota at all, so a fallback that was structurally
+# unreachable under AGY_MODEL=claude-* (GST-40) stayed invisible behind a green
+# suite. Same shape as the --effort bug one layer up. A test double narrower
+# than the thing it doubles does not test the thing it doubles.
 mkdir -p "$BIN"
 cat > "$BIN/agy" <<'STUB'
 #!/usr/bin/env bash
 model=""; prev=""
 for a in "$@"; do [ "$prev" = "--model" ] && model="$a"; prev="$a"; done
+
+# Every argv this stub was called with, one invocation per line, so a test can
+# assert on the command line that was actually built rather than on the run's
+# outcome. Nothing else records it: the flags a dispatch assembles are otherwise
+# visible only to a process that is deliberately fake.
+[ -n "${AGY_ARGV_LOG:-}" ] && printf '%s\n' "$*" >> "$AGY_ARGV_LOG"
+
+# --effort is Gemini-only, and the real binary does not take it politely: off the
+# Gemini line it exits immediately, having run zero turns. This stub used to
+# accept every flag on every model, which is exactly why the suite stayed green
+# through a reserve path that could not run anywhere. A test double more
+# permissive than the thing it doubles does not test the thing it doubles.
+case "$model" in
+	gemini*) ;;
+	*) for a in "$@"; do
+		[ "$a" = "--effort" ] || continue
+		printf 'error: unknown flag --effort for model %s\n' "$model" >&2
+		exit 2
+	done ;;
+esac
+
 printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
+
+# A real run reports token usage on its result event; this one does it only when
+# asked. Both halves need testing and they need separate runs: that the numbers
+# survive to disk exactly, and that a run which reported nothing is recorded as
+# having reported nothing rather than as having used none. The values are
+# deliberately unmistakable — no 0, no 1, nothing a miscount could land on — and
+# the total is the sum, so a reader that mixes the keys up is visible too.
+USAGE=""
+[ -n "${FAKE_USAGE:-}" ] && USAGE=',"usage":{"input_tokens":13571,"output_tokens":24680,"thinking_tokens":31415,"total_tokens":69666}'
 
 # A report written by the run itself, so it is genuinely newer than RUN_START.
 if [ -n "${FAKE_REPORT:-}" ] && [ -n "${FAKE_REPORT_TEXT:-}" ]; then
@@ -67,8 +139,40 @@ if [ -n "${FAKE_TOUCH:-}" ]; then
 	printf 'implemented\n' > "$FAKE_TOUCH"
 	if [ -n "${FAKE_COMMIT:-}" ]; then
 		git add -A >/dev/null 2>&1
-		git commit -qm "task work: $FAKE_TOUCH" >/dev/null 2>&1
+		# FAKE_COAUTHOR is the trailer the run claims. Unset means no trailer at
+		# all, which is what most tests want; the attribution tests set it.
+		msg="task work: $FAKE_TOUCH"
+		# FAKE_BODY is a prose paragraph between the subject and the trailer
+		# block — the shape a commit takes when it talks *about* a trailer.
+		[ -n "${FAKE_BODY:-}" ] && msg="$msg
+
+$FAKE_BODY"
+		[ -n "${FAKE_COAUTHOR:-}" ] &&
+			msg="$msg
+
+Co-Authored-By: $FAKE_COAUTHOR"
+		git commit -qm "$msg" >/dev/null 2>&1
 	fi
+fi
+
+# The run rewrites a commit that predates it — an amend, a rebase, a squash of
+# someone else's work. The pre-run head stops being an ancestor of HEAD, so what
+# landed cannot be counted at all. Deliberately a NEW message: an amend that
+# reproduces the same tree, message and timestamps produces the same sha, and
+# then nothing has been rewritten.
+if [ -n "${FAKE_REWRITE:-}" ]; then
+	git commit -q --amend -m "task work: history rewritten under the run" >/dev/null 2>&1
+fi
+
+# A status carrying line breaks. Not a hypothetical: `status` is whatever the
+# stream says it is, and the sidecar is a flat key=value file read first-match-
+# wins, so a value with a newline in it writes rows of its own — above the
+# genuine ones. The CR is there too, because it corrupts a value without
+# splitting a row and is the half a \n-only sanitiser misses.
+if [ -n "${FAKE_INJECT:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
+	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS\r\nwall=999999\nmodel=INJECTED","response":"Did the work.","num_turns":1,"duration_seconds":2}}'
+	exit 0
 fi
 
 # A blocked call, followed by the same call wearing a wrapper the deny rule
@@ -78,6 +182,31 @@ if [ -n "${FAKE_BYPASS:-}" ]; then
 	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"cmd /c npm install"}}}}'
 	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Installed the dependencies and ran the suite.","num_turns":3,"duration_seconds":7}}'
 	exit 0
+fi
+
+# GST-41: a tool call fails and the run works around it. Antigravity's
+# write_to_file is sandboxed to the agent's own brain directory and refuses a
+# path outside it — including the report path, the one file the contract names.
+# The run recovers through run_command, and agy still downgrades the result to
+# ERROR and exits non-zero. Everything that distinguishes this from a run that
+# did nothing is on disk; none of it is in the status or the exit code.
+#
+# The refusal is worded the way a sandbox words it, and deliberately NOT the way
+# a permission denial does: those are a different class here — never recovered
+# from — and a fixture that blurred them would test the wrong branch. Set
+# FAKE_TOOL_ERROR=denial to put a real denial in the same stream, which is how
+# the conduct leg of the recovery test is driven.
+if [ -n "${FAKE_TOOL_ERROR:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"write_to_file","tool_info":{"name":"write_to_file","parameters":{"file_path":".agy/work/m1/task-9-report.md"},"error":{"message":"write_to_file is restricted to the agent workspace; that path is outside it"}}}}'
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"cat > .agy/work/m1/task-9-report.md"}}}}'
+	if [ "$FAKE_TOOL_ERROR" = "denyrule" ]; then
+		printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"write_to_file","tool_info":{"name":"write_to_file","parameters":{"file_path":"/scratch/notes.md"},"error":{"message":"Matches user-configured deny rule"}}}}'
+	fi
+	if [ "$FAKE_TOOL_ERROR" = "denial" ]; then
+		printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git push"},"error":{"message":"Command was denied permission by user settings"}}}}'
+	fi
+	printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":{"message":"a tool call failed during this session"},"response":"write_to_file refused the report path, so I wrote it through run_command instead. The task is done and committed.","num_turns":4,"duration_seconds":11}}'
+	exit 1
 fi
 
 # Trap 4: the run does the work, writes its report, and then never emits a
@@ -90,6 +219,20 @@ if [ -n "${FAKE_HANG:-}" ]; then
 	[ -n "${FAKE_REPORT:-}" ] && printf 'the work, as written by the run that then hung\n\n## Observations\nNone.\n' > "$FAKE_REPORT"
 	sleep "$FAKE_HANG"
 	exit 0
+fi
+
+# Trap 4, livelock variant: the run does the work, writes its report, and then
+# parks itself in a poll loop — scheduling a short wake to check on its own
+# task, and re-arming when it fires. Observed twice on the same tool call. The
+# stream never goes quiet, so the idle watchdog has nothing to measure; only a
+# cap on total elapsed time can tell this apart from a run still working.
+if [ -n "${FAKE_LIVELOCK:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
+	[ -n "${FAKE_REPORT:-}" ] && printf 'the work, as written by the run that then would not stop\n\n## Observations\nNone.\n' > "$FAKE_REPORT"
+	while :; do
+		printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"schedule","tool_info":{"name":"schedule","parameters":{"DurationSeconds":5,"Prompt":"Check on verify task"}}}}'
+		sleep 1
+	done
 fi
 
 # Trap 4, chatty variant: the run does the work and writes its report, and then
@@ -108,12 +251,20 @@ if [ -n "${FAKE_DIE:-}" ]; then
 fi
 
 case "$model" in
-*gemini*)
-	case "${FAKE_ERROR:-weekly}" in
-	fivehour) msg="Rate limit: 5 hour limit reached, refreshes in 3h45m" ;;
+${FAKE_QUOTA_MODEL:-*gemini*})
+	case "${FAKE_ERROR:-long}" in
+	short)    msg="Rate limit: 5 hour limit reached, refreshes in 3h45m" ;;
+	# Anthropic's individual-quota wording, from the field report that became
+	# GST-40. It never says week and never says hour: the only bucket evidence
+	# it carries is the reset time it states about itself.
+	ashort)   msg="Individual quota reached. Please try again later. Resets in 3h27m2s." ;;
+	# The same sentence with a horizon that can only be the long bucket. The
+	# duration is the ONLY difference between this row and the one above, which
+	# is what makes the pair a test of the horizon rather than of the wording.
+	along)    msg="Individual quota reached. Please try again later. Resets in 2d4h." ;;
 	unknown)  msg="429 RESOURCE_EXHAUSTED" ;;
 	none)     printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{}}}}'
-	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Gemini did the work.","num_turns":2,"duration_seconds":5}}'
+	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"The primary model did the work.","num_turns":2,"duration_seconds":5'"$USAGE"'}}'
 	          exit 0 ;;
 	*)        msg="RESOURCE_EXHAUSTED: weekly limit reached for Gemini models" ;;
 	esac
@@ -121,7 +272,7 @@ case "$model" in
 	exit 1 ;;
 *)
 	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"replace_file_content","tool_info":{"name":"replace_file_content","parameters":{}}}}'
-	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Reserve model completed the task.","num_turns":2,"duration_seconds":9}}'
+	printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"Reserve model completed the task.","num_turns":2,"duration_seconds":9'"$USAGE"'}}'
 	exit 0 ;;
 esac
 STUB
@@ -138,6 +289,12 @@ export PATH="$BIN_U:$PATH"
 # three minutes of pure sleeping across the suite. The watchdog's own behaviour
 # is asserted in its own section, with its own timings.
 export AGY_IDLE_POLL=1
+
+# The installer honours AGY_COAUTHOR from the environment, so a maintainer who
+# exported theirs would install the fixture with it and the attribution section
+# would assert against their address instead of the shipped default. The suite
+# has to test what a stranger gets, not what this machine is configured for.
+unset AGY_COAUTHOR
 case "$(command -v agy)" in
 "$BIN_U"/*) ;;
 *) printf 'selftest: ABORT — `agy` resolves to %s, not the stub at %s.\n' "$(command -v agy)" "$BIN_U" >&2
@@ -200,7 +357,15 @@ has "  and told the invariants must follow from the rules" \
 has "  and that a brief defect is the controller's to adjudicate" \
 	"adjudicated by the controller" "$proto"
 
-has "the protocol names a HELD state for an unavailable reviewer" "HELD" "$proto"
+# Not the bare word "HELD" — it now appears in several places, so that needle
+# passed for the wrong reason. Assert the ledger line's actual shape, including
+# the retry field, which is the part a resuming session acts on.
+has "the protocol names a HELD state for an unavailable reviewer" \
+	"HELD — reviewed by nobody" "$proto"
+has "  and makes the held entry say when to retry" \
+	"retry after <time, or the condition that clears it>" "$proto"
+has "  and schedules the reviewer before the controller's own re-execution" \
+	"Order this against step 8" "$proto"
 has "  and forbids the controller reviewing its own work" \
 	"substitute yourself for the reviewer" "$proto"
 
@@ -402,6 +567,44 @@ want "refuses a task brief with a marker left in it" 2 $?
 has  "  names the brief" "task-8-dispatch.md" "$TMP/c3.log"
 rm -f .agy/work/m1/task-8-dispatch.md
 
+# ------------------------------------------------------- the planning template
+# Planning can be dispatched too, which inverts who reviews the plan: the
+# implementer writes it and the controller reviews it, instead of the controller
+# doing both. That matters because the plan is where the defects measurably are.
+# The template is guarded by the same unfilled check as a task brief — an
+# unfilled {{SPEC}} would send a planner at nothing in particular and it would
+# plan something, which is the failure this whole section exists to prevent,
+# one artefact upstream.
+PLANT=".agy/work/m1/plan-dispatch.template.md"
+[ -f "$PLANT" ] \
+	&& ok "the installer ships a planning template" \
+	|| bad "the installer ships a planning template" "no file at $PLANT"
+has   "  with the workspace substituted in" ".agy/work/m1/plan.md" "$PLANT"
+has   "  and the spec left for the controller" "{{SPEC}}" "$PLANT"
+# The one content rule the arrangement depends on. A plan carrying complete code
+# IS the implementation: reviewing it coarsely is a rubber stamp, reviewing it
+# properly costs what writing it would have, and the task dispatch that follows
+# is reduced to transcription. If this line goes, the feature is worse than not
+# having it, so it is pinned rather than trusted.
+has   "  forbidding implementation bodies" "not implementation bodies" "$PLANT"
+has   "  and demanding exact values reach the implementer" "A near-miss is a miss" "$PLANT"
+
+cp "$PLANT" .agy/work/m1/plan-prompt.md
+bash .agy/dispatch --file .agy/work/m1/plan-prompt.md >"$TMP/p1.log" 2>&1
+want "refuses a planning prompt with {{SPEC}} unfilled" 2 $?
+has  "  names the prompt file" "plan-prompt.md" "$TMP/p1.log"
+
+sed 's/{{[^}]*}}/filled-in/g' .agy/work/m1/plan-prompt.md > "$TMP/plan.filled"
+cp "$TMP/plan.filled" .agy/work/m1/plan-prompt.md
+FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --file .agy/work/m1/plan-prompt.md >"$TMP/p2.log" 2>&1
+want "a filled planning prompt dispatches" 0 $?
+# Not task-N, so the code-report contract must not be claimed against a run
+# whose deliverable is a plan. This is the property that makes --file the right
+# entry point rather than a task number with a special case bolted on.
+hasnt "  and claims no report contract over a plan" "report contract" "$TMP/p2.log"
+rm -f .agy/work/m1/plan-prompt.md
+
 printf '\n=== dispatch =======================================================\n'
 bash .agy/dispatch 404 >"$TMP/d0.log" 2>&1
 want "refuses a missing dispatch file" 2 $?
@@ -437,7 +640,7 @@ run_dispatch() { # run_dispatch <label> <FAKE_ERROR> <AGY_FALLBACK> <expected-rc
 	want "$1" "$4" $?
 }
 
-run_dispatch "weekly exhaustion falls back to the reserve" weekly auto 0 "$TMP/d2.log"
+run_dispatch "long-bucket exhaustion falls back to the reserve" long auto 0 "$TMP/d2.log"
 has   "  names the burn"        "RESERVE GROUP BURNED" "$TMP/d2.log"
 has   "  used the reserve model" "claude-opus-4-6-thinking" "$TMP/d2.log"
 # The header prints its log path before any attempt runs, so on a fallback it
@@ -448,7 +651,7 @@ has   "  used the reserve model" "claude-opus-4-6-thinking" "$TMP/d2.log"
 # The verdict block is what a reader acts on, so the real path belongs there.
 has   "  the verdict names the reserve log" ".reserve.ndjson" "$TMP/d2.log"
 
-run_dispatch "a spent 5-hour window HOLDS" fivehour auto 1 "$TMP/d3.log"
+run_dispatch "a spent short window HOLDS" short auto 1 "$TMP/d3.log"
 hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d3.log"
 has   "  says it is waiting"       "refreshes within hours" "$TMP/d3.log"
 
@@ -456,14 +659,52 @@ run_dispatch "an unclear quota error HOLDS" unknown auto 1 "$TMP/d4.log"
 hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d4.log"
 has   "  shows the raw text"       "does not say which bucket" "$TMP/d4.log"
 
-run_dispatch "AGY_FALLBACK=off never falls back" weekly off 1 "$TMP/d5.log"
+run_dispatch "AGY_FALLBACK=off never falls back" long off 1 "$TMP/d5.log"
 hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d5.log"
 
-run_dispatch "AGY_FALLBACK=force starts on the reserve" weekly force 0 "$TMP/d6.log"
+run_dispatch "AGY_FALLBACK=force starts on the reserve" long force 0 "$TMP/d6.log"
 has   "  labelled as forced" "reserve group, forced" "$TMP/d6.log"
 
-run_dispatch "a clean Gemini run stays on Gemini" none auto 0 "$TMP/d7.log"
+run_dispatch "a clean primary run stays on the primary" none auto 0 "$TMP/d7.log"
 hasnt "  did not touch the reserve" "claude-opus" "$TMP/d7.log"
+
+# ---- GST-40: the bucket is read from the message, not from the vendor -------
+#
+# Everything above runs the common arrangement — Gemini primary, Claude reserve
+# — and every quota assertion above passed for the whole time the fallback was
+# unreachable in the arrangement below. These four rows are the difference.
+#
+# The classifier used to reach its reserve-authorising class only by matching
+# the literal word "week", which is Gemini's vocabulary. Anthropic's individual
+# quota says "Resets in 3h27m2s" and never says week, so under AGY_MODEL=claude-*
+# every quota failure landed in `unknown`: AGY_FALLBACK=auto could fire only for
+# the model the harness was not configured to use.
+#
+# So the pair below inverts the slots and differs only in the stated horizon.
+# Same wording, same vendor, same config — hours holds, days spends the reserve.
+inverted_dispatch() { # inverted_dispatch <label> <FAKE_ERROR> <expected-rc> <log>
+	FAKE_QUOTA_MODEL='*claude*' FAKE_ERROR="$2" \
+	AGY_MODEL=claude-opus-4-6-thinking AGY_FALLBACK_MODEL=gemini-3-pro-high \
+	AGY_FALLBACK=auto AGY_SKIP_GATES=1 \
+		bash .agy/dispatch 9 >"$4" 2>&1
+	want "$1" "$3" $?
+}
+
+inverted_dispatch "a Claude primary out of quota for days spends the reserve" along 0 "$TMP/d10.log"
+has   "  names the burn"           "RESERVE GROUP BURNED" "$TMP/d10.log"
+has   "  and ran on the Gemini reserve" "gemini-3-pro-high" "$TMP/d10.log"
+has   "  reading the bucket off the stated reset" "LONG bucket exhausted" "$TMP/d10.log"
+
+inverted_dispatch "the same wording resetting in hours HOLDS" ashort 1 "$TMP/d11.log"
+hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d11.log"
+has   "  and says which model is waiting" "claude-opus-4-6-thinking" "$TMP/d11.log"
+has   "  quoting the reset it was given" "12422s" "$TMP/d11.log"
+
+# A quota error with no bucket word AND no reset time is still not a guess to
+# spend the reserve on — the conservatism survived the rewrite.
+inverted_dispatch "a bare 429 still HOLDS under an inverted config" unknown 1 "$TMP/d12.log"
+hasnt "  did not burn the reserve" "RESERVE GROUP BURNED" "$TMP/d12.log"
+has   "  says it has nothing to classify on" "does not state when it resets" "$TMP/d12.log"
 
 FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d8.log" 2>&1
 has "gates run as part of a dispatch" "--- gates ---" "$TMP/d8.log"
@@ -478,6 +719,67 @@ FAKE_ERROR=none AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/d9.log" 2>&1
 want "a failing gate fails the dispatch" 1 $?
 has  "  the verdict says so" "FAILING" "$TMP/d9.log"
 cp "$TMP/gates.rc.bak" .agy/gates
+
+# =========================================================== --effort routing
+# The stub above now refuses `--effort` off the Gemini line, the way the real
+# binary does, so every reserve-path test in the section above is already a
+# detector for this: send the flag to a Claude model and those runs stop dead.
+# That is the important half of the fix and it is invisible here — a suite that
+# only gained this section would have gained a lot less than it looks.
+#
+# What this section adds is the reason a failure would be legible. Without it a
+# regression reports "the reserve path broke" and a reader goes hunting through
+# quota classification; with it, the command line that was actually built is on
+# screen next to the model it was built for.
+printf '\n=== --effort routing ===============================================\n'
+
+effort_run() { # effort_run <log-name> [env assignments...] — argv-logging dispatch
+	local name="$1"; shift
+	rm -f "$TMP/$name.argv"
+	env AGY_ARGV_LOG="$TMP/$name.argv" FAKE_ERROR=none AGY_SKIP_GATES=1 "$@" \
+		bash .agy/dispatch 9 >"$TMP/$name.log" 2>&1
+	return 0
+}
+
+effort_run eff_gemini
+has   "a Gemini model is sent --effort"        "--effort high" "$TMP/eff_gemini.argv"
+has   "  and the banner says so"               "effort high"   "$TMP/eff_gemini.log"
+
+# The reserve attempt is the one that was unrunnable everywhere. Both attempts
+# append to the same argv log, so the log has to be split by model before it is
+# read: an unsplit `hasnt --effort` sees the Gemini attempt that legitimately
+# carries the flag and fails against correct code. Split, the pair says
+# something the single log cannot — that ONE dispatch routed the flag two
+# different ways according to which model each attempt reached.
+effort_run eff_reserve AGY_FALLBACK=auto FAKE_ERROR=long
+grep -F -- 'claude-opus-4-6-thinking' "$TMP/eff_reserve.argv" > "$TMP/eff_reserve.res.argv"
+grep -F -- 'gemini' "$TMP/eff_reserve.argv" > "$TMP/eff_reserve.pri.argv"
+has   "the reserve attempt still runs after the fallback" "claude-opus-4-6-thinking" "$TMP/eff_reserve.res.argv"
+hasnt "  and carries no --effort"              "--effort" "$TMP/eff_reserve.res.argv"
+has   "  while the Gemini attempt before it did" "--effort high" "$TMP/eff_reserve.pri.argv"
+
+effort_run eff_force AGY_FALLBACK=force
+has   "a forced reserve start reaches the model" "claude-opus-4-6-thinking" "$TMP/eff_force.argv"
+hasnt "  with no --effort"                     "--effort" "$TMP/eff_force.argv"
+hasnt "  and a banner that does not claim one" "effort high" "$TMP/eff_force.log"
+has   "  saying plainly there is none"         "no --effort" "$TMP/eff_force.log"
+
+# The groups are not fixed to their slots. A repo may make Claude primary and
+# keep Gemini as the reserve — that inversion is supported, it is in the field,
+# and it is the configuration a slot-keyed fix would silently get backwards.
+effort_run eff_inverted \
+	AGY_MODEL=claude-opus-4-6-thinking AGY_FALLBACK_MODEL=gemini-3.7-flash-high
+has   "an inverted config runs Claude as primary" "claude-opus-4-6-thinking" "$TMP/eff_inverted.argv"
+hasnt "  and sends it no --effort"             "--effort" "$TMP/eff_inverted.argv"
+
+# The first attempted fix, pinned as a dead end so it is not attempted twice.
+# `.agy/config` writes `: "${AGY_EFFORT:=high}"`, and `:=` fires on null as well
+# as unset, so an empty AGY_EFFORT re-supplies the default rather than clearing
+# it. No value in that file — and no value in the environment — can suppress the
+# flag. That is why the routing is keyed on the model name and nothing else.
+effort_run eff_empty AGY_EFFORT=
+has   "AGY_EFFORT= cannot suppress the flag (:= fires on null)" \
+	"--effort high" "$TMP/eff_empty.argv"
 
 printf '\n=== watchdog (trap 4) ==============================================\n'
 # A run that finishes its work and then never emits `result` is indistinguishable
@@ -526,6 +828,26 @@ has  "  names it as a leftover" "predates this run" "$TMP/w3.log"
 # classify, so classifying one would let a hang spend the scarce reserve group.
 hasnt "  a hang never burns the reserve" "RESERVE GROUP BURNED" "$TMP/w1.log"
 
+# The livelock. Both caps are armed, and the idle watchdog is given the tighter
+# deadline (3s against the cap's 5s) — it still never fires, because the stub
+# emits an event every second for as long as it is allowed to live. That is the
+# whole point of the test: if the wall cap is removed, this run does not fail,
+# it never returns at all.
+rm -f "$REPORT_9"
+FAKE_LIVELOCK=1 FAKE_REPORT="$REPORT_9" FAKE_ERROR=none \
+AGY_MAX_WALL=5 AGY_IDLE_TIMEOUT=3 AGY_IDLE_POLL=1 AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/c1.log" 2>&1
+want "a livelocked run is capped, not waited out" 0 $?
+has  "  says the wall cap fired"        "WALL CAP" "$TMP/c1.log"
+has  "  labels the verdict"             "WALL-CAPPED" "$TMP/c1.log"
+has  "  still prints the fence"         "fence" "$TMP/c1.log"
+# The two kills send a reader to different places, so the verdict must not
+# borrow the other's vocabulary: a stream that never went quiet was not idle.
+hasnt "  does not blame the idle watchdog" "WATCHDOG-KILLED" "$TMP/c1.log"
+# Same reasoning as the hang: no result event means nothing to classify, and
+# classifying one would let a livelock spend the scarce reserve group.
+hasnt "  a livelock never burns the reserve" "RESERVE GROUP BURNED" "$TMP/c1.log"
+
 rm -f "$REPORT_9"
 
 printf '\n=== the session dies before its result event =======================\n'
@@ -556,6 +878,87 @@ FAKE_DIE=1 FAKE_REPORT="" AGY_SKIP_GATES=1 \
 	bash .agy/dispatch 9 >"$TMP/x2.log" 2>&1
 want "a died session with no report FAILS" 1 $?
 has  "  says the report is missing" "no report at" "$TMP/x2.log"
+
+rm -f "$REPORT_9"
+
+printf '\n=== interrupted mid-flight =========================================\n'
+# Ctrl-C, a closed terminal, a killed parent. Every other stopped-run case here
+# ends with the script still in control; this one does not, and it used to exit
+# silently — no verdict, no fence check, no gates — after the model had already
+# committed. On disk that is indistinguishable from a dispatch that never ran,
+# except HEAD moved, which is the one fact nobody was told.
+#
+# The watchdog is disarmed on purpose (both caps 0) so the script is parked in
+# `wait` when the signal lands: this measures the trap, not the watchdog.
+rm -f "$REPORT_9"
+INT_WAS="$(git rev-parse HEAD)"
+FAKE_HANG=30 FAKE_TOUCH="src/interrupted.txt" FAKE_COMMIT=1 FAKE_REPORT="$REPORT_9" \
+FAKE_ERROR=none AGY_IDLE_TIMEOUT=0 AGY_MAX_WALL=0 AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/i1.log" 2>&1 &
+int_pid=$!
+# Signal only once the tree has actually moved — before that the run has nothing
+# to under-report and the test would pass on a script that still exits silently.
+int_n=0
+while [ "$int_n" -lt 60 ]; do
+	[ "$(git rev-parse HEAD)" != "$INT_WAS" ] && break
+	int_n=$(( int_n + 1 )); sleep 0.25
+done
+kill -TERM "$int_pid" 2>/dev/null
+wait "$int_pid"
+want "an interrupted run exits on the signal, not on its own" 143 $?
+has  "  names the signal"            "INTERRUPTED by SIGTERM" "$TMP/i1.log"
+has  "  says the run did not finish" "did not finish"         "$TMP/i1.log"
+has  "  reports the commit it left"  "THE TREE MOVED"         "$TMP/i1.log"
+has  "  gives the range to read"     "$INT_WAS.."            "$TMP/i1.log"
+# The whole point: an unfinished run must not borrow the vocabulary of a
+# finished one. Neither check ran, so neither may report a result.
+has   "  fence is unjudged, not clean" "fence   NOT CHECKED"  "$TMP/i1.log"
+has   "  gates are unrun, not green"   "gates   NEVER RAN"    "$TMP/i1.log"
+hasnt "  never claims a clean fence"   "fence   clean"        "$TMP/i1.log"
+hasnt "  never claims green gates"     "gates   green"        "$TMP/i1.log"
+# agy is a background child; a signal sent to the script alone never reaches it,
+# and it would go on writing to the log after the verdict said the run stopped.
+int_child="$(sed -n 's/.*INTERRUPT stopping agy (pid \([0-9][0-9]*\)).*/\1/p' \
+	"$TMP/i1.log" | head -1)"
+if [ -n "$int_child" ] && ! kill -0 "$int_child" 2>/dev/null; then
+	ok "  the model process is stopped too"
+else
+	bad "  the model process is stopped too" \
+		"child pid '${int_child:-<never named>}' still alive after the trap"
+fi
+
+# The other branch, and the other signal: Ctrl-C on a run that had not landed
+# anything yet. Reporting movement that did not happen sends the reader to hunt
+# a diff that is not there, which costs as much trust as missing one that did.
+#
+# This one cannot be driven with `&` like the SIGTERM case above. A shell
+# without job control starts background jobs with SIGINT set to SIG_IGN, and an
+# inherited ignore cannot be re-trapped — the dispatch would run to completion
+# and the test would pass on any script at all. So dispatch runs in the
+# FOREGROUND here, exactly as it does under a real Ctrl-C, and a background
+# helper does the signalling. The wrapper `exec`s, so the pid it recorded is
+# dispatch's own.
+rm -f "$REPORT_9" "$TMP/i2.pid"
+(
+	int_n=0
+	while [ "$int_n" -lt 80 ]; do
+		# The stub writes its report and only then sleeps, so the report
+		# appearing means agy is up and dispatch is parked in `wait`.
+		[ -s "$TMP/i2.pid" ] && [ -f "$REPORT_9" ] && break
+		int_n=$(( int_n + 1 )); sleep 0.25
+	done
+	kill -INT "$(cat "$TMP/i2.pid" 2>/dev/null)" 2>/dev/null
+) &
+int_killer=$!
+FAKE_HANG=30 FAKE_REPORT="$REPORT_9" FAKE_ERROR=none \
+AGY_IDLE_TIMEOUT=0 AGY_MAX_WALL=0 AGY_SKIP_GATES=1 \
+	bash -c 'echo $$ > "$1"; exec bash .agy/dispatch 9' _ "$TMP/i2.pid" \
+	>"$TMP/i2.log" 2>&1
+want "SIGINT is trapped the same way" 130 $?
+wait "$int_killer" 2>/dev/null
+has   "  names the signal"          "INTERRUPTED by SIGINT" "$TMP/i2.log"
+hasnt "  does not invent a commit"  "THE TREE MOVED"        "$TMP/i2.log"
+has   "  still says what landed"    "no commit"             "$TMP/i2.log"
 
 rm -f "$REPORT_9"
 
@@ -599,6 +1002,32 @@ FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Took 12 minutes across
 	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b4.log" 2>&1
 hasnt "an unmeasured quantity is not flagged" "CLAIM" "$TMP/b4.log"
 
+# Failure counts are the number this check exists to catch a lie about, and
+# they were never compared. `singular()` stripped /e?s$/, so `failures` became
+# `failur` and fell out of UNITS on both sides at once — the report's count and
+# the gates' count were both discarded, and the run reported that nothing
+# contradicted. Five of eleven units were unreachable in the plural this way.
+# The three cases above all say `assertions`, the one plural that regex
+# happened to survive, which is why they passed throughout.
+printf '#!/usr/bin/env bash\nprintf "OK (76 tests, 2 failures)\\n"\nexit 0\n' > .agy/gates
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Done. 76 tests, 0 failures.' \
+	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b5.log" 2>&1
+has "a failure count the gates contradict is flagged" "CLAIM" "$TMP/b5.log"
+has "  quotes the report's count" "says 0 failure" "$TMP/b5.log"
+has "  quotes the gate's count"   "reported 2"     "$TMP/b5.log"
+
+# The mirror image, and the one that actually fired in the field: a report that
+# labels its scope is accurate, not lying. Every number used to be tested for
+# membership in the whole gate set, so a correctly labelled partial run could
+# never pass — it was reconciled by hand on four consecutive tasks. A unit the
+# report gives more than one number for is naming more than one scope, and the
+# gate log does not say which one it measured.
+printf '#!/usr/bin/env bash\nprintf "OK (76 tests)\\nSlow: 21 tests\\n"\nexit 0\n' > .agy/gates
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" \
+	FAKE_REPORT_TEXT='Ran 19 tests (--filter Gateway). Full unit suite: 76 tests.' \
+	AGY_SKIP_GATES=0 bash .agy/dispatch 9 >"$TMP/b6.log" 2>&1
+hasnt "a scoped count beside the full count is not flagged" "CLAIM" "$TMP/b6.log"
+
 cp "$TMP/gates.claims.bak" .agy/gates
 rm -f "$REPORT_9"
 
@@ -621,6 +1050,28 @@ None.' \
 want "a report carrying it passes" 0 $?
 rm -f "$REPORT_9"
 
+# --file used to set REPORT="", and both this check and the claims comparison
+# are gated on having a fresh report. So every fix round — which is exactly how
+# a correction is sent, `--continue --file task-9-fix1.md` — ran with both
+# checks off, and nothing in the output said so. The dispatches most likely to
+# be cutting corners were the only unchecked ones. The label already carries
+# the task number, so the report path is recoverable from it.
+printf 'Fix the thing.\n' > "$TMP/task-9-fix1.md"
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT='Done. Everything green.' \
+	AGY_SKIP_GATES=1 bash .agy/dispatch --file "$TMP/task-9-fix1.md" >"$TMP/s3.log" 2>&1
+want "a --file correction still enforces the contract" 1 $?
+has  "  names the section" "## Observations" "$TMP/s3.log"
+
+# A prompt file not named after a task has no report to check, and must not
+# invent one — the checks stay off rather than failing on a file that is not
+# there.
+printf 'Do a thing.\n' > "$TMP/scratch-note.md"
+FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --file "$TMP/scratch-note.md" >"$TMP/s4.log" 2>&1
+want "a --file prompt with no task number still runs" 0 $?
+hasnt "  and claims no report contract" "report contract" "$TMP/s4.log"
+rm -f "$REPORT_9"
+
 printf '\n=== what landed ====================================================\n'
 # `run clean` describes the session, not its output. A run that wrote no code at
 # all produces the same four lines as one that implemented the task — clean run,
@@ -631,10 +1082,10 @@ REPORT_OK='Done.
 ## Observations
 None.'
 
-landing() { # landing <log> [FAKE_TOUCH] [FAKE_COMMIT]
+landing() { # landing <log> [FAKE_TOUCH] [FAKE_COMMIT] [FAKE_COAUTHOR]
 	rm -f "$REPORT_9"
 	FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
-	FAKE_TOUCH="${2:-}" FAKE_COMMIT="${3:-}" AGY_SKIP_GATES=1 \
+	FAKE_TOUCH="${2:-}" FAKE_COMMIT="${3:-}" FAKE_COAUTHOR="${4:-}" AGY_SKIP_GATES=1 \
 		bash .agy/dispatch 9 >"$1" 2>&1
 }
 
@@ -660,6 +1111,136 @@ has   "a committed run reports the commit" "landed  1 commit(s)" "$TMP/l3.log"
 has   "  quotes its subject"               "task work: src/committed.txt" "$TMP/l3.log"
 hasnt "  does not claim nothing landed"    "landed  NOTHING" "$TMP/l3.log"
 
+printf '\n=== a tool error the run worked around =============================\n'
+# GST-41, from the field. write_to_file is sandboxed to the agent's own brain
+# directory and refused .agy/work/m7/task-2-report.md — the one file every
+# dispatch is contractually required to produce. The run recovered through
+# run_command, wrote 564 accurate lines, and committed. agy had already
+# downgraded the status to ERROR, and this harness turned that into exit 1, so
+# at the exit code the run was indistinguishable from the quota failure forty
+# minutes earlier that committed nothing at all.
+#
+# That is the GST-40 fault-injection finding restated from the other side: one
+# bit cannot carry two questions. There the exit code graded a reserve-burning
+# path green because a run that never failed also exits 0; here it graded a
+# finished, committed, gate-green run red because one call along the way did.
+#
+# So the tool error becomes evidence and the artifacts become the verdict. Every
+# leg of that conjunction gets its own row below, because a single assertion
+# that the happy path exits 0 would pass equally against a dispatch that simply
+# stopped judging tool errors — which is the failure this fix could most easily
+# become.
+# A deterministic green runner for this section. The starter the installer
+# generates is a guess about the project's toolchain, and every row below
+# turns on the gates being GREEN — a section whose premise rests on a guess
+# tests the guess.
+cp .agy/gates "$TMP/gates.r41.bak"
+printf '#!/usr/bin/env bash\nprintf "all gates green\\n"\nexit 0\n' > .agy/gates
+
+recovered() { # recovered <log> [FAKE_TOUCH] [FAKE_COMMIT] [FAKE_TOOL_ERROR]
+	rm -f "$REPORT_9"
+	FAKE_TOOL_ERROR="${4:-1}" FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+	FAKE_TOUCH="${2:-}" FAKE_COMMIT="${3:-}" AGY_SKIP_GATES=0 \
+		bash .agy/dispatch 9 >"$1" 2>&1
+}
+
+recovered "$TMP/r1.log" "src/recovered.txt" 1
+want  "a tool error the run worked around does not fail the dispatch" 0 $?
+has   "  the verdict has words for it"     "TOOL ERROR(S) the run worked around" "$TMP/r1.log"
+has   "  and says what proves it"          "proven by the report, the fence"     "$TMP/r1.log"
+has   "  recovery is shown, not asserted"  "--- recovered ---"                   "$TMP/r1.log"
+has   "  the error is still on the page"   "write_to_file"                       "$TMP/r1.log"
+has   "  and the commit it rests on named" "landed    1 commit(s)"               "$TMP/r1.log"
+
+# The count has to survive into the sidecar: the verdict is for a human and the
+# benchmark reads neither the screen nor the exit code.
+RCLASS="$(ls -t .agy/work/m1/logs/*.class 2>/dev/null | head -1)"
+has "  the sidecar carries the count"      "tool_errors=1" "$RCLASS"
+has "  and the hard-fail count beside it"  "hard_fails=0"  "$RCLASS"
+
+# ---- one leg removed per row, and nothing else ------------------------------
+recovered "$TMP/r2.log" "src/uncommitted.txt"
+want  "the same error with the work UNCOMMITTED still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r2.log"
+rm -f src/uncommitted.txt
+
+recovered "$TMP/r3.log"
+want  "the same error with NOTHING landed still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r3.log"
+
+printf '#!/usr/bin/env bash\nprintf "boom\\n"\nexit 1\n' > .agy/gates
+recovered "$TMP/r4.log" "src/redgate.txt" 1
+want  "the same error over a RED gate still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r4.log"
+printf '#!/usr/bin/env bash\nprintf "all gates green\\n"\nexit 0\n' > .agy/gates
+
+# The house rule, stated as a test: an absent measurement is never a pass. A
+# skipped gate suite is the most inviting way to lose this one, because the
+# screen says `gates   not run` and everything else on it is green.
+rm -f "$REPORT_9"
+FAKE_TOOL_ERROR=1 FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/skipped.txt" FAKE_COMMIT=1 AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/r5.log" 2>&1
+want  "UNRUN gates do not authorise recovery" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r5.log"
+
+# No report at all is the case GST-41 arrived through: if write_to_file had
+# refused and the run had NOT worked around it, this is what would be left.
+rm -f "$REPORT_9"
+FAKE_TOOL_ERROR=1 FAKE_TOUCH="src/noreport.txt" FAKE_COMMIT=1 AGY_SKIP_GATES=0 \
+	bash .agy/dispatch 9 >"$TMP/r6.log" 2>&1
+want  "a tool error with NO report on disk still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r6.log"
+
+# Conduct is never recovered from. A blocked call in the same stream means the
+# boundary held and something walked into it — the greenest possible tree does
+# not answer that, because the report will describe the work as done, accurately.
+recovered "$TMP/r7.log" "src/conduct.txt" 1 denial
+want  "a BLOCKED call in the same stream is never recovered from" 1 $?
+hasnt "  and claims no recovery"  "--- recovered ---" "$TMP/r7.log"
+has   "  it is named as a block"  "BLOCKED despite"   "$TMP/r7.log"
+
+# GST-42, and the reason it had to be fixed in the same breath as GST-41.
+# Antigravity auto-denied a write_to_file into its OWN scratch directory under
+# --dangerously-skip-permissions, and said only `Matches user-configured deny
+# rule` — a sentence carrying none of the words the classifier was looking for.
+# Filed as a tool error, that denial would have walked straight through the
+# recovery above on an otherwise perfect run. The verbatim field wording is the
+# fixture, because a paraphrase would test the paraphrase.
+recovered "$TMP/r9.log" "src/denyrule.txt" 1 denyrule
+want  "a deny-rule refusal is conduct, not a path error" 1 $?
+hasnt "  and claims no recovery"       "--- recovered ---" "$TMP/r9.log"
+has   "  it is named as a block"       "BLOCKED despite"   "$TMP/r9.log"
+has   "  quoting the wording verbatim" "user-configured deny rule" "$TMP/r9.log"
+
+# And the other direction: a non-SUCCESS status with NO tool error in the stream
+# has nothing to attribute itself to and stays a hard failure. Every quota row
+# in the dispatch section above is that assertion; this one says it in one line
+# against the same fixture family, so a future relaxation of `status` alone has
+# to walk past it.
+rm -f "$REPORT_9"
+FAKE_ERROR=unknown FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/statusonly.txt" FAKE_COMMIT=1 AGY_FALLBACK=off AGY_SKIP_GATES=0 \
+	bash .agy/dispatch 9 >"$TMP/r8.log" 2>&1
+want  "a bare non-SUCCESS status with no tool error still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r8.log"
+
+# And the mechanism that row rests on, pinned rather than reasoned about. The
+# recovery conjunction also requires tool_errors > 0, and fault injection could
+# not witness that leg: removing it changed nothing, because with no tool error
+# in the stream node has nothing to attribute a bad status to and hard-fails
+# instead — which the hard_fails leg already catches. The leg stays (it is the
+# cheap half of a defence that spans two languages), and these two rows state
+# the invariant it leans on, so a future softening of node's `fail` here turns
+# something red instead of quietly making the leg the only thing left.
+SCLASS="$(ls -t .agy/work/m1/logs/*.class 2>/dev/null | head -1)"
+has "  no tool error is recorded for it"     "tool_errors=0" "$SCLASS"
+hasnt "  and it is not counted as a soft one"  "hard_fails=0"  "$SCLASS"
+
+rm -f "$REPORT_9"
+cp "$TMP/gates.r41.bak" .agy/gates
+
+printf '\n=== what landed (continued) ========================================\n'
 # agy reports `1 turns` on runs carrying two dozen recorded tool calls. On one
 # line with the durations it reads as a one-shot answer; the count that means
 # something is the one measured off the stream.
@@ -669,13 +1250,158 @@ hasnt "the duration line no longer carries turns" "thread-elapsed / " "$TMP/l3.l
 
 rm -f "$REPORT_9"
 
+printf '\n=== attribution ====================================================\n'
+# Every behavioural rule in dispatch-context.md used to be enforced by the model
+# choosing to comply. This is the one that had a victim: the template asked for a
+# `Co-Authored-By:` line without saying what to put in it, implementers supplied
+# antigravity@google.com, and GitHub — which resolves co-author trailers to
+# accounts BY EMAIL — put a real stranger on the contributor graph. Telling the
+# model harder is not the lever; the instruction was already there.
+
+GOOD_CA="Antigravity <antigravity@antigravity.invalid>"
+
+has "the installer writes the trailer into the config" \
+	"antigravity@antigravity.invalid" .agy/config
+has "  and into the context the model reads" \
+	"antigravity@antigravity.invalid" .agy/work/m1/dispatch-context.md
+# One source, two renderings. If these could drift, the model would be obeying a
+# different rule from the one the harness checks, which is the whole failure.
+hasnt "  and leaves no unfilled marker behind" \
+	"{{COAUTHOR}}" .agy/work/m1/dispatch-context.md
+
+# The shipped default must credit nobody. This installer runs in other people's
+# repositories, so an address baked in here lands on the contributor graph of
+# every repo a stranger installs it into — which is the original bug with the
+# roles swapped. A maintainer wanting their own address sets it per install;
+# they do not change what everyone else gets.
+has "the shipped default is an address nobody can own" \
+	'COAUTHOR="Antigravity <antigravity@antigravity.invalid>"' "$SKILL_DIR/scripts/install"
+# Pinned on the assignment line, not on the file. Asserting the config never
+# *mentions* a live address would be the wrong test and it fails: the config
+# names antigravity@google.com on purpose, in the paragraph explaining what is
+# never right. A rule that cannot cite the case that produced it is a weaker
+# rule. What must not drift is the value the check reads.
+has "  and that is what the config assigns" \
+	': "${AGY_COAUTHOR=Antigravity <antigravity@antigravity.invalid>}"' .agy/config
+# The config explains both defensible answers, because "must never resolve" is
+# not one of them — a project crediting its own mailbox is making a true claim.
+# Stating only one answer is what makes the other look like a bug to fix.
+has "  the config gives the rule, not just the value" \
+	"BY EMAIL" .agy/config
+has "  and warns off the noreply form, which resolves too" \
+	"users.noreply.github.com" .agy/config
+
+landing "$TMP/ca1.log" "src/ca1.txt" 1 "$GOOD_CA"
+want "the configured co-author passes"     0 $?
+hasnt "  and says nothing about it"        "WRONG CO-AUTHOR" "$TMP/ca1.log"
+
+# A missing trailer is not a wrong one. The controller commits in this range
+# too, amends drop trailers, and merges never carry them — so "should there
+# have been a trailer" is a judgement, while "is this address the configured
+# one" is not. Only the second is deterministic, so only the second fails.
+landing "$TMP/ca0.log" "src/ca0.txt" 1
+want "a commit with no trailer at all is left alone" 0 $?
+hasnt "  and is not reported as wrong"     "WRONG CO-AUTHOR" "$TMP/ca0.log"
+
+# The display name is cosmetic — GitHub matches on the address alone, so two
+# trailers differing only in the name are the same claim and must not disagree
+# here. Case too: addresses are not case-sensitive on the part that matters.
+landing "$TMP/ca2.log" "src/ca2.txt" 1 "Some Other Name <ANTIGRAVITY@Antigravity.INVALID>"
+want "a different display name is still the same co-author" 0 $?
+hasnt "  no complaint"                     "WRONG CO-AUTHOR" "$TMP/ca2.log"
+
+landing "$TMP/ca3.log" "src/ca3.txt" 1 "Antigravity <antigravity@google.com>"
+want "the address that caused this FAILS the run" 1 $?
+has  "  the verdict block names it"        "trailer WRONG CO-AUTHOR" "$TMP/ca3.log"
+has  "  quotes the offending address"      "antigravity@google.com"  "$TMP/ca3.log"
+has  "  and the one it expected"           "Expected: $GOOD_CA"      "$TMP/ca3.log"
+has  "  gives the remedy, not a lecture"   'git commit --amend --trailer' "$TMP/ca3.log"
+has  "  says why an address is not cosmetic" "BY EMAIL"              "$TMP/ca3.log"
+# The verdict block and the exit code have to agree. The run, the fence and the
+# gates were all fine here — the trailer is the only thing that failed, so it
+# has to appear in the block a controller reads, not only in a section above it.
+has  "  and detail above the block"        "--- attribution"         "$TMP/ca3.log"
+
+# Opt out by emptying the value, not by widening it — a check that matches
+# anything is the state this whole section exists to leave behind. This is also
+# what pins the config to `:=`'s cousin: with `${AGY_COAUTHOR:=...}` an empty
+# value is indistinguishable from an unset one, the default comes straight back,
+# and this test fails.
+rm -f "$REPORT_9"
+AGY_COAUTHOR="" FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/ca4.txt" FAKE_COMMIT=1 FAKE_COAUTHOR="Antigravity <antigravity@google.com>" \
+AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ca4.log" 2>&1
+want "an empty AGY_COAUTHOR switches the check off" 0 $?
+hasnt "  and prints nothing about attribution" "WRONG CO-AUTHOR" "$TMP/ca4.log"
+
+# The check reads git's own trailer parser, not the message text. A commit whose
+# body discusses a trailer is prose, and prose is not a claim of authorship —
+# without this, the commit that lands this very section would fail its own check,
+# and so would every commit that documents the address it replaced.
+rm -f "$REPORT_9"
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/ca5.txt" FAKE_COMMIT=1 FAKE_COAUTHOR="$GOOD_CA" \
+FAKE_BODY="The old default was Co-Authored-By: Antigravity <antigravity@google.com>,
+which is a live account. Quoted here, not claimed." \
+AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ca5.log" 2>&1
+want "an address quoted in a commit body is not a trailer" 0 $?
+hasnt "  the prose is not read as a claim" "WRONG CO-AUTHOR" "$TMP/ca5.log"
+
+rm -f "$REPORT_9"
+
+# Per-install override, both ways in. A project that wants its own address must
+# be able to have it without editing the skill everyone else installs — and both
+# renderings have to move together, or the model is told one rule and judged by
+# another.
+for how in flag env; do
+	CAREPO="$TMP/ca-$how"
+	mkdir -p "$CAREPO/src"
+	(
+		cd "$CAREPO" || exit 1
+		git init -q . && git config user.email t@t && git config user.name T
+		printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+		if [ "$how" = flag ]; then
+			bash "$SKILL_DIR/scripts/install" --project CA \
+				--coauthor 'Antigravity <agy@example.test>' >/dev/null 2>&1
+		else
+			AGY_COAUTHOR='Antigravity <agy@example.test>' \
+				bash "$SKILL_DIR/scripts/install" --project CA >/dev/null 2>&1
+		fi
+	) || bad "install --$how sets the co-author" "setup failed"
+	has "install by $how puts the chosen address in the config" \
+		"agy@example.test" "$CAREPO/.agy/config"
+	has "  and the same one in the context" \
+		"agy@example.test" "$(echo "$CAREPO"/.agy/work/*/dispatch-context.md)"
+	hasnt "  and the shipped default is gone from the context" \
+		"antigravity.invalid" "$(echo "$CAREPO"/.agy/work/*/dispatch-context.md)"
+done
+
+# The two renderings can be edited apart afterwards — a hand-edited config, a
+# context copied in from another project. Then every run fails on a trailer the
+# implementer copied faithfully out of the file it was given, and the diagnosis
+# points at the implementer, which is the one place the fault is not. Refuse
+# before dispatching instead: it is a configuration fault, like the fence whose
+# baseline does not pair with its config.
+rm -f "$REPORT_9"
+AGY_COAUTHOR="Antigravity <someone.else@example.test>" \
+FAKE_ERROR=none FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ca6.log" 2>&1
+want "a config and context that disagree REFUSE to dispatch" 2 $?
+has  "  names the address the check wants"  "someone.else@example.test" "$TMP/ca6.log"
+has  "  and the file that never mentions it" "dispatch-context.md"      "$TMP/ca6.log"
+has  "  says the implementer would be judged on a rule it never got" \
+	"judged against a rule it was never given" "$TMP/ca6.log"
+has  "  and nothing was dispatched"         "the tree is untouched"     "$TMP/ca6.log"
+
+rm -f "$REPORT_9"
+
 printf '\n=== review package =================================================\n'
 # The reviewer's contract lives in protocol.md, which a reviewer subagent may
 # never read. The package is the one file it is guaranteed to open, so the three
 # verdicts have to be printed into it — brief integrity first, because a
 # reviewer asked only "does the diff match the brief" confirms a faithful
 # implementation of a wrong rule.
-PKG_OUT="$(bash .agy/review-pkg HEAD~1 task-9 2>&1)"
+PKG_OUT="$(bash .agy/review-pkg HEAD~1 task-9 2>"$TMP/pkg-err.log")"
 want "review-pkg builds a package" 0 $?
 PKG="$(printf '%s' "$PKG_OUT" | awk '{print $1}')"
 has "  it demands three verdicts"          "Three verdicts are required" "$PKG"
@@ -683,6 +1409,148 @@ has "  brief integrity is the first"       "1. **Brief integrity**"      "$PKG"
 has "  asked as a question about the rules" "actually follow from its stated rules" "$PKG"
 has "  and routed to the controller"       "controller to adjudicate"    "$PKG"
 has "  the diff is still there"            "## Diff (-U10)"              "$PKG"
+has "  and demands a terminator"           "REVIEW-END brief=<ok|findings>" "$PKG"
+has "  saying why one is needed"           "never existed"               "$PKG"
+# The reviewer never reads protocol.md, so a rule addressed to the reviewer is
+# only real if it reaches the package. This is the assertion 1.8.9 shipped
+# without and owed.
+has "  and to write findings as it finds them" "Write each finding down as you reach it" "$PKG"
+has "  because it is the likeliest to be cut off" "most likely to be cut off"  "$PKG"
+
+# GST-43. Reviewers dying of session limits was documented as a rare accident
+# and is arithmetic: package plus four documents plus re-execution of every
+# pasted proof is most of a session, and a milestone lost three tasks in a row
+# to it. The prose fix belongs in protocol.md; this is the half a machine can
+# check — the one place the size is known before the reviewer is spent.
+printf '%s\n' "$PKG_OUT" > "$TMP/pkg-out.log"
+has "  and reports its own size" " lines)" "$TMP/pkg-out.log"
+# Round three found this the hard way. A mutation that made the warning fire on
+# every package turned nine unrelated rows of this section red, because the
+# capture above used to merge stderr into stdout and take the first word — and
+# an unbuffered stderr line arrives ahead of a buffered stdout one, so `$PKG`
+# became "WARNING:" and every later assertion looked in a file that did not
+# exist. The cascade was the fixture's fault rather than the mutation's, but the
+# same parse lives in any caller that pipes this command, so the split is now a
+# stated contract instead of an accident of how big the fixture happened to be.
+want "  and stdout carries the path and nothing else" 1 \
+	"$(printf '%s\n' "$PKG_OUT" | wc -l | tr -d ' ')"
+
+AGY_REVIEW_MAX=1 bash .agy/review-pkg HEAD~1 task-9big \
+	> "$TMP/pkg-big.out" 2>"$TMP/pkg-big.log"
+want "an oversized package warns before a reviewer is spent" 0 $?
+has  "  naming the budget it crossed" "over the 1-line review budget" "$TMP/pkg-big.log"
+has  "  and what to do instead"       "scoped review"                 "$TMP/pkg-big.log"
+# The warning is advice, not a refusal: a controller may have a good reason for
+# a large task, and a gate that blocked here would be routed around rather than
+# obeyed.
+has  "  while still building the package" "review-task-9big.diff"     "$TMP/pkg-big.out"
+hasnt "  and the warning stays off stdout" "WARNING"                  "$TMP/pkg-big.out"
+
+AGY_REVIEW_MAX=99999 bash .agy/review-pkg HEAD~1 task-9ok > "$TMP/pkg-ok.log" 2>&1
+hasnt "a package inside the budget says nothing" "WARNING" "$TMP/pkg-ok.log"
+
+# ============================================== is the review finished?
+printf '\n=== review completeness ============================================\n'
+# The defect: a reviewer killed mid-write leaves a file that reads exactly like
+# a review which found nothing. The verdict table is written before the findings
+# are, so what survives is a complete table with every row MET and no findings
+# section — and the controller's only signal was the presence of a table.
+#
+# Every assertion here is on the exit code first. The message matters, but a
+# check whose text is right and whose status is wrong is one an `if` reads
+# backwards, which is exactly how the grep -iF abort took down 1.8.5.
+RV="$TMP/reviews"
+mkdir -p "$RV"
+END='REVIEW-END brief=ok spec=pass quality=approved ac=12/12'
+
+printf '# Review\n\n| AC | verdict |\n|---|---|\n| 1 | MET |\n\n%s\n' "$END" > "$RV/good.md"
+bash .agy/review-pkg --check "$RV/good.md" > "$TMP/rv-good.log" 2>&1
+want "a finished review passes" 0 $?
+has  "  and prints the ledger line" "reviewed: brief=ok spec=pass quality=approved ac=12/12" "$TMP/rv-good.log"
+
+# The whole flaw, reproduced: the table is complete and the file stops there.
+printf '# Review\n\n| AC | verdict |\n|---|---|\n| 1 | MET |\n' > "$RV/trunc.md"
+bash .agy/review-pkg --check "$RV/trunc.md" > "$TMP/rv-trunc.log" 2>&1
+want "a truncated review fails" 1 $?
+has  "  and is called unfinished, not failed" "is UNFINISHED"        "$TMP/rv-trunc.log"
+has  "  with the reason it looks complete"    "before the findings"  "$TMP/rv-trunc.log"
+has  "  and what to do about it"              "fresh"                "$TMP/rv-trunc.log"
+
+# A terminator that is not terminal is not a terminator: a reviewer that wrote
+# the line and kept going has not finished either, and this is the case a plain
+# `grep REVIEW-END` would wave through.
+printf '# Review\n\n%s\n\nOne more thought.\n' "$END" > "$RV/notlast.md"
+bash .agy/review-pkg --check "$RV/notlast.md" >/dev/null 2>&1
+want "the terminator must be the last line" 1 $?
+
+# Trailing blank lines are not content — an editor that adds one must not turn
+# a finished review into an unfinished one.
+printf '# Review\n\n%s\n\n\n' "$END" > "$RV/blanks.md"
+bash .agy/review-pkg --check "$RV/blanks.md" >/dev/null 2>&1
+want "trailing blank lines do not unfinish it" 0 $?
+
+# CR is in [:space:], which is the only reason a review written on Windows
+# passes at all. Asserted because it is invisible and one `tr` away from broken.
+printf '# Review\r\n\r\n%s\r\n' "$END" > "$RV/crlf.md"
+bash .agy/review-pkg --check "$RV/crlf.md" >/dev/null 2>&1
+want "a CRLF review still passes" 0 $?
+
+printf '# Review\n\nREVIEW-END spec=pass quality=approved ac=12/12\n' > "$RV/nobrief.md"
+bash .agy/review-pkg --check "$RV/nobrief.md" > "$TMP/rv-nobrief.log" 2>&1
+want "a missing verdict fails" 1 $?
+# The needle is the whole phrase, not "brief". `brief` on its own also occurs
+# in the SUCCESS line (`reviewed: brief= spec=pass …`), so the short version
+# passed whether or not the failure message was ever printed — a vacuous
+# assertion, and it survived the mutation that should have killed it. Found by
+# predicting the red set before running rather than by counting failures.
+has  "  and names which one"  "Unreadable or missing: brief" "$TMP/rv-nobrief.log"
+has  "  and shows the shape"  "quality=<approved|changes>" "$TMP/rv-nobrief.log"
+
+# The template pasted verbatim. A reviewer that copied the line without
+# answering it has reported nothing, and the placeholders are how you tell.
+printf '# Review\n\nREVIEW-END brief=<ok|findings> spec=<pass|fail> quality=<approved|changes> ac=<met>/<total>\n' > "$RV/tmpl.md"
+bash .agy/review-pkg --check "$RV/tmpl.md" >/dev/null 2>&1
+want "the unanswered template fails" 1 $?
+
+# Not judgement — arithmetic. Spec compliance cannot pass while criteria the
+# brief issued went unmet, because there is no third verdict for a criterion:
+# it is MET or it is NOT MET with a reason.
+printf '# Review\n\nREVIEW-END brief=ok spec=pass quality=approved ac=8/12\n' > "$RV/contra.md"
+bash .agy/review-pkg --check "$RV/contra.md" > "$TMP/rv-contra.log" 2>&1
+want "a pass with unmet criteria fails" 1 $?
+has  "  naming the contradiction" "cannot both be true" "$TMP/rv-contra.log"
+
+printf '# Review\n\nREVIEW-END brief=ok spec=fail quality=changes ac=8/12\n' > "$RV/fewer.md"
+bash .agy/review-pkg --check "$RV/fewer.md" >/dev/null 2>&1
+want "  but a fail with unmet criteria is fine" 0 $?
+
+printf '# Review\n\nREVIEW-END brief=ok spec=fail quality=changes ac=13/12\n' > "$RV/over.md"
+bash .agy/review-pkg --check "$RV/over.md" >/dev/null 2>&1
+want "more met than issued fails" 1 $?
+
+# The dropped row, made visible. The controller knows the count; the review
+# reconciles against it. Twelve criteria issued, eight reported, and among the
+# four that quietly went was the one marked non-negotiable.
+bash .agy/review-pkg --check "$RV/good.md" --ac 12 >/dev/null 2>&1
+want "the criteria count can be reconciled" 0 $?
+printf '# Review\n\nREVIEW-END brief=ok spec=pass quality=approved ac=8/8\n' > "$RV/lost.md"
+bash .agy/review-pkg --check "$RV/lost.md" --ac 12 > "$TMP/rv-lost.log" 2>&1
+want "  and a table that lost rows fails" 1 $?
+has  "  saying rows went missing" "Rows went missing" "$TMP/rv-lost.log"
+
+# Absent is not zero. A reviewer that wrote no file at all must not be quieter
+# than one that wrote a bad one.
+bash .agy/review-pkg --check "$RV/never-written.md" > "$TMP/rv-none.log" 2>&1
+want "an absent review is its own exit code" 2 $?
+has  "  and is not read as a pass" "not a pass" "$TMP/rv-none.log"
+: > "$RV/empty.md"
+bash .agy/review-pkg --check "$RV/empty.md" >/dev/null 2>&1
+want "an empty review is treated as absent" 2 $?
+
+bash .agy/review-pkg --check >/dev/null 2>&1
+want "--check with no file is a usage error" 64 $?
+bash .agy/review-pkg --check "$RV/good.md" --ac twelve >/dev/null 2>&1
+want "--ac takes a number" 64 $?
 
 printf '\n=== idempotency ====================================================\n'
 printf '\n# EDITED BY THE USER\n' >> .agy/config
@@ -690,6 +1558,157 @@ printf '\n# EDITED BY THE USER\n' >> .agy/gates
 bash "$SKILL_DIR/scripts/install" >/dev/null 2>&1
 has "re-install keeps an edited config" "EDITED BY THE USER" .agy/config
 has "re-install keeps an edited gate runner" "EDITED BY THE USER" .agy/gates
+
+# ================================================================ version stamp
+printf '\n=== version stamp ==================================================\n'
+# Nothing in an installed repo used to record which version of the skill wrote
+# it, so a repo could not tell it was stale and a field report could not be
+# trusted to describe the current asset. Two reports arrived against this
+# harness describing behaviour fixed several versions earlier; establishing that
+# meant diffing their script against ours by line count, twice. The stamp turns
+# that into one line of a run banner.
+VER="$(sed -n 's/^version: *//p' "$SKILL_DIR/SKILL.md" | head -1)"
+[ -n "$VER" ] && ok "the skill declares a version" \
+	|| bad "the skill declares a version" "no version: line in SKILL.md"
+has   "the installed dispatch carries it" "AGY_SKILL_VERSION='$VER'" .agy/dispatch
+# The marker surviving means the file was copied by hand rather than installed,
+# which is the same class of problem one level down.
+hasnt "  and not the unsubstituted marker" "{{SKILL_VERSION}}" .agy/dispatch
+FAKE_ERROR=none AGY_SKIP_GATES=1 bash .agy/dispatch 9 >"$TMP/ver.log" 2>&1
+has   "a run banner names the version it is running" "agy-agents $VER" "$TMP/ver.log"
+
+# The installer's own account of what it just did. "Installed" and "upgraded"
+# are different facts and were previously both reported as silence.
+VF="$TMP/vstamp"
+mkdir -p "$VF/src"
+(
+	cd "$VF" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project VF >install1.log 2>&1
+) || bad "version fixture installs" "setup failed"
+has   "a first install says it is installing" "installing $VER" "$VF/install1.log"
+
+( cd "$VF" && bash "$SKILL_DIR/scripts/install" --project VF >install2.log 2>&1 )
+has   "a re-install of the same version says so" "reinstalling $VER" "$VF/install2.log"
+
+sed -i "s/^AGY_SKILL_VERSION='.*'/AGY_SKILL_VERSION='0.0.1'/" "$VF/.agy/dispatch"
+( cd "$VF" && bash "$SKILL_DIR/scripts/install" --project VF >install3.log 2>&1 )
+has   "an upgrade names both versions" "upgrading 0.0.1 → $VER" "$VF/install3.log"
+has   "  and the new stamp replaces the old" "AGY_SKILL_VERSION='$VER'" "$VF/.agy/dispatch"
+
+# A repo installed before stamping existed. It cannot report its version, and
+# saying that plainly is the whole point — an unknown version is not a current
+# one, the same way an absent measurement is not a zero.
+sed -i "/^AGY_SKILL_VERSION=/d" "$VF/.agy/dispatch"
+( cd "$VF" && bash "$SKILL_DIR/scripts/install" --project VF >install4.log 2>&1 )
+has   "an install over an unstamped copy says it is unstamped" \
+	"unstamped" "$VF/install4.log"
+
+# ================================================== config key migration
+printf '\n=== config key migration ===========================================\n'
+# "A config that exists is kept" is right about the values and wrong about the
+# keys. The four scripts ARE refreshed on every install, so a repo installed
+# before AGY_COAUTHOR existed got the trailer check and nothing to check
+# against — and an unset AGY_COAUTHOR means the check is off. The control
+# shipped, arrived, and did nothing, which is the one outcome worse than not
+# shipping it. Field reports from such a repo are indistinguishable from an
+# open flaw, because the fix is on disk and inert.
+MIG="$TMP/migrate"
+mkdir -p "$MIG/src"
+(
+	cd "$MIG" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project MIG >/dev/null 2>&1
+) || bad "migration fixture installs" "setup failed"
+
+# Forge the pre-1.8.4 config: the key and its comment paragraph gone, an edit of
+# the user's left behind to prove the append never touches what is above it.
+sed -i '/^# ---* attribution/,/^: "${AGY_COAUTHOR/d' "$MIG/.agy/config"
+printf '\n# EDITED BY THE USER\n' >> "$MIG/.agy/config"
+hasnt "an old config really lacks the key" "AGY_COAUTHOR" "$MIG/.agy/config"
+# And an old context has no trailer block either — a repo from before the rule
+# existed is missing both halves, which is what makes the next dispatch refuse.
+sed -i '/Co-Authored-By:/d' "$MIG/.agy/work/m1/dispatch-context.md"
+
+( cd "$MIG" && bash "$SKILL_DIR/scripts/install" --project MIG >"$TMP/mig1.log" 2>&1 )
+has "re-install adds a key the config never carried" \
+	'"${AGY_COAUTHOR=' "$MIG/.agy/config"
+has "  and says so, because a new key can turn a check on" \
+	"AGY_COAUTHOR" "$TMP/mig1.log"
+has "  keeps the paragraph that explains it" "BY EMAIL" "$MIG/.agy/config"
+has "  and leaves the user's own edits alone" "EDITED BY THE USER" "$MIG/.agy/config"
+# Turning the check on makes dispatch refuse until the context names the same
+# address. The context here was written before the key existed, so it does not
+# — and being told that by the next dispatch, in a repo where nothing about the
+# install looked like a rule change, is how a correct refusal reads as a broken
+# harness.
+has "  warns that the check is now ON" "co-author check is now ON" "$TMP/mig1.log"
+has "  and gives the line to paste"    "Co-Authored-By: Antigravity" "$TMP/mig1.log"
+
+# Idempotent, or the second install appends a duplicate binding of everything.
+( cd "$MIG" && bash "$SKILL_DIR/scripts/install" --project MIG >/dev/null 2>&1 )
+n="$(grep -c '^: "${AGY_COAUTHOR' "$MIG/.agy/config" 2>/dev/null || echo 0)"
+[ "$n" = 1 ] && ok "  a second re-install adds nothing" \
+	|| bad "  a second re-install adds nothing" "$n bindings of AGY_COAUTHOR"
+
+# An emptied value is a project switching the check off deliberately. Migrating
+# it "back" would silently re-enable a control someone turned off — the append
+# keys on whether the file NAMES the key, never on whether it has a value.
+sed -i 's/^: "${AGY_COAUTHOR=.*/: "${AGY_COAUTHOR=}"/' "$MIG/.agy/config"
+( cd "$MIG" && bash "$SKILL_DIR/scripts/install" --project MIG >"$TMP/mig2.log" 2>&1 )
+n="$(grep -c '^: "${AGY_COAUTHOR' "$MIG/.agy/config" 2>/dev/null || echo 0)"
+[ "$n" = 1 ] && ok "an opt-out survives re-install" \
+	|| bad "an opt-out survives re-install" "$n bindings — the opt-out was overwritten"
+has "  and is reported as off, not as a value" "check is OFF" "$TMP/mig2.log"
+
+# Install-time precedence. A maintainer with AGY_COAUTHOR exported installing
+# into somebody else's repo must not repoint that repo's committed context at
+# their own mailbox. The project decided; the export is one machine's habit.
+# Their export still wins at runtime, where the drift refusal stops them
+# dispatching against a rule the context does not carry.
+PREC="$TMP/precedence"
+mkdir -p "$PREC/src"
+(
+	cd "$PREC" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project PREC \
+		--coauthor 'Antigravity <theirs@example.test>' >/dev/null 2>&1
+	AGY_COAUTHOR='Antigravity <mine@example.test>' \
+		bash "$SKILL_DIR/scripts/install" --project PREC --milestone m2 \
+		>"$TMP/prec.log" 2>&1
+) || bad "precedence fixture installs" "setup failed"
+has "an existing config outranks the environment" \
+	"theirs@example.test" "$PREC/.agy/config"
+hasnt "  the export does not reach the config" \
+	"mine@example.test" "$PREC/.agy/config"
+# The milestone's fresh context is scaffolded by substitution, so it takes
+# whatever the installer resolved. Resolve it from the environment and the new
+# context names an address the config does not — the exact drift .agy/dispatch
+# refuses on, manufactured by the installer itself on a routine advance.
+has "  a new milestone's context takes the project's address" \
+	"theirs@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
+hasnt "  and not the installing machine's" \
+	"mine@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
+# --force regenerates scaffolding. Who gets credited on a contributor graph is
+# not scaffolding, and there is an explicit flag for changing it.
+( cd "$PREC" && bash "$SKILL_DIR/scripts/install" --project PREC --force >/dev/null 2>&1 )
+has "  --force does not silently repoint the credit" \
+	"theirs@example.test" "$PREC/.agy/config"
+( cd "$PREC" && bash "$SKILL_DIR/scripts/install" --project PREC \
+	--coauthor 'Antigravity <changed@example.test>' >"$TMP/prec2.log" 2>&1 )
+has "  --coauthor is what changes it" "changed@example.test" "$PREC/.agy/config"
+has "  and says which value moved"    "AGY_COAUTHOR: Antigravity <theirs@example.test> ->" \
+	"$TMP/prec2.log"
+# Moving one rendering and not the other manufactures the exact drift dispatch
+# refuses on. The trailer line came from our own template, so its shape is ours
+# to know and safe to rewrite; the rest of that file is the user's prose.
+has "  and carries the context with it" \
+	"changed@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
+hasnt "  leaving no stale address behind" \
+	"theirs@example.test" "$PREC/.agy/work/m2/dispatch-context.md"
 
 printf '\n=== adoption =======================================================\n'
 # Adopting a repo that already has its own gate runner is the path a real
@@ -721,6 +1740,277 @@ has "the dispatch template names the adopted runner" "scripts/gates" \
 	&& bad "adoption does not write a competing runner" "wrote .agy/gates anyway" \
 	|| ok "adoption does not write a competing runner"
 
+# ------------------------------------------------- and the documents it reads
+# The block above ranges over every file the installer *writes*. It stayed
+# green while five places in the skill's own documents told the controller to
+# run `.agy/gates` literally — because nothing ranged over what the controller
+# *reads*.
+#
+# `.agy/gates` exists only where the installer generated a starter suite. A
+# repo adopted by `--gates`, or by the auto-detect scan, binds AGY_GATES to
+# the runner it already had and deliberately writes no competing one, so the
+# literal path is a `No such file or directory` on every adopted repo, by
+# either route. The form that is correct in all of them resolves the config:
+# `( . .agy/config && bash $AGY_GATES )`.
+#
+# Every surviving mention is pinned below by a distinctive fragment of its own
+# line — each one is about the generated file specifically, or names the
+# fresh-install case in the same breath. A new mention matches no fragment
+# and fails here; a pinned line reworded out from under its fragment fails
+# too, and has to be re-justified rather than silently re-admitted. Same
+# bargain as the tripwire fingerprints: the churn is the point.
+printf '\n=== documentation ==================================================\n'
+
+GATES_PINS='
+SKILL.md|without `--force`
+README.md|the verification suite
+README.md|exit code is the number of FAILING gates
+README.md|&& git commit` works
+README.md|on a fresh install
+reference/install.md|a starter; make it real
+reference/install.md|now points at
+reference/protocol.md|exists only when the installer wrote
+'
+PINNED=0
+while IFS='|' read -r pin_file pin_frag; do
+	[ -n "$pin_file" ] || continue
+	PINNED=$((PINNED+1))
+	n_pin="$(grep -F -- '.agy/gates' "$SKILL_DIR/$pin_file" 2>/dev/null \
+		| grep -cF -- "$pin_frag")"
+	[ "${n_pin:-0}" = "1" ] \
+		&& ok "  pinned in $pin_file: $pin_frag" \
+		|| bad "  pinned in $pin_file: $pin_frag" \
+			"matched ${n_pin:-0} '.agy/gates' line(s), want exactly 1"
+done <<PINS
+$GATES_PINS
+PINS
+
+MENTIONS="$(cd "$SKILL_DIR" && grep -cF -- '.agy/gates' SKILL.md README.md reference/*.md 2>/dev/null \
+	| awk -F: '{s+=$2} END {print s+0}')"
+[ "$MENTIONS" = "$PINNED" ] \
+	&& ok "no unpinned '.agy/gates' anywhere in the skill's own documents" \
+	|| bad "no unpinned '.agy/gates' anywhere in the skill's own documents" \
+		"$MENTIONS mention line(s) against $PINNED pinned — a new one is a hardcoded path until it earns a pin"
+
+# The pin list alone is satisfied by deleting the recipes outright. These say
+# the resolving form is still there to be read, in each document that gives
+# the controller a gate command to run.
+for doc in SKILL.md README.md reference/dispatch-traps.md reference/protocol.md; do
+	has "  $doc resolves the runner through the config" \
+		'( . .agy/config && bash $AGY_GATES )' "$SKILL_DIR/$doc"
+done
+
+# =================================================== bench instrumentation
+printf '\n=== bench instrumentation ==========================================\n'
+
+# A normal committing run must leave its measurements on disk, not just on
+# screen. Everything downstream reads the .class sidecar; a number that is only
+# printed is a number the dashboard has to invent.
+#
+# This section sits *above* the milestone tests on purpose. Those tests end by
+# appending a raw `AGY_WORKSPACE=.agy/work/mX` to .agy/config to exercise the
+# COULD NOT REPOINT path — a plain assignment, not the `:=` form, so it wins
+# over the environment for every dispatch that runs after it, and mX has no
+# task file. Run below them, this section's dispatch dies before writing
+# anything, and `ls -t` over an older milestone's logs hands the assertions a
+# .class from an unrelated earlier run — one that now carries every key they
+# look for. Green, and measuring nothing.
+#
+# The two guards that keep it honest: a private workspace whose logs directory
+# starts empty, so the file read back can only be the one this run wrote; and
+# an exit-code check, so a run that never happened cannot be scored on a
+# leftover.
+BWS=".agy/work/mbench"
+rm -rf "${REPO:?}/$BWS"
+mkdir -p "$REPO/$BWS/logs"
+#
+# A private workspace has to be scaffolded like a real one, not merely be a
+# directory with a task file in it. Three things gate a dispatch before the
+# model is ever launched, and all three are workspace-relative:
+#   task-N-dispatch.md   — absent, and there is no task to run
+#   dispatch-context.md  — refused when it still carries {{...}}, and refused
+#                          just as hard when it is absent
+#   progress.md          — $AGY_LEDGER, a guarded file; the fence will not arm
+#                          over a guard that points at nothing, so a workspace
+#                          without a ledger cannot dispatch at all
+#   dispatch-context.md  — refused a third way when it does not carry the
+#                          co-author .agy/config wants, which a hand-written
+#                          context like this one has to state explicitly. That
+#                          is not an inconvenience of the fixture; it is the
+#                          drift refusal doing its job on the exact case it
+#                          exists for — a context written by something other
+#                          than the installer.
+printf '# Task 1\nExecute the task.\n' > "$REPO/$BWS/task-1-dispatch.md"
+printf '# context\nBuild the thing. Gates are authoritative.\n\nCo-Authored-By: %s\n' \
+	"$GOOD_CA" > "$REPO/$BWS/dispatch-context.md"
+printf '# ledger\n\n(bench instrumentation run)\n' > "$REPO/$BWS/progress.md"
+# AGY_SKIP_GATES=1 for the same reason every other clean-run test here sets it:
+# the fixture has no toolchain, so the generated .agy/gates is TODO comments,
+# and dispatch calls an ungated run a hard failure rather than a pass. That is
+# the behaviour under test elsewhere; here it would only stop the run before it
+# could be measured. The keys this section reads are appended after the gate
+# step regardless of how the gates went, so skipping them removes a failure
+# without removing any of the instrumentation being asserted.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 \
+		FAKE_TOUCH="src/bench1.txt" FAKE_COMMIT=1 FAKE_ERROR=none FAKE_USAGE=1 \
+		bash .agy/dispatch 1 > "$TMP/b1.log" 2>&1
+)
+brc=$?
+want "the instrumented run exits clean" 0 "$brc"
+# A failed run here is scored on what it did not write, so say why it failed
+# rather than leaving seven assertions to report the same silence.
+if [ "$brc" -ne 0 ]; then
+	sed -n '1,20p' "$TMP/b1.log" 2>/dev/null | sed 's/^/        | /'
+	awk '/--- gates/,0' "$TMP/b1.log" 2>/dev/null | sed 's/^/        | /'
+fi
+
+# Every assertion below reads $BCLASS. With no file, `basename ""` turns each
+# failure into the same truncated sentence about nothing, so the block is
+# guarded and the absence is reported once, as itself.
+BCLASS="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -z "$BCLASS" ]; then
+	bad "instrumented run wrote a .class" "none found — the measurement assertions cannot run"
+else
+	ok "instrumented run wrote a .class"
+	hasval "  records wall seconds"      wall         "$BCLASS"
+	hasval "  records total tokens"      tokens_total "$BCLASS"
+	hasval "  records input tokens"      tokens_in    "$BCLASS"
+	hasval "  records output tokens"     tokens_out   "$BCLASS"
+	hasval "  records thinking tokens"   tokens_think "$BCLASS"
+	# Presence is not enough: a writer that puts the right numbers behind the
+	# wrong keys is invisible to four independent non-empty checks. Read all
+	# four at once and compare against what the stub actually reported.
+	btok="$(class_val "$BCLASS" tokens_in)/$(class_val "$BCLASS" tokens_out)"
+	btok="$btok/$(class_val "$BCLASS" tokens_think)/$(class_val "$BCLASS" tokens_total)"
+	if [ "$btok" = "13571/24680/31415/69666" ]; then
+		ok "  records each count against its own key"
+	else
+		bad "  records each count against its own key" "in/out/think/total read '$btok'"
+	fi
+	has "  records the commit count" "commits=1" "$BCLASS"
+	hasval "  records the commit range" range "$BCLASS"
+	if grep -qE '^range=[0-9a-f]{40}\.\.[0-9a-f]{40}$' "$BCLASS" 2>/dev/null; then
+		ok "  records the range as two resolved heads"
+	else
+		bad "  records the range as two resolved heads" "range=$(class_val "$BCLASS" range)"
+	fi
+fi
+
+# The other half of the contract, and it needs its own run: a measurement that
+# never arrived must be recorded as absent, not as a zero the harness invented.
+# This run reports no usage at all and lands no commit, so the only honest
+# sidecar has empty token keys, an empty range, and — because both heads
+# resolved and matched — a commits count of exactly 0.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=none \
+		bash .agy/dispatch 1 > "$TMP/b2.log" 2>&1
+)
+brc=$?
+want "the run that measures nothing still exits clean" 0 "$brc"
+if [ "$brc" -ne 0 ]; then sed -n '1,20p' "$TMP/b2.log" 2>/dev/null | sed 's/^/        | /'; fi
+
+BCLASS2="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -z "$BCLASS2" ]; then
+	bad "the measureless run wrote a .class" "none found"
+else
+	ok "the measureless run wrote a .class"
+	noval "  leaves an unreported token count empty, not 0" tokens_total "$BCLASS2"
+	noval "  leaves every token key empty, not 0"           tokens_in    "$BCLASS2"
+	# Partial, not absent: the wall clock is ours to measure and it is still
+	# there. A run with no usage is not a run with no measurements.
+	hasval "  still records the wall clock"                 wall         "$BCLASS2"
+	has   "  records a measured zero as 0"     "commits=0" "$BCLASS2"
+	noval "  leaves the range empty when nothing landed" range "$BCLASS2"
+fi
+
+# And the third state, which is neither. When the run rewrites history the
+# pre-run head is no longer an ancestor of HEAD, so nothing can count what
+# landed. That is not a zero, and writing it as one would tell every reader
+# downstream that a run which may have committed a dozen times committed none.
+# The fence refuses the run (exit 4) — a rewritten history is a guarded
+# surface — but the sidecar is written before the verdict and has to be honest
+# about what it could not see.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=none FAKE_REWRITE=1 \
+		bash .agy/dispatch 1 > "$TMP/b3.log" 2>&1
+)
+brc=$?
+want "a run that rewrites history is refused by the fence" 4 "$brc"
+
+BCLASS3="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -z "$BCLASS3" ]; then
+	bad "the history-rewriting run wrote a .class" "none found"
+else
+	ok "the history-rewriting run wrote a .class"
+	noval "  leaves an uncountable commit count empty, not 0" commits "$BCLASS3"
+	noval "  leaves the range empty when it cannot be measured" range "$BCLASS3"
+fi
+
+# What landed is a property of the RUN, not of an attempt: it is counted once,
+# after the fence, over the whole tree. A fallback leaves two sidecars behind
+# and both describe the same run, so both carry the same answer. Written against
+# the deciding attempt alone, the first attempt's .class has the keys missing
+# entirely — a third state, neither a count nor an empty one, that no reader
+# downstream is built to expect.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_ERROR=long AGY_FALLBACK=auto \
+		bash .agy/dispatch 1 > "$TMP/b4.log" 2>&1
+)
+brc=$?
+want "the fallback run exits clean" 0 "$brc"
+
+BRESERVE="$(ls -t "$REPO/$BWS"/logs/*.reserve.class 2>/dev/null | head -1)"
+BFIRST="${BRESERVE%.reserve.class}.class"
+if [ -z "$BRESERVE" ] || [ ! -f "$BFIRST" ]; then
+	bad "the fallback run wrote both attempts' sidecars" "reserve='${BRESERVE:-<none>}'"
+else
+	ok "the fallback run wrote both attempts' sidecars"
+	has "  the deciding attempt records what landed"  "commits=0" "$BRESERVE"
+	has "  the abandoned attempt records it as well"  "commits=0" "$BFIRST"
+	noval "  and both agree the range is empty"       range       "$BFIRST"
+fi
+
+# read_class takes the FIRST line matching a key, so a value carrying a newline
+# does not corrupt its own row — it inserts rows ABOVE the genuine ones and wins.
+# `status` is the vector because it comes straight off the agy stream, and the
+# keys it can forge are now wall and the token counts, which is everything the
+# benchmark reads. The run itself fails (the status is not SUCCESS), which is
+# beside the point: the sidecar is written either way.
+(
+	cd "$REPO" || exit 1
+	AGY_WORKSPACE="$BWS" AGY_SKIP_GATES=1 FAKE_INJECT=1 \
+		bash .agy/dispatch 1 > "$TMP/b5.log" 2>&1
+)
+brc=$?
+want "a run reporting a forged status is not SUCCESS" 1 "$brc"
+
+BCLASS5="$(ls -t "$REPO/$BWS"/logs/*.class 2>/dev/null | head -1)"
+if [ -z "$BCLASS5" ]; then
+	bad "the forging run wrote a .class" "none found"
+else
+	ok "the forging run wrote a .class"
+	if [ "$(grep -c '^wall=' "$BCLASS5" 2>/dev/null)" = "1" ]; then
+		ok "  one wall= row, not the forged one plus the real one"
+	else
+		bad "  one wall= row, not the forged one plus the real one" \
+			"$(grep -c '^wall=' "$BCLASS5" 2>/dev/null) rows begin with wall="
+	fi
+	if [ "$(class_val "$BCLASS5" wall)" = "999999" ]; then
+		bad "  the wall clock read back is the measured one" "read back the forged 999999"
+	else
+		ok "  the wall clock read back is the measured one"
+	fi
+	# The forged text is not deleted — a sanitiser that drops evidence is its own
+	# problem. It stays on the row it was written to, flattened onto one line.
+	has   "  the forged text stays inside its own value" "status=SUCCESS wall=999999" "$BCLASS5"
+	no_cr "  and no carriage return survives into the file" "$BCLASS5"
+fi
+
 printf '\n=== milestone advance ==============================================\n'
 # A project outlives the milestone it was installed on. Passing --milestone used
 # to scaffold the new workspace and change nothing else: the adoption scan
@@ -743,6 +2033,13 @@ ws="$(unset AGY_WORKSPACE; . ./.agy/config >/dev/null 2>&1; printf '%s' "${AGY_W
 	|| bad "repoints AGY_WORKSPACE at it" "config still resolves to '${ws:-<empty>}'"
 has "  says so out loud"           "repoint"            "$TMP/m1.log"
 has "  offers the context carry-over" "dispatch-context.md" "$TMP/m1.log"
+# The new milestone's context is scaffolded from the template, and a context
+# that does not name the co-author is one dispatch refuses to run against. So
+# the substitution has to survive every path that writes that file, not only
+# first install — otherwise advancing a milestone would brick the project until
+# somebody hand-edited a file they were never told about.
+has "  the new context still carries the co-author" \
+	"antigravity@antigravity.invalid" .agy/work/m2/dispatch-context.md
 
 # The repoint edits one line. If it regenerated the config instead it would take
 # the gates, the models and the project environment with it — which is exactly

@@ -37,7 +37,11 @@ Omit if none.}}
 1. {{numbered, concrete}}
 2. …
 
-**Acceptance criteria:**
+**Acceptance criteria** — report every one of these back, by number. Dropping a
+row is not an available option: a criterion you did not meet is reported **NOT
+MET, with a reason**, which is information. A missing row is the absence of it,
+and the reader cannot see what is not there. Do not reword a criterion to match
+what you built.
 - {{specific, checkable}}
 - …
 
