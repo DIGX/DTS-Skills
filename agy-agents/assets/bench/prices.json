@@ -1,0 +1,53 @@
+{
+  "_comment": "USD per million tokens. List prices, not what a subscription bills. Every rate carries the page it came from and the date it was read; anything marked inferred has not been seen on a vendor page and should be checked before a dollar figure is quoted from it.",
+  "_updated": "2026-08-21",
+  "_assumptions": [
+    "Standard tier only. Batch and flex halve these rates, priority raises them, and a regional endpoint adds ten percent.",
+    "Gemini prices at the <=200k-token rate. The higher long-context rate is real, but it keys on the size of one prompt and the agy sidecar records only a run total, so it cannot be applied to the agy arm the way it could to the Claude arm. Applying it to one arm and not the other would be worse than applying it to neither.",
+    "Gemini's per-hour cache storage price is not modelled. agy reports no cache tokens at all, so the fields below are unexercised.",
+    "Thinking tokens are not priced separately. Both vendors report them inside output: Anthropic as a breakdown of output_tokens, Google in a table row headed 'Output price (including thinking tokens)'.",
+    "Anthropic cache writes are priced by lifetime — 1.25x input for five minutes, 2x for an hour. Claude Code writes hour-long entries, so cache_write_1h is the rate that usually applies."
+  ],
+  "models": {
+    "claude-opus-5": {
+      "in": 5.00, "out": 25.00,
+      "cache_read": 0.50, "cache_write": 6.25, "cache_write_1h": 10.00,
+      "source": "platform.claude.com pricing, read 2026-08-21"
+    },
+    "claude-opus-4-6": {
+      "in": 5.00, "out": 25.00,
+      "cache_read": 0.50, "cache_write": 6.25, "cache_write_1h": 10.00,
+      "source": "inferred 2026-08-21: no page for 4.6, and the Opus line held 5/25 from 4.5 through 5. This is the skill's default reserve model, so a null here would empty the cost panel; check it before quoting a figure."
+    },
+    "claude-sonnet-5": {
+      "in": 2.00, "out": 10.00,
+      "cache_read": 0.20, "cache_write": 2.50, "cache_write_1h": 4.00,
+      "source": "platform.claude.com pricing, read 2026-08-21 — the introductory rate became standard; the 3/15 rise planned for 2026-09-01 was cancelled"
+    },
+    "claude-haiku-4-5": {
+      "in": 1.00, "out": 5.00,
+      "cache_read": 0.10, "cache_write": 1.25, "cache_write_1h": 2.00,
+      "source": "platform.claude.com pricing, read 2026-08-21"
+    },
+    "claude-fable-5": {
+      "in": 10.00, "out": 50.00,
+      "cache_read": 1.00, "cache_write": 12.50, "cache_write_1h": 20.00,
+      "source": "platform.claude.com pricing, read 2026-08-21"
+    },
+    "gemini-3.7-flash": {
+      "in": 0.75, "out": 3.75,
+      "cache_read": 0.075, "cache_write": 0.75, "cache_write_1h": 0.75,
+      "source": "ai.google.dev pricing, read 2026-08-21 — introductory rate, expires 2026-12-31, after which 1.50/7.50 applies. This is the skill's default model."
+    },
+    "gemini-3-flash": {
+      "in": 0.50, "out": 3.00,
+      "cache_read": 0.05, "cache_write": 0.50, "cache_write_1h": 0.50,
+      "source": "ai.google.dev pricing (3 Flash Preview, standard), read 2026-08-21"
+    },
+    "gemini-3.1-pro": {
+      "in": 2.00, "out": 12.00,
+      "cache_read": 0.20, "cache_write": 2.00, "cache_write_1h": 2.00,
+      "source": "ai.google.dev pricing (3.1 Pro Preview, standard, <=200k), read 2026-08-21"
+    }
+  }
+}

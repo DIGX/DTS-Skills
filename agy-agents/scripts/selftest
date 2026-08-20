@@ -2654,6 +2654,208 @@ if (turns.length !== 0) throw new Error("turns: " + turns.length);
 ' "$BENCH" "$TMP/claudeproj" > "$TMP/cempty.log" 2>&1
 want "  but an empty project directory is simply no turns" 0 $? "$(head -3 "$TMP/cempty.log")"
 
+# ========================================================== bench: git and cost
+printf '\n=== bench: git and cost ============================================\n'
+GREPO="$TMP/costrepo"
+rm -rf "$GREPO"; mkdir -p "$GREPO"
+(
+	cd "$GREPO" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'one\n' > a.txt && git add -A && git commit -qm first
+	printf 'one\ntwo\nthree\n' > a.txt && git add -A && git commit -qm second
+) >/dev/null 2>&1 || bad "cost fixture repo" "setup failed"
+
+node -e '
+const {numstat} = require(process.argv[1] + "/lib/gitwork.js");
+const repo = process.argv[2];
+const {execFileSync} = require("child_process");
+const head = execFileSync("git", ["rev-parse", "HEAD"], {cwd: repo}).toString().trim();
+const base = execFileSync("git", ["rev-parse", "HEAD~1"], {cwd: repo}).toString().trim();
+const r = numstat(base + ".." + head, repo);
+if (r.commits !== 1) throw new Error("commits: " + r.commits);
+if (r.insertions < 1) throw new Error("insertions: " + r.insertions);
+if (r.measured !== true) throw new Error("a range git resolved must be measured");
+const empty = numstat("", repo);
+if (empty.measured !== false) throw new Error("an empty range is not a measurement");
+const bogus = numstat("nope..nope", repo);
+if (bogus.measured !== false) throw new Error("a bad range must not throw, and must not measure");
+' "$BENCH" "$GREPO" > "$TMP/git.log" 2>&1
+want "gitwork: numstat, empty range, bad range" 0 $? "$(head -3 "$TMP/git.log")"
+
+# .agy/solo already wrote this rule down, about this exact quantity: a rewritten
+# history is not zero commits, it is a range nothing can measure, and recording
+# it as 0 tells every reader that a session which may have committed a dozen
+# times committed none. The reader has to carry the same distinction the writer
+# does, or the writer's care is discarded one module downstream.
+node -e '
+const {numstat} = require(process.argv[1] + "/lib/gitwork.js");
+const bogus = numstat("nope..nope", process.argv[2]);
+if (bogus.commits === 0) throw new Error("an unresolvable range read as zero commits landed");
+if (bogus.commits !== null || bogus.insertions !== null || bogus.deletions !== null)
+  throw new Error("counts must be null, got " + JSON.stringify(bogus));
+if (!bogus.reason) throw new Error("nothing said why it could not be measured");
+const empty = numstat("", process.argv[2]);
+if (empty.commits !== null) throw new Error("an absent range read as zero commits landed");
+' "$BENCH" "$GREPO" > "$TMP/gitnull.log" 2>&1
+want "gitwork does not report an unmeasurable range as zero work" 0 $? "$(head -3 "$TMP/gitnull.log")"
+
+# The failure mode this one guards is not an error. `git log --numstat
+# --format=%H --all` succeeds, and hands one task the entire history of the
+# repository. A wrong answer that large arrives with no exit code to notice it.
+node -e '
+const {numstat} = require(process.argv[1] + "/lib/gitwork.js");
+const {execFileSync} = require("child_process");
+const repo = process.argv[2];
+const all = Number(execFileSync("git", ["rev-list", "--count", "--all"], {cwd: repo}).toString().trim());
+if (all < 2) throw new Error("fixture has no history to mis-attribute");
+const r = numstat("--all", repo);
+if (r.commits === all) throw new Error("--all attributed the whole repository (" + all + " commits) to one task");
+if (r.measured !== false) throw new Error("--all was accepted as a range");
+if (!/range/.test(r.reason)) throw new Error("reason: " + r.reason);
+' "$BENCH" "$GREPO" > "$TMP/gitdash.log" 2>&1
+want "  and a range that is not one is refused, not run" 0 $? "$(head -3 "$TMP/gitdash.log")"
+
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const tk = {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0};
+const known = priceOf("claude-opus-5", tk, p);
+if (!known.priced) throw new Error("claude-opus-5 must be priced");
+if (typeof known.usd !== "number" || known.usd <= 0) throw new Error("usd: " + known.usd);
+const cheap = priceOf("claude-opus-5", {in: 0, out: 0, think: 0, cache_read: 1e6, cache_write: 0}, p);
+if (!(cheap.usd < known.usd)) throw new Error("a cache read must cost less than fresh input");
+const unknown = priceOf("some-model-9", tk, p);
+if (unknown.priced !== false || unknown.usd !== null)
+  throw new Error("an unknown model must be null, not zero");
+' "$BENCH" > "$TMP/cost.log" 2>&1
+want "cost: known, cache discount, unknown-is-null" 0 $? "$(head -3 "$TMP/cost.log")"
+
+# The two model ids are read out of .agy/dispatch rather than written here, so
+# changing a default without adding its rate fails this row instead of shipping
+# a cost panel that is null for every run of the arm being measured.
+DEF_MODEL="$(sed -n 's/^: "${AGY_MODEL:=\(.*\)}"$/\1/p' "$SKILL_DIR/assets/dispatch")"
+DEF_RESERVE="$(sed -n 's/^: "${AGY_FALLBACK_MODEL:=\(.*\)}"$/\1/p' "$SKILL_DIR/assets/dispatch")"
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const tk = {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0};
+for (const m of process.argv.slice(2)) {
+  if (!m) throw new Error("could not read a default model out of dispatch");
+  const r = priceOf(m, tk, p);
+  if (!r.priced) throw new Error(m + " is a shipped default and prices to null");
+  if (!(r.usd > 0)) throw new Error(m + " usd: " + r.usd);
+  if (!r.source) throw new Error(m + " is priced with no stated source");
+}
+' "$BENCH" "$DEF_MODEL" "$DEF_RESERVE" > "$TMP/costdef.log" 2>&1
+want "cost prices the models agy actually defaults to" 0 $? "$(head -3 "$TMP/costdef.log")"
+
+# Both tables hold the same two rates and differ only in which line was typed
+# first. If the answer moves, the rate a run is billed at is decided by JSON
+# authoring order.
+node -e '
+const {priceOf} = require(process.argv[1] + "/lib/cost.js");
+const broad = {in: 99, out: 0, cache_read: 0, cache_write: 0, source: "x"};
+const exact = {in: 1, out: 0, cache_read: 0, cache_write: 0, source: "x"};
+const a = {models: {"gemini-3": broad, "gemini-3.7-flash": exact}};
+const b = {models: {"gemini-3.7-flash": exact, "gemini-3": broad}};
+const tk = {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0};
+const ua = priceOf("gemini-3.7-flash-high", tk, a).usd;
+const ub = priceOf("gemini-3.7-flash-high", tk, b).usd;
+if (ua !== ub) throw new Error("key order decided the rate: " + ua + " vs " + ub);
+if (ua !== 1) throw new Error("the broader prefix won: " + ua);
+' "$BENCH" > "$TMP/costpfx.log" 2>&1
+want "  by the longest matching prefix, not the first key written" 0 $? "$(head -3 "$TMP/costpfx.log")"
+
+# Anthropic bills a five-minute cache write at 1.25x input and a one-hour write
+# at 2x. Every cache write in this project is a one-hour write — 4,411,940
+# tokens of them against zero five-minute ones — and cache writes are about half
+# the Claude arm's notional cost, so one rate for both understates the arm the
+# benchmark is comparing against by roughly a fifth.
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const base = {in: 0, out: 0, think: 0, cache_read: 0, cache_write: 1e6};
+const m5 = priceOf("claude-opus-5", base, p);
+const h1 = priceOf("claude-opus-5", Object.assign({}, base, {cache_write_1h: 1e6}), p);
+if (!(h1.usd > m5.usd)) throw new Error("an hour-long cache write cost no more than a five-minute one");
+if (m5.usd !== 6.25) throw new Error("five-minute write: " + m5.usd);
+if (h1.usd !== 10) throw new Error("one-hour write: " + h1.usd);
+const half = priceOf("claude-opus-5", Object.assign({}, base, {cache_write_1h: 5e5}), p);
+if (half.usd !== 8.125) throw new Error("a half-and-half write: " + half.usd);
+' "$BENCH" > "$TMP/costttl.log" 2>&1
+want "cost charges a one-hour cache write at the one-hour rate" 0 $? "$(head -3 "$TMP/costttl.log")"
+
+# And the rate is only reachable if the reader carries the split through.
+TTLP="$TMP/ttlproj/d--Ttl-Repo"
+rm -rf "$TMP/ttlproj"; mkdir -p "$TTLP"
+node -e '
+const fs = require("fs");
+fs.writeFileSync(process.argv[1] + "/s.jsonl", JSON.stringify({
+  type: "assistant", timestamp: "2026-08-14T10:00:00Z", isSidechain: false,
+  sessionId: "s1",
+  message: {id: "t1", model: "claude-opus-5", usage: {
+    input_tokens: 10, output_tokens: 20,
+    cache_read_input_tokens: 0, cache_creation_input_tokens: 500,
+    cache_creation: {ephemeral_1h_input_tokens: 400, ephemeral_5m_input_tokens: 100}}}}) + "\n");
+' "$TTLP"
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const t = readTurns(process.argv[2], "d--Ttl-Repo")[0];
+if (t.tokens.cache_write !== 500) throw new Error("cache_write: " + t.tokens.cache_write);
+if (t.tokens.cache_write_1h !== 400) throw new Error("cache_write_1h: " + t.tokens.cache_write_1h);
+const s = summarise([t], 600);
+if (s.main.cache_write_1h !== 400) throw new Error("the split did not survive summarise");
+' "$BENCH" "$TMP/ttlproj" > "$TMP/ttlread.log" 2>&1
+want "  and claude.js reports the hour-long writes separately" 0 $? "$(head -3 "$TMP/ttlread.log")"
+
+# Thinking is 39.2% of this project's output tokens. Both vendors report it as a
+# breakdown of output rather than beside it — Google's table row is labelled
+# "Output price (including thinking tokens)" — so charging it again adds two
+# fifths to one arm's output bill. The parameter is accepted and deliberately
+# unused, which reads as an oversight to anyone who has not been told otherwise.
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const plain = {in: 0, out: 1e6, think: 0, cache_read: 0, cache_write: 0};
+const a = priceOf("claude-opus-5", plain, p);
+const b = priceOf("claude-opus-5", Object.assign({}, plain, {think: 1e6}), p);
+if (a.usd !== b.usd) throw new Error("thinking was charged on top of output: " + a.usd + " vs " + b.usd);
+if (a.usd !== 25) throw new Error("output usd: " + a.usd);
+' "$BENCH" > "$TMP/costthink.log" 2>&1
+want "cost does not charge thinking tokens twice" 0 $? "$(head -3 "$TMP/costthink.log")"
+
+# One token of opus-5 input is $0.000005. Rounded to four places at the point of
+# pricing it is $0, and a thousand such runs sum to nothing at all. Rounding is
+# a thing a view does, once, to a number it is about to print.
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const one = {in: 1, out: 0, think: 0, cache_read: 0, cache_write: 0};
+let sum = 0;
+for (let i = 0; i < 1000; i++) sum += priceOf("claude-opus-5", one, p).usd;
+if (!(sum > 0)) throw new Error("a thousand priced runs summed to " + sum);
+const once = priceOf("claude-opus-5", {in: 1000, out: 0, think: 0, cache_read: 0, cache_write: 0}, p).usd;
+if (Math.abs(sum - once) > 1e-9) throw new Error("summed " + sum + ", but the same tokens priced at once are " + once);
+' "$BENCH" > "$TMP/costround.log" 2>&1
+want "cost does not round a small run away" 0 $? "$(head -3 "$TMP/costround.log")"
+
+# 28 turns per project carry model "<synthetic>" — Claude Code writing down its
+# own interrupts and errors — with every count zero. Zero tokens have a cost
+# that needs no rate. Reserving null for the case where there are tokens and no
+# rate is what keeps a null meaning "nobody knows" rather than "nothing here".
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const nothing = {in: 0, out: 0, think: 0, cache_read: 0, cache_write: 0};
+const free = priceOf("<synthetic>", nothing, p);
+if (free.priced !== true || free.usd !== 0)
+  throw new Error("a turn that spent nothing priced as unpriceable: " + JSON.stringify(free));
+const spent = priceOf("<synthetic>", {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0}, p);
+if (spent.priced !== false || spent.usd !== null)
+  throw new Error("an unknown model that spent tokens must stay null: " + JSON.stringify(spent));
+' "$BENCH" > "$TMP/costzero.log" 2>&1
+want "an unknown model that spent nothing costs nothing" 0 $? "$(head -3 "$TMP/costzero.log")"
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

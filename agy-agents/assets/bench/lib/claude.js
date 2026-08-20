@@ -91,6 +91,13 @@ function readTurns(projectsDir, slug) {
 			if (!u) continue;
 			const ts = Date.parse(j.timestamp);
 			if (!Number.isFinite(ts)) continue;
+			// Anthropic bills a cache write by its lifetime: 1.25x input for
+			// five minutes, 2x for an hour. Claude Code writes hour-long
+			// entries — 4,411,940 of these tokens against zero five-minute ones
+			// across this project — and cache writes are about half the arm's
+			// notional cost, so a reader that drops the breakdown makes the
+			// hour rate unreachable and understates the arm by about a fifth.
+			const cc = u.cache_creation || null;
 			turns.push({
 				ts,
 				id: (m && m.id) || null,
@@ -103,6 +110,7 @@ function readTurns(projectsDir, slug) {
 					think: (u.output_tokens_details && u.output_tokens_details.thinking_tokens) || 0,
 					cache_read: u.cache_read_input_tokens || 0,
 					cache_write: u.cache_creation_input_tokens || 0,
+					cache_write_1h: (cc && cc.ephemeral_1h_input_tokens) || 0,
 				},
 			});
 		}
@@ -113,7 +121,7 @@ function readTurns(projectsDir, slug) {
 }
 
 function blank() {
-	return { turns: 0, in: 0, out: 0, think: 0, cache_read: 0, cache_write: 0 };
+	return { turns: 0, in: 0, out: 0, think: 0, cache_read: 0, cache_write: 0, cache_write_1h: 0 };
 }
 
 function summarise(turns, gapS) {
@@ -127,6 +135,7 @@ function summarise(turns, gapS) {
 		bucket.think += t.tokens.think;
 		bucket.cache_read += t.tokens.cache_read;
 		bucket.cache_write += t.tokens.cache_write;
+		bucket.cache_write_1h += t.tokens.cache_write_1h || 0;
 	}
 	const stamps = turns.map(t => t.ts);
 	return {
