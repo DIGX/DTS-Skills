@@ -2357,6 +2357,174 @@ for badgap in NaN 0 -1 undefined '"600"'; do
 	want "  clip refuses an unusable idle gap: $badgap" 0 $? "$(head -2 "$TMP/clipgap.log")"
 done
 
+# ============================================================ bench: agy reader
+printf '\n=== bench: agy reader ==============================================\n'
+FIX="$TMP/fixlogs"
+rm -rf "$FIX"; mkdir -p "$FIX"
+
+# A fully instrumented run.
+cat > "$FIX/task-7-20260814-100000.class" <<'CLS'
+quota=none
+tools=24
+status=success
+killed=0
+idle=0
+deferred=0
+wall=412
+tokens_in=1200
+tokens_out=800
+tokens_think=100
+tokens_total=2100
+model=gemini-3-pro
+commits=1
+range=aaaa..bbbb
+raw=
+CLS
+printf '{"event":"init"}\n' > "$FIX/task-7-20260814-100000.ndjson"
+
+# A run logged before the instrumentation existed. It is a real run and must be
+# counted, but its missing numbers must never read as zero.
+cat > "$FIX/task-6-20260813-090000.class" <<'CLS'
+quota=none
+tools=9
+status=success
+killed=0
+idle=0
+deferred=0
+raw=
+CLS
+printf '{"event":"init"}\n' > "$FIX/task-6-20260813-090000.ndjson"
+
+# A deferred run: its stream is truncated by definition, and it did real work.
+# Skipping it would undercount exactly the longest runs.
+cat > "$FIX/task-8-20260814-110000.class" <<'CLS'
+quota=none
+tools=31
+status=
+killed=0
+idle=1
+deferred=1
+wall=900
+tokens_in=5
+tokens_out=5
+tokens_think=0
+tokens_total=10
+model=gemini-3-pro
+commits=1
+range=cccc..dddd
+raw=
+CLS
+printf '{"event":"init"\n' > "$FIX/task-8-20260814-110000.ndjson"
+
+# A stream whose parser never finished, so no sidecar exists. This is the only
+# genuine "not measured" case.
+printf '{"event":"init"}\n' > "$FIX/task-9-20260814-120000.ndjson"
+
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const {runs, skipped} = readRuns(process.argv[2]);
+const by = t => runs.find(r => r.task === t);
+if (runs.length !== 3) throw new Error("runs: " + runs.length);
+const a = by("task-7");
+if (a.quality !== "full") throw new Error("task-7 quality " + a.quality);
+if (a.wall !== 412 || a.tokens.total !== 2100 || a.tools !== 24) throw new Error("task-7 numbers");
+if (a.commits !== 1 || a.range !== "aaaa..bbbb") throw new Error("task-7 git");
+if (a.arm !== "agy") throw new Error("task-7 arm");
+const b = by("task-6");
+if (b.quality !== "partial") throw new Error("task-6 must be partial, got " + b.quality);
+if (b.wall !== null || b.tokens.total !== null) throw new Error("task-6 must not read as zero");
+const c = by("task-8");
+if (!c) throw new Error("deferred run was dropped");
+if (c.status !== "deferred") throw new Error("task-8 status " + c.status);
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+if (!/task-9/.test(skipped[0].path)) throw new Error("wrong skip");
+' "$BENCH" "$FIX" > "$TMP/agyread.log" 2>&1
+want "agy reader: full, partial, deferred, skipped" 0 $? "$(head -3 "$TMP/agyread.log")"
+
+# The solo arm goes through the same reader, or the two arms drift apart.
+cat > "$FIX/solo-task-4-20260814-130000.class" <<'CLS'
+arm=solo
+task=task-4
+started=1786000000
+head=aaaa
+status=success
+ended=1786001000
+wall=1000
+commits=1
+range=aaaa..eeee
+CLS
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const r = readRuns(process.argv[2]).runs.find(x => x.arm === "solo");
+if (!r) throw new Error("solo run not read");
+if (r.task !== "task-4" || r.wall !== 1000 || r.commits !== 1) throw new Error("solo fields");
+if (r.tokens.total !== null) throw new Error("solo tokens come from Claude, not here");
+' "$BENCH" "$FIX" > "$TMP/soloread.log" 2>&1
+want "agy reader reads the solo arm too" 0 $? "$(head -3 "$TMP/soloread.log")"
+
+# An open bracket is a task still being worked on. Counted as a run it reports
+# as finished in whatever time has passed so far, which is not a measurement of
+# anything. The reader has always had this rule; nothing exercised it.
+OPENFIX="$TMP/fixopen"
+rm -rf "$OPENFIX"; mkdir -p "$OPENFIX"
+cat > "$OPENFIX/solo-task-5-20260814-140000.class" <<'CLS'
+arm=solo
+task=task-5
+started=1786000000
+head=aaaa
+status=open
+CLS
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const {runs, skipped} = readRuns(process.argv[2]);
+if (runs.length !== 0) throw new Error("an open bracket was counted as a run");
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+if (!/solo --done/.test(skipped[0].reason)) throw new Error("skip reason does not say how to close it: " + skipped[0].reason);
+' "$BENCH" "$OPENFIX" > "$TMP/openread.log" 2>&1
+want "agy reader skips a solo bracket still open" 0 $? "$(head -3 "$TMP/openread.log")"
+
+# The shell reads these files with class_val(), which is `head -1`: first match
+# wins. A JS reader that took the last value would disagree with every shell
+# caller about the same bytes on disk — and the record it disagrees about is
+# exactly the one 1.8.16's solo close path exists to prevent, `status=open`
+# above `status=success`. Whichever rule is right, there can only be one.
+DUPFIX="$TMP/fixdup"
+rm -rf "$DUPFIX"; mkdir -p "$DUPFIX"
+cat > "$DUPFIX/solo-task-6-20260814-150000.class" <<'CLS'
+arm=solo
+task=task-6
+started=1786000000
+status=open
+wall=1000
+status=success
+CLS
+node -e '
+const {readRuns, parseClass} = require(process.argv[1] + "/lib/agy.js");
+const c = parseClass("k=first\nk=second\n");
+if (c.k !== "first") throw new Error("parseClass took the last value: " + c.k);
+const {runs, skipped} = readRuns(process.argv[2]);
+if (runs.length !== 0) throw new Error("a duplicated status read as closed, disagreeing with class_val()");
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+' "$BENCH" "$DUPFIX" > "$TMP/dupread.log" 2>&1
+want "agy reader takes the first value of a repeated key" 0 $? "$(head -3 "$TMP/dupread.log")"
+
+# Sidecars are written LF, and a CR that reaches one fails here in a shape worth
+# naming: Number("1000\r") is 1000, so every numeric field survives intact and
+# the record looks healthy, while `status === "open"` quietly stops matching.
+# The damage lands only on the string comparisons — which is to say, only on the
+# rules that decide whether a record counts at all.
+CRFIX="$TMP/fixcr"
+rm -rf "$CRFIX"; mkdir -p "$CRFIX"
+printf 'arm=solo\r\ntask=task-7\r\nstarted=1786000000\r\nstatus=open\r\n' \
+	> "$CRFIX/solo-task-7-20260814-160000.class"
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const {runs, skipped} = readRuns(process.argv[2]);
+if (runs.length !== 0) throw new Error("a CR made an open bracket read as closed");
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+' "$BENCH" "$CRFIX" > "$TMP/crread.log" 2>&1
+want "agy reader parses a CRLF sidecar" 0 $? "$(head -3 "$TMP/crread.log")"
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
