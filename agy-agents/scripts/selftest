@@ -2525,6 +2525,135 @@ if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped))
 ' "$BENCH" "$CRFIX" > "$TMP/crread.log" 2>&1
 want "agy reader parses a CRLF sidecar" 0 $? "$(head -3 "$TMP/crread.log")"
 
+# ========================================================= bench: claude reader
+printf '\n=== bench: claude reader ===========================================\n'
+CPROJ="$TMP/claudeproj/d--Fake-Repo"
+rm -rf "$TMP/claudeproj"; mkdir -p "$CPROJ"
+node -e '
+const fs = require("fs");
+const t = n => new Date(Date.parse("2026-08-14T10:00:00Z") + n * 1000).toISOString();
+const turn = (n, side, out) => JSON.stringify({
+  type: "assistant", timestamp: t(n), isSidechain: side,
+  sessionId: "s1",
+  message: {model: "claude-opus-5", usage: {
+    input_tokens: 10, output_tokens: out, cache_read_input_tokens: 500,
+    cache_creation_input_tokens: 200,
+    output_tokens_details: {thinking_tokens: 5}}}});
+const lines = [
+  JSON.stringify({type: "user", timestamp: t(0), message: {role: "user"}}),
+  turn(30, false, 100),
+  turn(90, true, 40),
+  turn(90 + 8 * 3600, false, 60)
+];
+fs.writeFileSync(process.argv[1] + "/sess.jsonl", lines.join("\n") + "\n");
+' "$CPROJ"
+
+# None of these four turns carries a message.id, which is the second thing this
+# row asserts without saying so: turns that cannot be deduplicated are kept, not
+# collapsed onto one another under a shared undefined key.
+node -e '
+const {readTurns, summarise, slugFor} = require(process.argv[1] + "/lib/claude.js");
+if (slugFor("d:\\Claude Code\\DTS Skills") !== "d--Claude-Code-DTS-Skills")
+  throw new Error("slug: " + slugFor("d:\\Claude Code\\DTS Skills"));
+const turns = readTurns(process.argv[2], "d--Fake-Repo");
+if (turns.length !== 3) throw new Error("turns: " + turns.length);
+const s = summarise(turns, 600);
+if (s.main.turns !== 2) throw new Error("main turns: " + s.main.turns);
+if (s.sidechain.turns !== 1) throw new Error("sidechain turns: " + s.sidechain.turns);
+if (s.sidechain.out !== 40) throw new Error("sidechain out: " + s.sidechain.out);
+if (s.main.cache_read !== 1000) throw new Error("cache read: " + s.main.cache_read);
+if (s.active_s !== 60) throw new Error("active must clip the 8h gap, got " + s.active_s);
+if (s.elapsed_s !== 90 + 8 * 3600 - 30) throw new Error("elapsed: " + s.elapsed_s);
+' "$BENCH" "$TMP/claudeproj" > "$TMP/cread.log" 2>&1
+want "claude reader: slug, sidechain split, cache, clipping" 0 $? "$(head -3 "$TMP/cread.log")"
+
+# Claude Code rewrites earlier turns into the new session file when a session
+# resumes, so the same turn is on disk several times over. Measured against this
+# project's own 27 transcripts: 1161 usage-bearing turns, 585 distinct ids, one
+# turn written out nine times. Summed naively that is 2.25x the real output
+# tokens and 1.91x the real cache reads — in the arm the whole benchmark exists
+# to compare against the other one.
+#
+# The copies are not always equal. Exactly one id in those 585 disagrees with
+# itself, and it disagrees in the shape that decides the rule: two copies
+# carrying real usage against four carrying zeroes. File order is
+# readdirSync().sort(), alphabetical by session uuid and otherwise arbitrary, so
+# "keep the first copy seen" would record that turn as free whenever the zero
+# copy sorted first. Keep the fullest copy, and date it from the earliest, since
+# the turn happened once and the timestamps are what clipping is computed from.
+#
+# The fixture puts the zero copy in the file that sorts first and gives the full
+# copy the later stamp, so first-seen and latest-stamp each fail a row of their
+# own rather than both failing the same one.
+DPROJ="$TMP/dupproj/d--Dup-Repo"
+rm -rf "$TMP/dupproj"; mkdir -p "$DPROJ"
+node -e '
+const fs = require("fs");
+const t = n => new Date(Date.parse("2026-08-14T10:00:00Z") + n * 1000).toISOString();
+const turn = (id, n, u) => JSON.stringify({
+  type: "assistant", timestamp: t(n), isSidechain: false, sessionId: "s1",
+  message: {id: id, model: "claude-opus-5", usage: {
+    input_tokens: u ? 10 : 0, output_tokens: u,
+    cache_read_input_tokens: u ? 500 : 0,
+    cache_creation_input_tokens: u ? 200 : 0,
+    output_tokens_details: {thinking_tokens: u ? 5 : 0}}}});
+const d = process.argv[1];
+fs.writeFileSync(d + "/a.jsonl",
+  [turn("m1", 0, 0), turn("m2", 60, 50), turn("m3", 120, 70)].join("\n") + "\n");
+fs.writeFileSync(d + "/b.jsonl",
+  [turn("m3", 120, 70), turn("m1", 300, 100)].join("\n") + "\n");
+' "$DPROJ"
+
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const turns = readTurns(process.argv[2], "d--Dup-Repo");
+if (turns.length !== 3) throw new Error("five copies of three turns read as " + turns.length);
+const s = summarise(turns, 600);
+if (s.main.turns !== 3) throw new Error("main turns: " + s.main.turns);
+if (s.main.cache_read !== 1500) throw new Error("cache read: " + s.main.cache_read + ", want 1500");
+if (s.main.in !== 30) throw new Error("in: " + s.main.in);
+' "$BENCH" "$TMP/dupproj" > "$TMP/cdup.log" 2>&1
+want "claude reader counts a replayed turn once" 0 $? "$(head -3 "$TMP/cdup.log")"
+
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const s = summarise(readTurns(process.argv[2], "d--Dup-Repo"), 600);
+if (s.main.out !== 220) throw new Error("out: " + s.main.out + ", want 220 (0 means the zero-filled copy won)");
+if (s.main.think !== 15) throw new Error("think: " + s.main.think);
+' "$BENCH" "$TMP/dupproj" > "$TMP/cfull.log" 2>&1
+want "  and keeps the fuller copy of a replayed turn" 0 $? "$(head -3 "$TMP/cfull.log")"
+
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const s = summarise(readTurns(process.argv[2], "d--Dup-Repo"), 600);
+if (s.elapsed_s !== 120) throw new Error("elapsed: " + s.elapsed_s + ", want 120 (240 means a replay stretched the session)");
+if (s.active_s !== 120) throw new Error("active: " + s.active_s);
+' "$BENCH" "$TMP/dupproj" > "$TMP/cstamp.log" 2>&1
+want "  and dates it from the earliest copy" 0 $? "$(head -3 "$TMP/cstamp.log")"
+
+# A slug that resolves to nothing is the arm being unmeasurable, not the arm
+# having done nothing. Swallowed, it yields active 0, elapsed 0 and every total
+# 0 — a complete-looking result that says Claude worked for no time at no cost.
+node -e '
+const {readTurns} = require(process.argv[1] + "/lib/claude.js");
+let threw = null;
+try { readTurns(process.argv[2], "d--No-Such-Repo"); } catch (e) { threw = e; }
+if (!threw) throw new Error("a missing project directory read as zero turns");
+if (!/d--No-Such-Repo/.test(threw.message)) throw new Error("refusal does not name the directory: " + threw.message);
+' "$BENCH" "$TMP/claudeproj" > "$TMP/cmiss.log" 2>&1
+want "claude reader refuses a project directory that is not there" 0 $? "$(head -3 "$TMP/cmiss.log")"
+
+# And the other half, without which the row above is a statement about
+# emptiness rather than about absence: a directory that exists and holds no
+# sessions is a real answer of none.
+mkdir -p "$TMP/claudeproj/d--Empty-Repo"
+node -e '
+const {readTurns} = require(process.argv[1] + "/lib/claude.js");
+const turns = readTurns(process.argv[2], "d--Empty-Repo");
+if (turns.length !== 0) throw new Error("turns: " + turns.length);
+' "$BENCH" "$TMP/claudeproj" > "$TMP/cempty.log" 2>&1
+want "  but an empty project directory is simply no turns" 0 $? "$(head -3 "$TMP/cempty.log")"
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
