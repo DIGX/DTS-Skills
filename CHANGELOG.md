@@ -9,6 +9,289 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## agy-agents
 
+### [1.8.15] — 2026-08-20
+
+Three field reports. The first two shipped together because fixing either one
+alone opens the other: a tool error was about to become recoverable in the same
+release that a missed denial would have been filed as a tool error.
+
+#### Fixed
+
+- **One bit cannot answer two questions.** A finished, committed, gate-green run
+  was graded red because a single `agy` call errored mid-stream; GST-40 found
+  the same defect from the other side, a `want 0` assertion passing on a run
+  that never ran. The node counter splits `problems` from `hardFails`, and a
+  tool error becomes *path* evidence rather than an outcome. Recovery is a
+  conjunction of ten positive measurements — fresh report, contract sections,
+  clean fence, gates **green** rather than skipped, measured commits,
+  uncontradicted claims, correct co-author — and prints as `--- recovered ---`.
+  An absent measurement authorises nothing.
+- **The denial that used none of the words.** Antigravity auto-denied a
+  `write_to_file` into its *own* scratch directory under
+  `--dangerously-skip-permissions`, saying only `Matches user-configured deny
+  rule`, and `agy` exited 0 with `status SUCCESS`. That sentence carries none of
+  the four words the classifier looked for, so the denial would have been filed
+  as a tool error — which, as of the change above, is recoverable. The wording
+  list is widened with the field's verbatim sentence as the fixture, and it errs
+  toward calling things denials on purpose: a false denial costs one
+  hand-adjudication, a missed one costs the boundary.
+
+#### Added
+
+- **The reviewer is a unit of work with a budget.** A milestone lost three
+  consecutive tasks to reviewers hitting session limits mid-review;
+  `protocol.md` accounted for that and called it rare. It is arithmetic. Package
+  plus brief plus report plus context plus re-execution of every pasted proof is
+  most of a session, and none of it is safe to cut — re-execution is the only
+  check in this harness that looks inside a report. New section: one full review
+  per session, size the task by its review, a *declared* scoped package for
+  infrastructure-only tasks recorded in the ledger, and never scope by
+  shortening the verdicts. Per AGY-22 the prose comes with a measurement:
+  `review-pkg` prints its package size and warns past `AGY_REVIEW_MAX` (1200).
+  It warns rather than refuses — a gate there would be routed around.
+
+#### Notes
+
+Ten mutations, predictions on disk first. M1–M4, M8 and M9 landed exact. M5 came
+back wider and correctly so: the deny-rule fixture is also a denial, so it
+independently witnesses the `HARD_FAILS` leg. M6 and M7 were written down as
+expected-zero in advance and confirmed unwitnessed — M6's leg *cannot* be
+witnessed, because with no tool error in the stream node has nothing to
+attribute a bad status to and hard-fails, so `HARD_FAILS -eq 0` already excludes
+every reachable case. It stays as the cheap half of a two-language defence.
+
+Two findings came out of the injection rather than being confirmed by it. M8
+turned exactly three rows red and left `quoting the wording verbatim` green: the
+sentence prints either way and only its classification changes, so that row
+alone would have rubber-stamped the denial fix. M10 cascaded to ten because the
+review section captured `2>&1` and took the first word as the path — unbuffered
+stderr arrives ahead of buffered stdout, so `$PKG` became `WARNING:`. The
+mutation was innocent and the parse was fragile, and the same parse lives in any
+caller that pipes the command. Streams split, contract asserted, re-run at the
+predicted 1.
+
+394 passed, 0 failed.
+
+### [1.8.14] — 2026-08-19
+
+GST-40, from the field. A dispatch hit an Anthropic quota wall, recognised the
+error as quota-shaped, printed `bucket UNCLEAR`, and held. The reporter read the
+string it had just printed — *"Individual quota reached. … Resets in 3h27m2s"* —
+and saw the classifier reach its reserve-authorising class only by matching the
+literal word "week". That is Gemini's vocabulary. With `AGY_MODEL=claude-*`,
+`AGY_FALLBACK=auto` was unreachable code.
+
+#### Changed
+
+- **Quota classification reads the reset horizon the message states about
+  itself**, which is the one vocabulary every vendor shares: hours is a short
+  window worth waiting out, more than twelve is a long bucket worth the scarce
+  reserve. An explicit bucket word still outranks it — that is the vendor naming
+  the bucket rather than us inferring it — and an error carrying neither still
+  holds. The classes are `long` and `short`; `weekly` and `fivehour` were half
+  the bug, and the decision block, the verdict line and the header prose no
+  longer name a vendor anywhere.
+- **`resetHorizon` scans every reset-shaped phrase, not the first.** The one
+  message this rewrite exists for leads with "Please try again later." — a
+  phrase that matches and carries no duration — so first-match-only would have
+  read it as stating no reset time and shipped the bug again under new names.
+- **The stub's quota model is a parameter** (`FAKE_QUOTA_MODEL`, default
+  *gemini*) rather than a hardcoded glob. That hardcoding is why 346 green
+  assertions never saw this: a Claude primary could not fail on quota at all.
+  Same shape as the `--effort` bug one layer up. A test double narrower than the
+  thing it doubles does not test the thing it doubles.
+
+#### Notes
+
+Eleven new assertions run the inverted config — Claude primary, Gemini reserve —
+on the same Anthropic sentence at two horizons. Hours holds; days spends the
+reserve. Nothing but the stated duration differs between the two rows.
+
+Fault injection, predictions written to disk before grading: M1 (horizon
+inference removed) predicted 4 red and got 4; M2 (stub quota model re-hardcoded)
+predicted 7 and got 7, row for row. Under M2 the "spends the reserve" `want 0`
+assertion **passes**, because a run that never failed also exits 0 — the exit
+code alone would have graded the reserve-burning path green while the reserve
+was never touched. The three assertions beside it, naming the reserve model and
+the class in the log, are what kill it.
+
+357 passed, 0 failed.
+
+### [1.8.13] — 2026-08-19
+
+Two defect reports arrived against this harness describing behaviour that had
+been fixed several versions earlier. Both were real observations of a stale
+install, and establishing that meant diffing the reporter's script against ours
+by line count — twice, once per report. Nothing in an installed repo recorded
+which version of the skill wrote it, so a repo could not tell it was stale and a
+field report could not be trusted to describe the current asset.
+
+#### Added
+
+- **`assets/dispatch` carries `AGY_SKILL_VERSION` and prints it in the run
+  banner**, so any pasted output is adjudicable in one read. If the
+  `{{SKILL_VERSION}}` marker itself shows up, the asset was copied by hand
+  instead of installed — the same class of problem one level down, and now
+  equally visible.
+- **`install` reads the version from the skill's own frontmatter** — one place
+  to bump, nothing to keep in sync — and substitutes it at copy time rather than
+  `cp`ing. The four scripts are the skill's to own and are refreshed every
+  install, so the stamp cannot go stale the way a kept `.agy/config` key can,
+  which is exactly why it does not live in the config.
+- **`install` says which of three things it did**: installing X, reinstalling X
+  unchanged, or upgrading OLD to NEW. It knew about versions already — it prints
+  "new in this version" for config keys — and recorded none of them.
+
+#### Fixed
+
+- **Both version reads strip CR.** This skill is checked out on Windows as often
+  as not; a CRLF `SKILL.md` would carry a carriage return into the stamp,
+  corrupt the banner, make every install compare unequal and report an upgrade,
+  and never say why.
+
+#### Notes
+
+selftest +9: the skill declares a version, the installed dispatch carries it and
+not the marker, a run banner names it, a first install says installing, a
+re-install says unchanged, an upgrade names both versions and replaces the old
+stamp, and an install over an unstamped copy says so. An unknown version is not
+a current one, the same way an absent measurement is not a zero.
+
+346 passed, 0 failed.
+
+### [1.8.12] — 2026-08-19
+
+A field ledger across eleven tasks put nearly every real defect in the plan's
+own reference code and nearly none in the implementer's transcription of it. The
+protocol installs an independent reviewer for the implementation and none for
+the plan: the controller writes it, then the controller reviews it — the one
+arrangement the protocol elsewhere forbids.
+
+#### Added
+
+- **The planning is dispatched, which inverts the authorship.** The implementer
+  writes the plan and the controller reviews it, so the review is finally
+  independent and the plan is read adversarially before any quota is spent on
+  tasks.
+- **`assets/templates/plan-dispatch.md`** — the planner prompt. Reads the shared
+  context, then the spec; writes exactly one plan file. Per-task sections are
+  Files / Interfaces / Behaviour / Exact values / Tests / Acceptance criteria,
+  and implementation bodies are forbidden outright. A plan carrying complete
+  code *is* the implementation: reviewing it coarsely is a rubber stamp,
+  reviewing it properly costs what writing it would have, and the dispatch that
+  follows degrades to transcription.
+- **`install` ships it as `plan-dispatch.template.md`**, substituted the same
+  way as the task template — and deliberately **not** for
+  `{{SPEC}}`/`{{MILESTONE}}`, which stay markers so the existing refusal guards
+  the planning path too.
+- **`protocol.md` documents the inversion** and the four-point plan review: spec
+  coverage, interface consistency, task independence, exact values present.
+
+#### Notes
+
+selftest +9: the template ships, the workspace is substituted in, the spec is
+left for the controller, both content rules are pinned, an unfilled `{{SPEC}}`
+is refused, a filled one dispatches, and no report contract is claimed over a
+run whose deliverable is a plan.
+
+Falsification of 1.8.11's `--effort` routing completed here — four mutants, all
+killed. E3 (keyed on the config slot instead of the call site) turned five rows
+red, but not the row predicted: slot-keying and call-site keying agree on the
+primary attempt and diverge only on the reserve, so the inverted-config row is
+the one it does *not* break. Coverage held; the reasoning behind one row was
+backwards and is now written down.
+
+337 passed, 0 failed.
+
+### [1.8.11] — 2026-08-19
+
+`--effort` is Gemini-only. Claude and GPT reject it: the process exits within
+seconds having taken zero turns, with nothing that names the flag.
+`.agy/dispatch` passed it on every model, which made the reserve path unrunnable
+in every repository this skill has ever installed — and made
+`AGY_FALLBACK=force` a guaranteed dead run rather than an escape hatch. Reported
+from the field after it cost two runs.
+
+#### Fixed
+
+- **`--effort` is routed on the model string at the call site**, not on the
+  config slot it came from. `AGY_MODEL` and `AGY_FALLBACK_MODEL` may each hold
+  either family — a repo running Claude primary with Gemini in reserve is a
+  supported inversion already in the field, and a slot-keyed fix gets it exactly
+  backwards. Unrecognised models get no flag: one that runs at default effort
+  beats one that cannot run.
+- **`AGY_EFFORT=` could not suppress the flag**, which was the reporter's
+  finding and the useful half of their fix: `.agy/config` writes
+  `: "${AGY_EFFORT:=high}"` and `:=` fires on null as well as unset, so no value
+  in that file clears it. The model name is the only key that works.
+- **The stubbed `agy` now refuses `--effort` off the Gemini line.** The stub
+  parsed `--model` and accepted everything else on every model, which is why the
+  suite never caught this: a test double more permissive than the thing it
+  doubles does not test the thing it doubles, and the whole reserve path looked
+  exercised while it could not execute anywhere. Refusing in the stub converts
+  the pre-existing reserve tests into detectors for this class rather than
+  adding one isolated assertion.
+
+#### Notes
+
+Twelve rows added on top of that, asserting the argv actually built. The
+strongest is a same-run contrast: one auto-fallback dispatch routes the flag two
+different ways according to the model each attempt reached — a claim no harness
+that simply stopped sending the flag can satisfy.
+
+One of the twelve was wrong on first run and turned red against correct code: an
+unsplit argv log conflated both attempts, so `hasnt --effort` was reading the
+Gemini attempt that legitimately carries it. Splitting per attempt is what
+produced the contrast row above.
+
+Docs corrected in four places that stated the unconditional behaviour as
+intended. 328 passed, 0 failed (316 before).
+
+### [1.8.10] — 2026-08-18
+
+`protocol.md` has carried `( . .agy/config && bash $AGY_GATES )` since it was
+written, with the reasoning beside it: `.agy/gates` exists only where the
+installer generated a starter suite, so a repo adopted by `--gates` or by the
+auto-detect scan resolves the literal path to `No such file or directory`.
+
+Five other places said the literal path anyway — including `SKILL.md:30`, the
+status route read on every invocation before any reference file, and
+`install.md:210`, step 3 of a numbered list headed *adopting a repo mid-flight*,
+telling you to open the one file adoption never writes. Reported from another
+project against its own repo; verified here and found to be five sites, not one.
+
+#### Fixed
+
+- **Five documentation sites now use the resolving form** — `SKILL.md:30`,
+  `reference/dispatch-traps.md:363`, `reference/install.md:210`, and the two
+  `README.md` mirrors of the latter pair. Remaining `.agy/gates` mentions are
+  correct and deliberately kept: the `--force` overwrite, the fresh-install
+  listing, `protocol.md`'s counter-example, and the section describing the
+  generated file.
+
+#### Added
+
+- **A pin list, not a grep for a bad string.** Every surviving `.agy/gates`
+  mention is named by a fragment of its own line; each must match exactly one
+  line, and the total across `SKILL.md`, `README.md` and `reference/*.md` must
+  equal the number of pins. A sixth mention lands as an excess; a pinned line
+  reworded off its fragment goes red rather than being silently re-admitted.
+  Four further rows assert the resolving form is still present, since the pin
+  list alone is satisfied by deleting the recipes outright.
+
+#### Notes
+
+The adoption test at `selftest:1320` was green through all five sites. It ranges
+over every file the installer *writes* and no file the controller *reads*, so
+the class it was built to catch escaped through the half it never looked at.
+
+Falsified before it was trusted, predictions written first: D1 (a new mention)
+turned the total check, D2 (`SKILL.md` reverted) turned two, D3 (a pin reworded)
+turned that pin *and left the total green* — which is the row that proves the
+fragments are load-bearing rather than decoration.
+
+316 passed, 0 failed; +13 on 303, exactly the new rows.
+
 ### [1.8.9] — 2026-08-17
 
 Field report #32, and this one holds up where #31's headline did not: the
