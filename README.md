@@ -82,7 +82,9 @@ bash scripts/install-skill agy-agents
 
 That copies the skill to `~/.claude/skills/agy-agents/`. Pass `--link` instead
 to symlink it, so `git pull` updates the installed skill in place — the right
-choice if you intend to contribute.
+choice if you intend to contribute. On Windows a real symlink needs Developer
+Mode or an elevated shell; without either, the installer says so and falls back
+to a copy rather than leave you believing edits are live.
 
 Then, in Claude Code:
 
@@ -179,6 +181,19 @@ Then, in Claude Code, from the project you want set up:
 
 With no argument it routes on what it finds: no `.brandkit/` means scaffold one,
 configs but no art means generate, art in place means composite and onward.
+
+### Adopting a product set that already has images
+
+Two things to settle before generating anything, because both are cheap to
+decide and expensive to redo:
+
+- **Filenames.** The kit deploys `<slug>-<format>.webp` into every target, since
+  each target holds the whole range rather than just its own product. A project
+  already loading `<slug>.webp` either updates those references or narrows the
+  format list.
+- **Fonts.** `brand.json` names font files that must exist in `.brandkit/fonts/`.
+  Nothing is shipped and nothing is substituted — a missing face is an error,
+  not a fallback.
 
 ### Verify
 

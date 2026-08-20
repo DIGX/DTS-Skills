@@ -40,7 +40,13 @@ structural rather than a matter of care.
 - **WebP under a byte budget**, quality descending until it fits, then copied
   into every target as `<slug>-<format>.webp`. Every target holds every
   product's media, because the card grid on any one product's screen shows the
-  whole range.
+  whole range — which is why the slug is in the filename rather than only in
+  the directory.
+- **Five stages that are commands, not just modules.** `python bmk/<stage>.py`,
+  each taking optional slugs and `--project DIR`; without it they find the
+  nearest `.brandkit/` above the working directory, the way git finds `.git`.
+  `bmk/project.py` holds the paths all five need, so an operator states them
+  once rather than five times.
 - **`bmk/verify.py`, which imports no other module in the kit.** Missing files,
   missing target directories, wrong dimensions, over budget, unreadable, copies
   that differ between targets, two different assets that are byte-identical. It
@@ -56,7 +62,21 @@ structural rather than a matter of care.
 - `reference/config-schema.md`, `reference/layout-grid.md`,
   `reference/prompt-recipe.md`, `reference/manual-handoff.md`.
 
-#### Known limitation
+#### Known limitations
+- **Adopting an existing set means agreeing on filenames.** The kit deploys
+  `<slug>-<format>.webp`. A project that already loads `<slug>.webp` has to
+  either update those references or narrow the format list — decide before
+  generating, not after, because the choice is cheap up front and a rename
+  across a dozen repositories is not.
+- **Every format is a wide crop of a 16:9 master.** A square or portrait format
+  cannot come from this pipeline: cropping 1:1 out of 16:9 keeps only the middle
+  56% of the width, and the lockup lives in the left 45%, so the type would be
+  cut in half. A square asset needs its own layout, not another entry in the
+  format table.
+- **Fonts are not shipped.** `brand.json` names files that must exist in
+  `.brandkit/fonts/`, and `bmk/fonts.py` raises rather than substituting
+  Pillow's bitmap default — a silent fallback measures the wrong thing and the
+  whole set comes out subtly wrong.
 - **The no-lettering check is human.** Before saving a master, look at it and
   reject it if it contains any lettering. OCR was the obvious automation and was
   rejected twice over: a cloud vision call breaks the rule that the selftest is

@@ -20,6 +20,7 @@ family of products that should look like they came from the same place.
 - [Installing](#installing)
 - [Configuration](#configuration)
 - [The five stages](#the-five-stages)
+- [Adopting a set that already has images](#adopting-a-set-that-already-has-images)
 - [The one human step](#the-one-human-step)
 - [Verifying](#verifying)
 - [Layout of this skill](#layout-of-this-skill)
@@ -57,6 +58,12 @@ Requires Python 3.9+ and Pillow.
 pip install -r requirements.txt
 bash scripts/install [project-dir]        # --dry-run first if you like
 ```
+
+(To install the *skill* itself into Claude Code, that is `bash
+scripts/install-skill brand-media-kit` from the repo root. On Windows, `--link`
+needs Developer Mode or an elevated shell; without either the installer says so
+and copies instead, so edits here will not reach the installed copy until you
+reinstall.)
 
 That scaffolds `.brandkit/` in the target project:
 
@@ -119,6 +126,38 @@ Formats produced by `derive`:
 | `hero` | 1920 x 480 |
 | `wporg-banner` | 1544 x 500 |
 | `wporg-banner-sm` | 772 x 250 |
+
+## Adopting a set that already has images
+
+Most projects that need this skill already have banners — that is usually why
+they need it. Two things are worth settling before the first `generate`, because
+both are cheap now and expensive after thirteen products exist.
+
+**Filenames.** `deploy` writes `<slug>-<format>.webp` into every target
+directory. The slug is in the filename because every target holds the media for
+every product, not just its own, so directory alone cannot disambiguate them.
+
+If the project already loads a different name — a bare `<slug>.webp`, say — you
+have two honest choices:
+
+- Update the references in the project, which is a mechanical find-and-replace
+  and leaves you with names that say which format they are.
+- Narrow `FORMATS` in `bmk/derive.py` to the formats that project actually uses
+  and adjust `deploy.output_name`, which keeps the existing references working
+  but gives up the multi-format fan-out.
+
+Do not solve it by hand-renaming after each deploy. The next run overwrites.
+
+**Target directories.** `targets` in `assets.json` is a list of directories
+relative to the project root, and each one receives the whole set. Point them at
+the directories the project already serves images from; `deploy` creates what is
+missing and `verify` will tell you if a copy has drifted.
+
+**Formats are all wide crops.** Every format is a centred horizontal slice of
+one 16:9 master, so a square or portrait asset cannot come from this pipeline —
+cropping 1:1 out of 16:9 keeps only the middle 56% of the width, and the lockup
+lives in the left 45%, so the type would be cut in half. A square asset needs
+its own layout. Adding it to the format table produces a clipped one.
 
 ## The one human step
 
@@ -201,6 +240,8 @@ tests/                       the suite
 - **Every target receives every product's media.** That is deliberate — the
   card grid on one product's screen shows the whole range — but it means a
   large product set multiplies across a large number of targets.
+- **No square or portrait formats.** Everything is a wide crop of one 16:9
+  master. See [Adopting a set](#adopting-a-set-that-already-has-images).
 - **The API path needs `google-genai`**, which is deliberately not in
   `requirements.txt`: the selftest must install nothing that could reach the
   network.
