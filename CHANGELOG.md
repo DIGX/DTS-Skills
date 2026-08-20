@@ -87,6 +87,69 @@ structural rather than a matter of care.
 
 ## agy-agents
 
+### [1.8.16] — 2026-08-20
+
+One field report, three defects, all in the same section — and two of the three
+were already answered elsewhere in the same file. A fact filed under the wrong
+heading is not a fact the reader has.
+
+#### Added
+
+- **A killed reviewer is not an unavailable reviewer.** *When the reviewer
+  cannot run* offered one exit, "wait for a reviewer to become available", and
+  never said that a budget-killed subagent can be resumed from its own
+  transcript with everything it read still in it. The field report is explicit
+  about the cost: *"I'd have re-run a review that already existed."* The
+  resumability rule was in `protocol.md` the whole time, under *When a run dies
+  mid-task* — one occurrence, zero of them in the section a controller reads
+  when its reviewer has just died. The section now says it and points there.
+- **The partial review is on disk.** The same section never mentioned that a
+  reviewer instructed to write each finding as it finds it leaves those findings
+  behind and loses only the verdict table — the difference the reporter measured
+  between one task where the full review survived the kill and one where nothing
+  did. That instruction lives in the dispatch brief, 100 lines earlier, which is
+  where the reviewer is *told* it and not where the controller *needs* it. Check
+  the file before holding: what looks like a dead review is usually a review
+  missing its last section.
+- **Whether the next task may dispatch while this one is held.** Nothing in the
+  skill answered this — zero matches, not a locality defect this time but an
+  absence. It now does, with the mechanism rather than a caution: the fence
+  guards surfaces, not agents. The workspace is pruned from every guarded
+  directory, so a reviewer writing `<workspace>/task-N-review.md` during someone
+  else's dispatch is clean. The ledger is not, because it is guarded as a *file*
+  and living inside the workspace does not exempt it — the same rule as *Never
+  write to the ledger during a dispatch*, now stated to bind the held task's
+  bookkeeping too. Neither is anything under `docs/`, `.claude/`, or the rest of
+  `.agy/`. A violation is expensive out of proportion to the note that caused
+  it: it lands on the *implementer's* verdict, and the investigation ends at the
+  controller's own bookkeeping.
+
+#### Notes
+
+The field report's third claim named the workspace as the thing that trips the
+fence. It is the one surface that does not. That was established by fixture
+rather than by reading: install into a scratch repo, arm the fence, then write
+`<workspace>/task-4-review.md` (clean), the ledger (VIOLATION, `files`), and
+`docs/review-notes.md` (VIOLATION, `docs`). The guidance shipped is the measured
+behaviour, not the reported one, and it is more useful than the report asked
+for — the workspace is the only safe place to write, and the ledger is the trap
+precisely because it sits inside it.
+
+Per AGY-22 each of the three ships with a machine check, and the checks are
+scoped to the **section body** rather than to the file. That scoping is the
+whole point: for two of the three defects, `grep` against `protocol.md` was
+green throughout — the fragments were present once, twice, and zero times in the
+file against zero, zero, and zero times in the section. A file-scoped assertion
+could not have failed on a defect that was entirely about location. Two further
+assertions pin the fence mechanism in `tripwire` itself, so the prose cannot
+outlive the behaviour it describes.
+
+Falsification, predictions written to disk first: reverting `protocol.md` while
+keeping the assertions predicted 7 red and got exactly those 7. The three rows
+predicted to stay green stayed green — the section extractor (which fails only
+if the harness breaks, not if the defect returns) and both fence-mechanism rows.
+selftest: 421 → 431 passed, 0 failed.
+
 ### [1.8.15] — 2026-08-20
 
 Three field reports. The first two shipped together because fixing either one

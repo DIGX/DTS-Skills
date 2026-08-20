@@ -1800,6 +1800,46 @@ for doc in SKILL.md README.md reference/dispatch-traps.md reference/protocol.md;
 		'( . .agy/config && bash $AGY_GATES )' "$SKILL_DIR/$doc"
 done
 
+# GST-44/45/46 (field report, GST Invoice). The reviewer-cannot-run section sent
+# controllers straight to HELD without saying that a budget-killed reviewer is
+# resumable, that its partial review file is already on disk, or whether the
+# next task may dispatch while the hold stands. Two of those facts were in this
+# document the whole time — under other headings, which is the same as absent to
+# a controller reading the one section that names its situation. So these are
+# scoped to the section body, not to the file: file-scoped assertions were green
+# throughout the defect.
+SEC="$TMP/protocol-held.md"
+awk '/^### When the reviewer cannot run/{f=1} f&&/^## /{f=0} f' \
+	"$SKILL_DIR/reference/protocol.md" > "$SEC"
+# The prose rows read a flattened copy. Markdown wraps at 79 columns and the
+# wrap points are arbitrary, so a phrase that happens to straddle one is
+# invisible to a line-oriented grep — two of these rows were red against the
+# fixed document for exactly that reason. That is a false alarm, and a false
+# alarm costs more than the assertion is worth. Flattening takes the wrap out
+# of the contract and leaves the wording in it.
+SECF="$TMP/protocol-held.flat"
+tr -d '\r' < "$SEC" | tr '\n' ' ' | tr -s ' ' > "$SECF"
+if [ ! -s "$SEC" ]; then
+	bad "the reviewer-cannot-run section is findable" "extracted nothing — heading renamed?"
+else
+	ok "the reviewer-cannot-run section is findable"
+	has "  says a killed reviewer is resumable"        "resumed from its own transcript" "$SECF"
+	has "  and points where resuming is judged"        "When a run dies mid-task"        "$SECF"
+	has "  says the partial review is already on disk" "task-N-review.md"                "$SECF"
+	has "  and why it survives the kill"               "each finding as it finds it"     "$SECF"
+	has "  answers whether the next task may dispatch" "fence guards surfaces"           "$SECF"
+	has "  names the workspace as the safe surface"    "pruned from every guarded"       "$SECF"
+	has "  and the ledger as the exception inside it"  "guarded as a *file*"             "$SECF"
+fi
+
+# The claims above are only worth asserting if they are true of the fence. These
+# two hold the mechanism in place: the workspace is pruned from every guarded
+# directory, and the ledger is guarded as a file regardless of living in it.
+has "the tripwire prunes the workspace from guarded dirs" \
+	'for p in ".git" "$(norm "$AGY_WORKSPACE")"; do' "$SKILL_DIR/assets/tripwire"
+has "and the ledger is a guarded file in its own right" \
+	'for src in "$AGY_LEDGER" "$AGY_GUARD_FILES"; do' "$SKILL_DIR/assets/tripwire"
+
 # =================================================== bench instrumentation
 printf '\n=== bench instrumentation ==========================================\n'
 

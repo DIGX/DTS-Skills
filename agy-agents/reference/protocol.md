@@ -466,6 +466,32 @@ The task is **HELD** instead:
 You may state your own reading of the diff while it is held. Label it as the
 controller's opinion and never let it stand in the ledger where a verdict goes.
 
+**A reviewer that was killed is not a reviewer that cannot run.** Check this
+before holding anything. A budget-killed subagent can be resumed from its own
+transcript, which still holds everything it read — see *When a run dies
+mid-task* for when resuming is worth its cost. And check the disk first: a
+reviewer told to write each finding as it finds it leaves those findings in
+`<workspace>/task-N-review.md` and loses only the verdict table, so what looks
+like a dead review is often a review missing its last section. Dispatching a
+fresh reviewer there pays the whole read cost again to produce something that
+already exists, and HELD records a gap where there is a file. Hold only when
+there is no reviewer to resume and nothing on disk to finish.
+
+**Whether the next task may dispatch while this one is held.** It may — the
+fence guards surfaces, not agents, so the only question is where each one
+writes. The workspace is pruned from every guarded directory, so a reviewer
+writing `<workspace>/task-N-review.md` during someone else's dispatch is clean.
+Two things are not. The ledger is guarded as a *file*, so being inside the
+workspace does not exempt it — that is the same rule as *Never write to the
+ledger during a dispatch*, and it binds the held task's bookkeeping too. And
+anything under `docs/`, `.claude/`, or the rest of `.agy/` is a guarded
+directory in full. So: let the held reviewer write only into the workspace, and
+leave the ledger alone until both tasks close. If it needs to put a note
+anywhere else, wait for the dispatch to finish instead. A violation here is
+expensive out of proportion to the note — it lands on the *implementer's*
+verdict, and you spend the investigation proving your own bookkeeping caused
+it.
+
 ## Fix loop
 
 Five rounds maximum.
