@@ -502,6 +502,14 @@ Five rounds maximum.
   `.agy/dispatch --continue --file <that file>`. State plainly: what was
   required, what it actually did, what is missing, what to change. Nothing else
   — a correction is not a re-brief.
+- **That thread only exists until the next task dispatches.** `agy --continue`
+  resumes the last conversation *globally*; the flag is passed through verbatim
+  and there is no per-task selector. So run the fix rounds before the next task
+  goes out. Once one has, the thread you want is unreachable: drop `--continue`
+  and re-brief cold. `.agy/dispatch` records the last label it sent and refuses
+  a mismatched `--continue` rather than dropping your correction into a
+  conversation that believes it just finished something else — a warm
+  implementer holding the wrong context is worse than a cold one holding none.
 - **Rounds 4–5 escalate to Claude.** Two failed rounds on the same finding means
   the task was mis-sized, or the finding needs judgment the implementer is not
   applying. Fix it yourself and declare the authorship to the reviewer.

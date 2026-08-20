@@ -87,6 +87,80 @@ structural rather than a matter of care.
 
 ## agy-agents
 
+### [1.8.17] — 2026-08-20
+
+One field report, and the fix is a refusal rather than a sentence because the
+sentence was already there and was already being read the wrong way.
+
+#### Fixed
+
+- **`--continue` resumes the last conversation, not this task's.** The fix loop
+  sends rounds 1–3 back to the implementer "in its existing thread" via
+  `.agy/dispatch --continue --file <correction>`. `agy --continue` resumes the
+  last conversation **globally** — the flag is passed through verbatim, there is
+  no per-task selector, and nothing recorded which conversation belonged to
+  which task. So the instruction is true only while no other dispatch has run
+  since. In the field it had not: task 4 ran after task 3, and a `pcp.sh` fix
+  brief for task 3 was about to be dropped into a thread that believed it had
+  just finished the text-domain task. The reporter caught it and dispatched
+  fresh. A warm implementer holding the wrong context is worse than a cold one
+  holding none, because the correction reads as a follow-up to work it never
+  did — and nothing in the flag surface says so.
+
+  `dispatch` now records the label it is about to send in
+  `<workspace>/.last-thread` and refuses a `--continue` whose task number does
+  not match it, naming both tasks and printing the remedy. Written at launch
+  rather than at exit, because a run that crashed still moved the conversation
+  and that is exactly when someone reaches for the flag. The note lives in the
+  workspace, which the tripwire prunes from every guarded surface, so keeping it
+  costs no fence violation.
+
+  `protocol.md` states the constraint beside the instruction: run the fix rounds
+  before the next task goes out, and once one has, drop `--continue` and
+  re-brief. That paragraph gets no pin of its own. The pin would assert prose
+  about behaviour the eight rows below already assert directly, and the prose
+  can now only mislead someone who never runs the command — the refusal prints
+  the remedy at the moment it is needed.
+
+#### Notes
+
+The report offered "either a caveat or a thread-id flag". Neither was taken. A
+thread-id flag needs a selector `agy` does not expose. A caveat is what already
+failed — the conditional was implicit in "its existing thread" and read as
+unconditional, which is the same failure mode as the `Co-Authored-By:` line that
+asked for a trailer without saying what to put in it. Telling the reader harder
+is the wrong lever when the reader was already told. This one is deterministic —
+the recorded label either matches or it does not — so it fails the run, per the
+same rule as the report contract and the trailer check.
+
+Falsification took three RED runs, and the first two are the entry worth
+reading. Predictions were on disk before each.
+
+- **Run 1** predicted five red and got seven, with two rows contradicting the
+  prediction: a refusal row passed on the unguarded binary, and the one row that
+  must exit 0 failed. Cause: the fixture installs and never fills
+  `dispatch-context.md`, and dispatch refuses an unfilled context at exit 2 —
+  before reaching the guard.
+- **Run 2**, context filled, still had the must-succeed row red at exit 1:
+  `landed NOT COMMITTED — 4 change(s) outside the workspace`. The fixture had
+  never committed the install, so every dispatch in the section was scored a
+  failed run. Two independent fixture faults, each of which made the refusal
+  rows pass on a binary with no guard in it.
+- Run 2 also passed `and the one being dispatched` unguarded: the needle was the
+  bare string `task-3`, which a dispatch **for task 3** prints in its own
+  banner. Both sub-rows now match whole clauses of the refusal — `the live
+  thread is task-4`, `this brief is for task-3`.
+- **Run 3** predicted eight red and one green and got exactly that.
+
+None of this was visible in the totals. Run 1 showed seven red on a binary with
+no guard, which is what a healthy RED looks like; only the row-by-row comparison
+against a prediction written first showed that the section was green for reasons
+unrelated to what it tests. The row that carried it throughout is `--continue on
+the still-live task runs` — a guard that refused every `--continue` would pass
+all eight refusal rows while breaking the one workflow the flag exists for.
+
+selftest: 431 → 440 passed, 0 failed.
+
 ### [1.8.16] — 2026-08-20
 
 One field report, three defects, all in the same section — and two of the three

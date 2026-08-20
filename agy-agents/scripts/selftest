@@ -1759,6 +1759,75 @@ has "the dispatch template names the adopted runner" "scripts/gates" \
 # and fails here; a pinned line reworded out from under its fragment fails
 # too, and has to be re-justified rather than silently re-admitted. Same
 # bargain as the tripwire fingerprints: the churn is the point.
+# ============================================================ continue threads
+printf '\n=== continue threads ===============================================\n'
+
+# GST-47 (field report, GST Invoice). `agy --continue` resumes the last
+# conversation GLOBALLY — the flag is passed through verbatim and there is no
+# per-task selector. protocol.md sent fix rounds 1-3 back "in its existing
+# thread" on that flag, which holds only when no other dispatch has run since.
+# In the field it had not: task 4 ran after task 3, and a task-3 fix brief was
+# about to be dropped into a thread that thought it had just finished task 4.
+#
+# The prose form of this rule already existed and was already read as
+# unconditional, so the check is a refusal rather than a sentence.
+CT="$TMP/thread"
+rm -rf "$CT"; mkdir -p "$CT/src"
+(
+	cd "$CT" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project CT >install.log 2>&1
+	# Two things this fixture has to get right before any exit code it
+	# collects means anything. The installer ships dispatch-context.md
+	# unfilled and dispatch refuses on it at exit 2, which this section
+	# would read as its own refusal. And the install itself dirties the
+	# tree, which dispatch scores as NOT COMMITTED at exit 1. Either one
+	# makes every refusal row pass for a reason that has nothing to do
+	# with --continue, and makes the one row that must exit 0 unreachable.
+	sed -e 's/{{[^}]*}}/filled-in/g' -e '/Delete this quote block/d' 		.agy/work/m1/dispatch-context.md > ctx.filled
+	mv ctx.filled .agy/work/m1/dispatch-context.md
+	rm -f install.log
+	git add -A && git commit -qm installed
+) >/dev/null 2>&1 || bad "thread fixture installs" "setup failed"
+CTW="$CT/.agy/work/m1"
+printf '# task 3\nDo three.\n' > "$CTW/task-3-dispatch.md"
+printf '# task 4\nDo four.\n' > "$CTW/task-4-dispatch.md"
+
+# Nothing dispatched yet: --continue cannot name a conversation this harness
+# started, and resuming an unknown one is the defect, not a degraded mode.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --continue 3 > "$TMP/ct0.log" 2>&1 )
+want "--continue with no recorded thread refuses" 2 $?
+has  "  says nothing has been dispatched yet" "no thread recorded" "$TMP/ct0.log"
+
+# Two ordinary dispatches, task 3 then task 4. The second is what makes the
+# first one's thread unreachable, and nothing in agy's flag surface says so.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 3 > "$TMP/ct1.log" 2>&1 )
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 4 > "$TMP/ct2.log" 2>&1 )
+has "the workspace records which thread is live" "task-4" "$CTW/.last-thread"
+
+# The field case exactly: a fix brief for task 3, sent after task 4 ran.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --continue 3 > "$TMP/ct3.log" 2>&1 )
+want "--continue after a different task refuses" 2 $?
+# Both needles are whole clauses from the refusal, not bare task labels: a
+# dispatch for task 3 prints "task-3" all over its own banner, so the bare
+# label passes on a binary with no guard in it at all.
+has  "  names the task the thread is actually on" "the live thread is task-4" "$TMP/ct3.log"
+has  "  and the one being dispatched"             "this brief is for task-3"  "$TMP/ct3.log"
+has  "  says why the flag cannot tell them apart" "globally" "$TMP/ct3.log"
+has  "  tells the controller to re-brief instead" "re-brief" "$TMP/ct3.log"
+
+# And the other side of it. A guard that refuses every --continue passes every
+# row above while breaking the one workflow the flag exists for: fix rounds
+# 1-3 back into the thread that is genuinely still live.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --continue 4 > "$TMP/ct4.log" 2>&1 )
+want "--continue on the still-live task runs" 0 $?
+
 printf '\n=== documentation ==================================================\n'
 
 GATES_PINS='

@@ -247,6 +247,44 @@ else
 		'usage: .agy/dispatch [--continue] <task-number> | --file <path>'
 fi
 
+# ------------------------------------------------------- which thread is that
+# GST-47. `agy --continue` resumes the last conversation GLOBALLY. There is no
+# per-task selector — the flag is passed through verbatim below — and nothing
+# used to record which conversation belonged to which task. protocol.md sends
+# fix rounds 1-3 back "in its existing thread" on that flag, which is true only
+# when no other dispatch has run since. In the field it had not: task 4 ran
+# after task 3, so a fix brief for task 3 would have been dropped into a thread
+# that believed it had just finished task 4 — a warm implementer confidently
+# holding the wrong context, which is worse than a cold one holding none.
+#
+# The caveat form was already tried and is what failed: the sentence was there
+# and read as unconditional. This is deterministic — the recorded label either
+# matches or it does not — so it refuses rather than warns, per the same rule
+# as the report contract and the trailer check.
+#
+# Recorded at launch rather than at exit, because a run that crashed still
+# moved the conversation, and that is exactly when someone reaches for
+# --continue. The file lives in the workspace, which the tripwire prunes from
+# every guarded surface, so keeping this note costs no fence violation.
+LAST_THREAD="$AGY_WORKSPACE/.last-thread"
+task_num() { printf '%s' "${1:-}" | sed -n 's/^task-\([0-9][0-9]*\).*/\1/p'; }
+if [ -n "$CONTINUE" ]; then
+	PREV_LABEL="$(head -1 "$LAST_THREAD" 2>/dev/null)"
+	NOW_N="$(task_num "$LABEL")"
+	PREV_N="$(task_num "$PREV_LABEL")"
+	if [ -z "$PREV_LABEL" ]; then
+		die 2 'no thread recorded, so --continue would resume an unknown conversation' \
+			'nothing has been dispatched from this workspace yet' \
+			'dispatch without --continue; the implementer reads the brief cold'
+	elif [ -z "$NOW_N" ] || [ -z "$PREV_N" ] || [ "$NOW_N" != "$PREV_N" ]; then
+		die 2 "--continue would resume $PREV_LABEL, not $LABEL" \
+			'agy resumes the last conversation globally — there is no per-task selector' \
+			"the live thread is $PREV_LABEL; this brief is for $LABEL" \
+			'drop --continue and re-brief: a cold implementer with a full brief' \
+			'is cheaper than a warm one holding the wrong task'
+	fi
+fi
+
 # ------------------------------------------------------- the brief must be real
 # The installer writes dispatch-context.md and the task template from stubs full
 # of {{PLACEHOLDER}} markers, and it cannot fill them — only the controller knows
@@ -910,6 +948,9 @@ NODE
 }
 
 # ------------------------------------------------------------------- attempt 1
+# Claim the thread before the model is called, not after it returns: a run that
+# crashes still moved the conversation, and the next --continue has to know.
+printf '%s\n' "$LABEL" > "$LAST_THREAD" 2>/dev/null || true
 printf -- '\n--- run report -----------------------------------------------------\n'
 run_attempt "$FIRST_MODEL" "$BASE" "$CONTINUE"
 stream_rc=$?
