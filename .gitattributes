@@ -15,6 +15,7 @@
 agy-agents/assets/dispatch      text eol=lf
 agy-agents/assets/gates         text eol=lf
 agy-agents/assets/review-pkg    text eol=lf
+agy-agents/assets/solo          text eol=lf
 agy-agents/assets/tripwire      text eol=lf
 agy-agents/scripts/install      text eol=lf
 agy-agents/scripts/selftest     text eol=lf

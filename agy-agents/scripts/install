@@ -344,7 +344,7 @@ else
 	say version "upgrading $PRIOR_VERSION → $SKILL_VERSION"
 fi
 
-for f in dispatch tripwire review-pkg fingerprint-tree.ps1; do
+for f in dispatch solo tripwire review-pkg fingerprint-tree.ps1; do
 	if do_it; then
 		# Substituted rather than copied, because the version has to reach the
 		# installed file and only the installer knows it. These scripts are the

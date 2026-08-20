@@ -2011,6 +2011,141 @@ else
 	no_cr "  and no carriage return survives into the file" "$BCLASS5"
 fi
 
+# ==================================================================== solo arm
+printf '\n=== solo arm =======================================================\n'
+
+# The Claude-only baseline. Without it the benchmark has one arm and nothing to
+# compare it against.
+#
+# This section sits above the milestone tests for the same reason the bench
+# section does: those end by appending a raw `AGY_WORKSPACE=.agy/work/mX` to
+# .agy/config, a plain assignment that beats the environment for everything
+# running after it. Below that line these assertions would resolve a workspace
+# that has no logs directory, and `ls -t` would hand them a sidecar from an
+# unrelated earlier run.
+SWS=".agy/work/msolo"
+rm -rf "${REPO:?}/$SWS"
+mkdir -p "$REPO/$SWS/logs"
+
+# Refusals first: solo runs no model, so its only failure modes are bracket
+# bookkeeping, and each one has to be loud in BOTH the output and the status.
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo > "$TMP/s0.log" 2>&1 )
+want "solo with no task number refuses" 2 $?
+has "  prints a verdict block"          "--- verdict"          "$TMP/s0.log"
+has "  names the failure"               "DID NOT RUN"          "$TMP/s0.log"
+has "  and the exit code agrees"        "exit    2"            "$TMP/s0.log"
+
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo --done > "$TMP/s1.log" 2>&1 )
+want "solo --done with no open bracket refuses" 2 $?
+has "  says why"                        "no open solo bracket" "$TMP/s1.log"
+
+# The happy path: open, do work, close. The closed record must carry both
+# endpoints and the git range, or it cannot be compared with an agy run.
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo 4 > "$TMP/s2.log" 2>&1 )
+want "solo opens a bracket" 0 $?
+has "  confirms the task"               "task-4"               "$TMP/s2.log"
+
+# Overlapping brackets cannot be attributed: the second one's commits are the
+# first one's commits, and nothing in either record says so.
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo 5 > "$TMP/s3.log" 2>&1 )
+want "solo refuses a second open bracket" 2 $?
+has "  says which one is open"          "already open"         "$TMP/s3.log"
+has "  and names the task holding it"   "task-4"               "$TMP/s3.log"
+
+(
+	cd "$REPO" || exit 1
+	mkdir -p src
+	printf 'claude did this\n' > src/solo.txt
+	git add -A >/dev/null 2>&1
+	git commit -qm "solo work" >/dev/null 2>&1
+	AGY_WORKSPACE="$SWS" bash .agy/solo --done > "$TMP/s4.log" 2>&1
+)
+want "solo closes the bracket" 0 $?
+
+SCLASS="$(ls -t "$REPO/$SWS"/logs/solo-*.class 2>/dev/null | head -1)"
+if [ -z "$SCLASS" ]; then
+	bad "solo wrote a .class" "none found — the measurement assertions cannot run"
+else
+	ok "solo wrote a .class"
+	has    "  marks the arm"                 "arm=solo"    "$SCLASS"
+	has    "  names the task"                "task=task-4" "$SCLASS"
+	hasval "  records wall seconds"          wall          "$SCLASS"
+	has    "  counts the commit"             "commits=1"   "$SCLASS"
+	hasval "  records the range"             range         "$SCLASS"
+	# One status key, not two. class_val takes the first match, so a close that
+	# appends a second status= line leaves a finished bracket reading back as
+	# still open to every reader downstream — including the skip rule, which
+	# keys on exactly this field to decide whether a run was measured at all.
+	sc="$(class_val "$SCLASS" status)"
+	if [ "$sc" = "success" ]; then
+		ok "  reads back as closed, not open"
+	else
+		bad "  reads back as closed, not open" "status resolves to '$sc'"
+	fi
+	nstat="$(grep -c '^status=' "$SCLASS" 2>/dev/null)"
+	if [ "$nstat" = "1" ]; then
+		ok "  and carries exactly one status key"
+	else
+		bad "  and carries exactly one status key" "found $nstat"
+	fi
+	# The same shape the agy arm records, so one reader can parse both.
+	if grep -qE '^range=[0-9a-f]{40}\.\.[0-9a-f]{40}$' "$SCLASS" 2>/dev/null; then
+		ok "  records the range as two resolved heads"
+	else
+		bad "  records the range as two resolved heads" "range=$(class_val "$SCLASS" range)"
+	fi
+fi
+
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo --done > "$TMP/s5.log" 2>&1 )
+want "solo refuses a double close" 2 $?
+
+# Both arms must land in the same place or `bench/collect` reads one of them
+# and reports half a comparison as though it were whole. dispatch resolves its
+# workspace by sourcing .agy/config and then applying `:=`, so environment
+# beats config beats default; solo has to resolve it the same way.
+#
+# Every assertion above sets AGY_WORKSPACE explicitly, so a solo that ignored
+# .agy/config entirely and hardcoded the default would pass all of them — and
+# would write to the wrong directory in every repo installed on a milestone,
+# which is most of them. This fixture is the only row that can see it: the
+# environment is unset, so the config is the sole source of the answer.
+SF="$TMP/solocfg"
+mkdir -p "$SF/src"
+(
+	cd "$SF" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project SF --milestone msolo >install.log 2>&1
+) || bad "solo config fixture installs" "setup failed"
+scfg="$( cd "$SF" && unset AGY_WORKSPACE && . ./.agy/config >/dev/null 2>&1; printf '%s' "${AGY_WORKSPACE:-}" )"
+if [ "$scfg" != ".agy/work/msolo" ]; then
+	bad "the config fixture points at its own milestone" "config resolves to '$scfg'"
+else
+	ok "the config fixture points at its own milestone"
+	( cd "$SF" && unset AGY_WORKSPACE && bash .agy/solo 7 > "$SF/s.log" 2>&1 )
+	want "  solo opens a bracket with no environment override" 0 $?
+	if [ -n "$(ls -t "$SF/$scfg"/logs/solo-*.class 2>/dev/null)" ]; then
+		ok "  and writes into the workspace .agy/config names"
+	else
+		bad "  and writes into the workspace .agy/config names" \
+			"nothing under $scfg/logs; .agy/work/logs holds: $(ls "$SF/.agy/work/logs" 2>/dev/null | tr '\n' ' ')"
+	fi
+fi
+
+# And the other side of the same rule: a repo with no config is not a repo with
+# a default config. dispatch refuses; solo, writing into the same workspace on
+# the same terms, has to refuse identically rather than inventing one.
+SN="$TMP/soloncfg"
+mkdir -p "$SN"
+(
+	cd "$SN" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > x.txt && git add -A && git commit -qm init
+) >/dev/null 2>&1
+( cd "$SN" && bash "$REPO/.agy/solo" 1 > "$SN/s.log" 2>&1 )
+want "solo in a repo with no .agy/config refuses" 2 $?
+has "  and names what is missing" "no .agy/config" "$SN/s.log"
+
 printf '\n=== milestone advance ==============================================\n'
 # A project outlives the milestone it was installed on. Passing --milestone used
 # to scaffold the new workspace and change nothing else: the adoption scan
