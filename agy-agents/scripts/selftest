@@ -184,6 +184,31 @@ if [ -n "${FAKE_BYPASS:-}" ]; then
 	exit 0
 fi
 
+# GST-41: a tool call fails and the run works around it. Antigravity's
+# write_to_file is sandboxed to the agent's own brain directory and refuses a
+# path outside it — including the report path, the one file the contract names.
+# The run recovers through run_command, and agy still downgrades the result to
+# ERROR and exits non-zero. Everything that distinguishes this from a run that
+# did nothing is on disk; none of it is in the status or the exit code.
+#
+# The refusal is worded the way a sandbox words it, and deliberately NOT the way
+# a permission denial does: those are a different class here — never recovered
+# from — and a fixture that blurred them would test the wrong branch. Set
+# FAKE_TOOL_ERROR=denial to put a real denial in the same stream, which is how
+# the conduct leg of the recovery test is driven.
+if [ -n "${FAKE_TOOL_ERROR:-}" ]; then
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"write_to_file","tool_info":{"name":"write_to_file","parameters":{"file_path":".agy/work/m1/task-9-report.md"},"error":{"message":"write_to_file is restricted to the agent workspace; that path is outside it"}}}}'
+	printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"cat > .agy/work/m1/task-9-report.md"}}}}'
+	if [ "$FAKE_TOOL_ERROR" = "denyrule" ]; then
+		printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"write_to_file","tool_info":{"name":"write_to_file","parameters":{"file_path":"/scratch/notes.md"},"error":{"message":"Matches user-configured deny rule"}}}}'
+	fi
+	if [ "$FAKE_TOOL_ERROR" = "denial" ]; then
+		printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"ERROR","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git push"},"error":{"message":"Command was denied permission by user settings"}}}}'
+	fi
+	printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":{"message":"a tool call failed during this session"},"response":"write_to_file refused the report path, so I wrote it through run_command instead. The task is done and committed.","num_turns":4,"duration_seconds":11}}'
+	exit 1
+fi
+
 # Trap 4: the run does the work, writes its report, and then never emits a
 # result event. FAKE_HANG is how many seconds it sits there; FAKE_REPORT, when
 # set, is the report it claims to have written on the way.
@@ -1086,6 +1111,136 @@ has   "a committed run reports the commit" "landed  1 commit(s)" "$TMP/l3.log"
 has   "  quotes its subject"               "task work: src/committed.txt" "$TMP/l3.log"
 hasnt "  does not claim nothing landed"    "landed  NOTHING" "$TMP/l3.log"
 
+printf '\n=== a tool error the run worked around =============================\n'
+# GST-41, from the field. write_to_file is sandboxed to the agent's own brain
+# directory and refused .agy/work/m7/task-2-report.md — the one file every
+# dispatch is contractually required to produce. The run recovered through
+# run_command, wrote 564 accurate lines, and committed. agy had already
+# downgraded the status to ERROR, and this harness turned that into exit 1, so
+# at the exit code the run was indistinguishable from the quota failure forty
+# minutes earlier that committed nothing at all.
+#
+# That is the GST-40 fault-injection finding restated from the other side: one
+# bit cannot carry two questions. There the exit code graded a reserve-burning
+# path green because a run that never failed also exits 0; here it graded a
+# finished, committed, gate-green run red because one call along the way did.
+#
+# So the tool error becomes evidence and the artifacts become the verdict. Every
+# leg of that conjunction gets its own row below, because a single assertion
+# that the happy path exits 0 would pass equally against a dispatch that simply
+# stopped judging tool errors — which is the failure this fix could most easily
+# become.
+# A deterministic green runner for this section. The starter the installer
+# generates is a guess about the project's toolchain, and every row below
+# turns on the gates being GREEN — a section whose premise rests on a guess
+# tests the guess.
+cp .agy/gates "$TMP/gates.r41.bak"
+printf '#!/usr/bin/env bash\nprintf "all gates green\\n"\nexit 0\n' > .agy/gates
+
+recovered() { # recovered <log> [FAKE_TOUCH] [FAKE_COMMIT] [FAKE_TOOL_ERROR]
+	rm -f "$REPORT_9"
+	FAKE_TOOL_ERROR="${4:-1}" FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+	FAKE_TOUCH="${2:-}" FAKE_COMMIT="${3:-}" AGY_SKIP_GATES=0 \
+		bash .agy/dispatch 9 >"$1" 2>&1
+}
+
+recovered "$TMP/r1.log" "src/recovered.txt" 1
+want  "a tool error the run worked around does not fail the dispatch" 0 $?
+has   "  the verdict has words for it"     "TOOL ERROR(S) the run worked around" "$TMP/r1.log"
+has   "  and says what proves it"          "proven by the report, the fence"     "$TMP/r1.log"
+has   "  recovery is shown, not asserted"  "--- recovered ---"                   "$TMP/r1.log"
+has   "  the error is still on the page"   "write_to_file"                       "$TMP/r1.log"
+has   "  and the commit it rests on named" "landed    1 commit(s)"               "$TMP/r1.log"
+
+# The count has to survive into the sidecar: the verdict is for a human and the
+# benchmark reads neither the screen nor the exit code.
+RCLASS="$(ls -t .agy/work/m1/logs/*.class 2>/dev/null | head -1)"
+has "  the sidecar carries the count"      "tool_errors=1" "$RCLASS"
+has "  and the hard-fail count beside it"  "hard_fails=0"  "$RCLASS"
+
+# ---- one leg removed per row, and nothing else ------------------------------
+recovered "$TMP/r2.log" "src/uncommitted.txt"
+want  "the same error with the work UNCOMMITTED still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r2.log"
+rm -f src/uncommitted.txt
+
+recovered "$TMP/r3.log"
+want  "the same error with NOTHING landed still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r3.log"
+
+printf '#!/usr/bin/env bash\nprintf "boom\\n"\nexit 1\n' > .agy/gates
+recovered "$TMP/r4.log" "src/redgate.txt" 1
+want  "the same error over a RED gate still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r4.log"
+printf '#!/usr/bin/env bash\nprintf "all gates green\\n"\nexit 0\n' > .agy/gates
+
+# The house rule, stated as a test: an absent measurement is never a pass. A
+# skipped gate suite is the most inviting way to lose this one, because the
+# screen says `gates   not run` and everything else on it is green.
+rm -f "$REPORT_9"
+FAKE_TOOL_ERROR=1 FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/skipped.txt" FAKE_COMMIT=1 AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 9 >"$TMP/r5.log" 2>&1
+want  "UNRUN gates do not authorise recovery" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r5.log"
+
+# No report at all is the case GST-41 arrived through: if write_to_file had
+# refused and the run had NOT worked around it, this is what would be left.
+rm -f "$REPORT_9"
+FAKE_TOOL_ERROR=1 FAKE_TOUCH="src/noreport.txt" FAKE_COMMIT=1 AGY_SKIP_GATES=0 \
+	bash .agy/dispatch 9 >"$TMP/r6.log" 2>&1
+want  "a tool error with NO report on disk still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r6.log"
+
+# Conduct is never recovered from. A blocked call in the same stream means the
+# boundary held and something walked into it — the greenest possible tree does
+# not answer that, because the report will describe the work as done, accurately.
+recovered "$TMP/r7.log" "src/conduct.txt" 1 denial
+want  "a BLOCKED call in the same stream is never recovered from" 1 $?
+hasnt "  and claims no recovery"  "--- recovered ---" "$TMP/r7.log"
+has   "  it is named as a block"  "BLOCKED despite"   "$TMP/r7.log"
+
+# GST-42, and the reason it had to be fixed in the same breath as GST-41.
+# Antigravity auto-denied a write_to_file into its OWN scratch directory under
+# --dangerously-skip-permissions, and said only `Matches user-configured deny
+# rule` — a sentence carrying none of the words the classifier was looking for.
+# Filed as a tool error, that denial would have walked straight through the
+# recovery above on an otherwise perfect run. The verbatim field wording is the
+# fixture, because a paraphrase would test the paraphrase.
+recovered "$TMP/r9.log" "src/denyrule.txt" 1 denyrule
+want  "a deny-rule refusal is conduct, not a path error" 1 $?
+hasnt "  and claims no recovery"       "--- recovered ---" "$TMP/r9.log"
+has   "  it is named as a block"       "BLOCKED despite"   "$TMP/r9.log"
+has   "  quoting the wording verbatim" "user-configured deny rule" "$TMP/r9.log"
+
+# And the other direction: a non-SUCCESS status with NO tool error in the stream
+# has nothing to attribute itself to and stays a hard failure. Every quota row
+# in the dispatch section above is that assertion; this one says it in one line
+# against the same fixture family, so a future relaxation of `status` alone has
+# to walk past it.
+rm -f "$REPORT_9"
+FAKE_ERROR=unknown FAKE_REPORT="$REPORT_9" FAKE_REPORT_TEXT="$REPORT_OK" \
+FAKE_TOUCH="src/statusonly.txt" FAKE_COMMIT=1 AGY_FALLBACK=off AGY_SKIP_GATES=0 \
+	bash .agy/dispatch 9 >"$TMP/r8.log" 2>&1
+want  "a bare non-SUCCESS status with no tool error still fails" 1 $?
+hasnt "  and claims no recovery" "--- recovered ---" "$TMP/r8.log"
+
+# And the mechanism that row rests on, pinned rather than reasoned about. The
+# recovery conjunction also requires tool_errors > 0, and fault injection could
+# not witness that leg: removing it changed nothing, because with no tool error
+# in the stream node has nothing to attribute a bad status to and hard-fails
+# instead — which the hard_fails leg already catches. The leg stays (it is the
+# cheap half of a defence that spans two languages), and these two rows state
+# the invariant it leans on, so a future softening of node's `fail` here turns
+# something red instead of quietly making the leg the only thing left.
+SCLASS="$(ls -t .agy/work/m1/logs/*.class 2>/dev/null | head -1)"
+has "  no tool error is recorded for it"     "tool_errors=0" "$SCLASS"
+hasnt "  and it is not counted as a soft one"  "hard_fails=0"  "$SCLASS"
+
+rm -f "$REPORT_9"
+cp "$TMP/gates.r41.bak" .agy/gates
+
+printf '\n=== what landed (continued) ========================================\n'
 # agy reports `1 turns` on runs carrying two dozen recorded tool calls. On one
 # line with the durations it reads as a one-shot answer; the count that means
 # something is the one measured off the stream.
@@ -1246,7 +1401,7 @@ printf '\n=== review package =================================================\n
 # verdicts have to be printed into it — brief integrity first, because a
 # reviewer asked only "does the diff match the brief" confirms a faithful
 # implementation of a wrong rule.
-PKG_OUT="$(bash .agy/review-pkg HEAD~1 task-9 2>&1)"
+PKG_OUT="$(bash .agy/review-pkg HEAD~1 task-9 2>"$TMP/pkg-err.log")"
 want "review-pkg builds a package" 0 $?
 PKG="$(printf '%s' "$PKG_OUT" | awk '{print $1}')"
 has "  it demands three verdicts"          "Three verdicts are required" "$PKG"
@@ -1261,6 +1416,38 @@ has "  saying why one is needed"           "never existed"               "$PKG"
 # without and owed.
 has "  and to write findings as it finds them" "Write each finding down as you reach it" "$PKG"
 has "  because it is the likeliest to be cut off" "most likely to be cut off"  "$PKG"
+
+# GST-43. Reviewers dying of session limits was documented as a rare accident
+# and is arithmetic: package plus four documents plus re-execution of every
+# pasted proof is most of a session, and a milestone lost three tasks in a row
+# to it. The prose fix belongs in protocol.md; this is the half a machine can
+# check — the one place the size is known before the reviewer is spent.
+printf '%s\n' "$PKG_OUT" > "$TMP/pkg-out.log"
+has "  and reports its own size" " lines)" "$TMP/pkg-out.log"
+# Round three found this the hard way. A mutation that made the warning fire on
+# every package turned nine unrelated rows of this section red, because the
+# capture above used to merge stderr into stdout and take the first word — and
+# an unbuffered stderr line arrives ahead of a buffered stdout one, so `$PKG`
+# became "WARNING:" and every later assertion looked in a file that did not
+# exist. The cascade was the fixture's fault rather than the mutation's, but the
+# same parse lives in any caller that pipes this command, so the split is now a
+# stated contract instead of an accident of how big the fixture happened to be.
+want "  and stdout carries the path and nothing else" 1 \
+	"$(printf '%s\n' "$PKG_OUT" | wc -l | tr -d ' ')"
+
+AGY_REVIEW_MAX=1 bash .agy/review-pkg HEAD~1 task-9big \
+	> "$TMP/pkg-big.out" 2>"$TMP/pkg-big.log"
+want "an oversized package warns before a reviewer is spent" 0 $?
+has  "  naming the budget it crossed" "over the 1-line review budget" "$TMP/pkg-big.log"
+has  "  and what to do instead"       "scoped review"                 "$TMP/pkg-big.log"
+# The warning is advice, not a refusal: a controller may have a good reason for
+# a large task, and a gate that blocked here would be routed around rather than
+# obeyed.
+has  "  while still building the package" "review-task-9big.diff"     "$TMP/pkg-big.out"
+hasnt "  and the warning stays off stdout" "WARNING"                  "$TMP/pkg-big.out"
+
+AGY_REVIEW_MAX=99999 bash .agy/review-pkg HEAD~1 task-9ok > "$TMP/pkg-ok.log" 2>&1
+hasnt "a package inside the budget says nothing" "WARNING" "$TMP/pkg-ok.log"
 
 # ============================================== is the review finished?
 printf '\n=== review completeness ============================================\n'

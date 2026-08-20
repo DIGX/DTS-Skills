@@ -383,6 +383,58 @@ review package. Then:
   *other* command a report cites — a one-off script, a fault injection, a
   targeted test run — has no such capture. Re-run those.
 
+### Size the review to a session, not to the task
+
+Reported from the field, twice on the same project: a milestone lost three
+consecutive tasks because each reviewer hit its session limit mid-review. The
+section below accounts for that correctly but treats it as an accident. It is
+not. It is arithmetic.
+
+Count what this contract asks a reviewer to do: read the diff, the brief, the
+report, `dispatch-context.md` and the review package; **re-execute** every
+command the report pastes as proof; then produce three verdicts with `file:line`
+citations and a reconciled criteria table. On a task with a two-thousand-line
+diff that is most of a session's budget by itself, and three of them back to
+back is reliably over it. Nothing above is safe to cut, either — re-execution is
+the only check in the whole harness that looks inside a report, so the expensive
+half is the load-bearing half.
+
+So the review is a unit of work with a budget, and the budget is what sizes it.
+
+- **One full review per reviewer session.** Do not queue three and expect the
+  third to survive. A reviewer killed at eighty percent has spent everything it
+  read and returns a file the `REVIEW-END` check will reject — the worst trade
+  available.
+- **Size the task by its review, not by its implementation.** *Sizing tasks*
+  below asks whether a task has one independently testable deliverable. Add a
+  second question: can one reviewer read the resulting diff and re-run its
+  proofs inside a single session? A task that will produce well over a thousand
+  diff lines needs splitting for that reason alone, however clean its
+  deliverable is. `.agy/review-pkg` prints the package's diff size and says so
+  when it crosses the line, because a controller that has to estimate this by
+  eye will estimate it optimistically every time.
+- **Scope the package when the task's risk is narrow, and say that you did.**
+  Not every task earns the full contract. One that touches only infrastructure —
+  no product source, no interface a later task consumes, no surface the user
+  sees — can be reviewed from a shortened package: diff, brief, and acceptance
+  criteria. Brief integrity and spec compliance are still demanded; what drops
+  is the whole-file quality sweep over code the task did not touch. State the
+  scoping in the dispatch and record it in the ledger as `reviewed (scoped:
+  <why>)`. An unannounced short review is indistinguishable from a lazy one, and
+  the ledger is where that distinction has to survive.
+- **Never scope by shortening the verdicts.** All three still come back, the
+  criteria table still reconciles against the brief, and the `REVIEW-END` line
+  still terminates the file. What shrinks is what the reviewer *reads* — never
+  what it is asked to conclude. A review with two verdicts is not a cheaper
+  review, it is an incomplete one, and the check will reject it.
+
+Sequencing follows from the same budget. Reviews are the tail of every task, so
+a milestone that dispatches implementers as fast as they finish will stack
+unreviewed tasks behind a reviewer that cannot keep up — which is the state the
+field report describes, and which the protocol elsewhere forbids outright. When
+the reviewer is the scarce resource, it sets the pace of the milestone: hold the
+next task rather than run ahead of the last review.
+
 ### When the reviewer cannot run
 
 A subagent may be unavailable: the harness forbids it, the session budget will
@@ -476,6 +528,12 @@ a plan section the brief only summarises.
 **Raise review scrutiny, don't lower it, when a large task comes back unusually
 fast.** Speed is not evidence of correctness, and here it has repeatedly meant
 the opposite.
+
+**And size it by the review it will need, not only by the work it contains.**
+A task can have exactly one independently testable deliverable and still be too
+large for anyone to grade — see *Size the review to a session, not to the task*
+above. `.agy/review-pkg` prints the number and warns when it crosses the line,
+but by then the task is written; the cheap moment to catch it is here.
 
 ## Mirror every fix into the plan
 

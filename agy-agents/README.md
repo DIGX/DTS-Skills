@@ -52,13 +52,16 @@ event-shape docs did not match the wire.
 
 ---
 
-## The five CLI traps
+## The six CLI traps
 
 They share one property: **the failure is invisible from the outside.**
 
 Traps 1–3 make a completely broken run report `SUCCESS` with exit code `0`.
 Trap 4 makes a *finished* run look like a hung one for 45 minutes. Trap 5 makes
-a fence you believe you have fail open silently.
+a fence you believe you have fail open silently. Trap 6 runs the other way — it
+reports failure on a run that finished, committed and passed its gates — which
+costs the same in the end, because a verdict word that fires on good runs stops
+being read.
 
 Full detail, with the probe transcripts: [`reference/dispatch-traps.md`](reference/dispatch-traps.md).
 
@@ -189,6 +192,27 @@ wanted it open; `deny` fails open where you wanted it closed. The harness
 therefore skips it and derives its safety from `.agy/tripwire`, which checks the
 filesystem *after the fact* rather than trying to predict a command.
 
+### 6. One failed call condemns a finished run
+
+`write_to_file` is sandboxed to the agent's own workspace and refuses a path
+outside it — including `.agy/work/mN/task-N-report.md`, the one file every
+dispatch is required to produce. agy downgrades the whole session to
+`status ERROR` for that single call. The run then recovers through
+`run_command`, writes the report, and commits, and the status never comes back
+up.
+
+Reported from the field on the reserve model: the recovered run and a quota
+failure forty minutes earlier that committed nothing exited identically, so
+every reserve run had to be adjudicated by hand.
+
+**Answer:** the tool error becomes evidence rather than the verdict, and
+recovery is proven out of measurements the dispatch already takes — a fresh
+report with its contract sections, a clean fence, gates that were *run* and
+green, a measured commit, uncontradicted numbers, the right co-author trailer,
+and nothing in the stream about conduct. All of them, or the run stays
+`PROBLEMS`. A denial or a bypass is never recovered from at all. Full detail in
+[`reference/dispatch-traps.md`](reference/dispatch-traps.md).
+
 ### Event stream shape
 
 The documented flat shape is wrong. Real `--output-format stream-json` events
@@ -252,8 +276,8 @@ All three are handled by refusing to proceed:
 ```
 .agy/
 ├── config                     the only file that differs between projects
-├── dispatch                   the sanctioned way to call agy  (~760 lines)
-├── tripwire                   the integrity fence             (~430 lines)
+├── dispatch                   the sanctioned way to call agy (~1430 lines)
+├── tripwire                   the integrity fence             (~470 lines)
 ├── gates                      your verification suite — a starter; make it real
 ├── review-pkg                 builds a review package from a diff range
 ├── fingerprint-tree.ps1       fast metadata fingerprints (Windows)
@@ -274,7 +298,8 @@ The four scripts are **the skill's to own** — refreshed on every install.
 ### `.agy/dispatch` — the event-stream judge
 
 The only sanctioned way to call `agy`. Its header comment is organised around
-traps 1–4 in order, because each one shaped a specific part of it.
+traps 1–4 in order, because each one shaped a specific part of it; trap 6 is
+answered further down the file, after the artefacts its answer reads.
 
 It:
 
@@ -283,7 +308,8 @@ It:
 - passes `--add-dir` with the correct native path form (trap 1);
 - streams and parses the nested NDJSON event log with Node, counting tool calls,
   denials and tool errors, and judges the run from that rather than from `$?`
-  (trap 2);
+  (trap 2) — a denial is conduct and fails outright, a tool error is evidence
+  about the path and is settled below against what actually landed (trap 6);
 - carries `--dangerously-skip-permissions` internally, coupled to the fence, so
   the flag can never be used bare (trap 3);
 - watchdogs a stream that goes silent, and defers on any run that ends without a
@@ -381,6 +407,29 @@ Lockfiles are excluded — on the first package built by hand for this workflow,
 would have pushed the real content past the reviewer's read limit. The manifests
 themselves (`composer.json`, `package.json`, …) are always included in full, so
 nothing a reviewer must judge is hidden.
+
+It prints the package's size, and says so when the size is more than one
+reviewer session can carry:
+
+```
+.agy/work/m1/review-task-3.diff (2140 lines)
+WARNING: 2140 lines, over the 1200-line review budget.
+         One reviewer session may not finish this. Split the task, or
+         send a scoped review and record the scoping in the ledger.
+```
+
+The budget is real arithmetic, not caution. A reviewer reads this package *plus*
+the brief, the report and `dispatch-context.md`, and re-executes every command
+the report pastes as proof — so the package is the floor of the cost, not the
+whole of it. A milestone in the field lost three consecutive tasks to reviewers
+hitting their session limit mid-review, each having read everything and returned
+a file `--check` then rejected. The number was always there to be read; nobody
+read it, which is why it now says something.
+
+It warns rather than refuses. A controller may have a good reason for a large
+task, and a gate here would be routed around instead of obeyed. Raise or lower
+the line with `AGY_REVIEW_MAX`. What to do about it is in `protocol.md`, under
+*Size the review to a session, not to the task*.
 
 #### `--check` — is the review finished?
 
@@ -694,6 +743,28 @@ identically. It is deliberately not `PROBLEMS`: the work landing and the session
 dying are different facts, and a harness with one word for both teaches you to
 discount that word.
 
+`run  clean, but N TOOL ERROR(S) the run worked around` is trap 6. A tool call
+failed and the run did the task anyway — most often `write_to_file` refusing a
+path outside the agent's own workspace, which includes
+`.agy/work/mN/task-N-report.md`, the one file this contract requires. agy
+downgrades the whole session's status for a single failed call, so before this
+line existed a run that recovered and a run that committed nothing exited
+identically, and every one had to be adjudicated by hand.
+
+Recovery is never inferred from how confident the report sounds. Each of these
+was measured on the run before the line is printed: the report was written
+*during* it and carries its contract sections, the fence is clean, the gates
+were **run** and green, a commit was measured, no number in the report
+contradicts the gates, and the co-author trailer is the configured one. Miss one
+and the run stays `PROBLEMS` — an absent measurement is never a pass, and
+`gates  not run` least of all. A blocked call or a bypass is never recovered
+from however green everything else is: that is a fact about the boundary, not
+about the path the run took.
+
+The errors stay printed above the verdict and counted in the sidecar as
+`tool_errors=N`. Read them anyway — a path a run had to work around once will be
+there again next time.
+
 ---
 
 ## Quota and the reserve policy
@@ -794,7 +865,7 @@ agy-agents/
 │   ├── setup.md                   install & authenticate agy; headless smoke test
 │   ├── install.md                 installing, adopting, full config reference
 │   ├── protocol.md                the task cycle, reviewer contract, fix loop
-│   └── dispatch-traps.md          the five traps, event shape, quota, debugging
+│   └── dispatch-traps.md          the six traps, event shape, quota, debugging
 ├── assets/
 │   ├── dispatch                   ─┐
 │   ├── tripwire                    │ copied into .agy/ on install

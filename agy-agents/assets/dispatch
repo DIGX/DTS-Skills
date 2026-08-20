@@ -3,7 +3,7 @@
 # Dispatch one task to the implementer model through the Antigravity CLI,
 # headlessly. This is the only sanctioned way to call `agy` in this project.
 #
-# Four things about agy shape this whole script.
+# Five things about agy shape this whole script.
 #
 # First, `--add-dir` is not optional. agy's default CLI project has no
 # resources attached (projectResources is {}), so a headless run gets a scratch
@@ -51,6 +51,24 @@
 # Both forms end with no result event, and THAT is what the deferral keys on —
 # not on whether we did the killing. Status, an empty response and an exit code
 # from a session that died describe the death, not the work.
+#
+# Fifth, one failed tool call condemns the whole run. write_to_file is
+# sandboxed to the agent's own workspace and refuses any path outside it —
+# including .agy/work/mN/task-N-report.md, the one file this contract requires.
+# agy downgrades the session to status ERROR for that single call and never
+# takes it back, so a run that recovered through run_command, wrote 564 accurate
+# lines and committed exits exactly like the quota failure forty minutes earlier
+# that committed nothing. One bit cannot carry two questions, and the fault
+# injection behind the quota work had already found the same defect from the
+# other side: an assertion that a run exited 0 passed against a run that never
+# ran. So a tool error is recorded as evidence about the PATH the run took
+# rather than taken as the verdict, and the `recovered` section below proves the
+# outcome out of measurements this script is already making — a fresh report
+# carrying its contract sections, a clean fence, GREEN gates, a measured commit,
+# uncontradicted numbers, the configured trailer, and nothing in the stream
+# about conduct. All of them, or the run stays failed. A denial is not in that
+# class and never recovers from anything: it is a fact about the boundary, not
+# about the path.
 #
 # ---------------------------------------------------------------------------
 # MODEL GROUPS AND FALLBACK
@@ -640,7 +658,20 @@ for (const e of events) {
 		// A denial should be impossible, since permissions are skipped. If one
 		// appears anyway, the run is not what we think it is — so it stays a
 		// hard failure rather than a warning.
-		if (/denied permission|permission denied|not allowed|auto-denied/i.test(msg)) {
+		//
+		// The wording list is the load-bearing part, and it grew by field report.
+		// Antigravity auto-denied a write_to_file into its OWN scratch directory
+		// under --dangerously-skip-permissions, saying only `Matches
+		// user-configured deny rule` — no "permission", no "denied", no "not
+		// allowed". That phrasing matched none of the first four alternatives, so
+		// the denial would have been filed as a tool error, and since GST-41 a
+		// tool error is recoverable. A missed denial would have been handed the
+		// one exemption conduct must never get.
+		//
+		// So this test errs toward calling things denials. A false denial costs
+		// one hand-adjudication; a missed one costs the boundary, and the boundary
+		// is the only thing here that cannot be rebuilt from artifacts afterwards.
+		if (/denied permission|permission denied|not allowed|auto-denied|deny rule|denied by (?:user|policy|settings|config)|user-configured deny/i.test(msg)) {
 			denials.push(`${cmd || name}: ${msg}`.slice(0, 200));
 			if (cmd) deniedCmds.push(cmd);
 		} else {
@@ -803,12 +834,27 @@ if (quota !== 'none') {
 	if (quotaRaw) console.log(pad(''), quotaRaw);
 }
 
+// Two counters, not one. `problems` still decides this parser's exit status, so
+// nothing about the fallback decision downstream changes. `hardFails` is the
+// subset that is evidence about CONDUCT or about ABSENCE — a boundary walked
+// around, a call blocked, no tool calls at all, no report — and those are never
+// recovered from, however green everything else looks.
+//
+// The complement is a tool error, and the status and exit code agy downgrades
+// because of one. Those are facts about the PATH the run took, not about its
+// outcome, and this layer cannot see which. It reads a stream; whether the run
+// worked around the error is written on disk, in the report, the fence, the
+// gates and the commit. So it counts them, names them, and hands the question
+// to the shell. See the `recovered` section there, and GST-41.
 let problems = 0;
-const fail = (headline, lines) => {
+let hardFails = 0;
+const say = (headline, lines) => {
 	problems++;
 	console.log('\nFAIL  ' + headline);
 	(lines || []).slice(0, 15).forEach(l => console.log('      - ' + l));
 };
+const fail = (headline, lines) => { hardFails++; say(headline, lines); };
+const pathFail = (headline, lines) => say(headline, lines);
 
 if (bypasses.length) {
 	fail(`${bypasses.length} denied command(s) then ran under another name — BYPASS.`, bypasses);
@@ -832,14 +878,31 @@ if (deferred) {
 	console.log('      status, response and exit code are not judged; the evidence');
 	console.log('      is now the fence, the gates and the report on disk.');
 } else if (status !== 'SUCCESS') {
-	fail('status is not SUCCESS', result.error ? [JSON.stringify(result.error)] : []);
+	// Attributed to the tool errors only when there ARE some. With none in the
+	// stream, nothing explains a non-SUCCESS status, and an unexplained failure
+	// is the last thing to soften — every quota failure lands here.
+	(errors.length ? pathFail : fail)('status is not SUCCESS',
+		result.error ? [JSON.stringify(result.error)] : []);
 }
-if (errors.length) fail(`${errors.length} tool error(s)`, errors);
+if (errors.length) {
+	pathFail(`${errors.length} tool error(s)`, errors);
+	console.log('      Whether the run worked around these is not decidable from the');
+	console.log('      stream. The report on disk, the fence, the gates and what');
+	console.log('      landed decide it — see the verdict below.');
+}
 if (!tools.size) fail(deferred
 	? 'no tool calls recorded before the stream ended — nothing evidences any work'
 	: 'no tool calls recorded — the implementer answered without doing the work');
 if (!deferred && !response.trim()) fail('empty response — the implementer produced no report');
-if (!deferred && Number(agyCode) !== 0) fail(`agy exited ${agyCode}`);
+if (!deferred && Number(agyCode) !== 0) {
+	(errors.length ? pathFail : fail)(`agy exited ${agyCode}`);
+}
+
+// Appended rather than folded into classRows above, because hardFails is only
+// known here and the sidecar must exist before this block runs: a parser that
+// throws half way through the summary would otherwise leave no .class at all,
+// and every reader downstream treats a missing sidecar as a missing run.
+fs.appendFileSync(classPath, `tool_errors=${errors.length}\nhard_fails=${hardFails}\n`);
 
 process.exit(problems ? 1 : 0);
 NODE
@@ -967,6 +1030,7 @@ fi
 # Unlike the claims comparison below this is deterministic — a heading is there
 # or it is not — so it fails the run rather than warning. Warnings are for
 # checks that can be wrong. The fix is one `--continue` away.
+CONTRACT_RC=0
 if [ "$REPORT_FRESH" = "1" ]; then
 	printf -- '\n--- report contract ------------------------------------------------\n'
 	missing_section=0
@@ -986,6 +1050,7 @@ EOF
 		printf '      one saying there was nothing — only one of them tells you the\n'
 		printf '      implementer looked.\n'
 		stream_rc=1
+		CONTRACT_RC=1
 	fi
 fi
 
@@ -1235,6 +1300,66 @@ NODE
 	CLAIMS_RC=$?
 fi
 
+# ------------------------------------------------------------------- recovered
+# GST-41. A tool call can fail and the run can still do the work. Antigravity's
+# write_to_file is sandboxed to the agent's own brain directory and refuses a
+# path outside it — including .agy/work/mN/task-N-report.md, the one file this
+# contract names. The run recovered through run_command, wrote 564 accurate
+# lines, and committed. agy had already downgraded the result to ERROR by then,
+# and this harness turned that into exit 1, so at the exit code the run was
+# indistinguishable from the quota failure forty minutes earlier that committed
+# nothing at all. Every run had to be adjudicated by hand.
+#
+# The exit code was the wrong instrument, and the fault injection behind GST-40
+# had already said so from the other side: a `want 0` assertion passed there on
+# a run that never failed, because a run that never failed also exits 0. One bit
+# cannot carry two questions. So the tool error stops being the verdict and
+# becomes evidence, and recovery is PROVEN rather than inferred, out of
+# measurements this dispatch was already taking:
+#
+#   the report exists and THIS run wrote it   a stale one proves nothing
+#   it carries its contract sections          a truncated one proves nothing
+#   the fence is clean                        no guarded surface moved
+#   the gates are GREEN                       not skipped: absent is not green
+#   the work is committed, and measured so    not "we could not tell"
+#   no number in the report is contradicted   the gates outrank the account
+#   the co-author trailer is the configured one
+#   nothing in the stream is about conduct    a denial or a bypass is never
+#                                             recovered from, however green
+#                                             everything else looks
+#
+# Every one of those is a positive measurement, and every one of them must hold.
+# Miss any and the run stays failed, because an absent measurement is never a
+# pass. hard_fails defaults to 1 when the sidecar cannot be read, for the same
+# reason: a measurement that did not arrive must not authorise anything.
+RECOVERED=0
+TOOL_ERRORS="$(read_class "$LAST_CLASS" tool_errors)"
+HARD_FAILS="$(read_class "$LAST_CLASS" hard_fails)"
+case "$TOOL_ERRORS" in ''|*[!0-9]*) TOOL_ERRORS=0 ;; esac
+case "$HARD_FAILS"  in ''|*[!0-9]*) HARD_FAILS=1 ;; esac
+
+if [ "$stream_rc" -ne 0 ] && [ "$TOOL_ERRORS" -gt 0 ] && [ "$HARD_FAILS" -eq 0 ] \
+	&& [ "$REPORT_FRESH" = "1" ] && [ "$CONTRACT_RC" -eq 0 ] \
+	&& [ "$trip_rc" -eq 0 ] && [ "$gates_rc" -eq 0 ] \
+	&& [ "${LANDED_MEASURED:-0}" = "1" ] && [ "${LANDED_COMMITS:-0}" -gt 0 ] \
+	&& [ "$CLAIMS_RC" -eq 0 ] && [ "$COAUTHOR_RC" -eq 0 ]; then
+	RECOVERED=1
+	stream_rc=0
+	printf -- '\n--- recovered ------------------------------------------------------\n'
+	printf '%s tool call(s) errored and the run worked around them. Not inferred —\n' "$TOOL_ERRORS"
+	printf 'each of these was measured on this run:\n\n'
+	printf '  report    written during this run, contract sections present\n'
+	printf '  fence     clean\n'
+	printf '  gates     green (run, not skipped)\n'
+	printf '  landed    %s commit(s)\n' "$LANDED_COMMITS"
+	printf '  claims    no number in the report contradicts the gates\n'
+	printf '  conduct   no blocked call and no bypass in the stream\n\n'
+	printf 'The errors stay listed in the run report above and counted in the\n'
+	printf 'sidecar as tool_errors=%s. What changed is that they no longer decide\n' "$TOOL_ERRORS"
+	printf 'the verdict on their own. Read them anyway: a path the run had to work\n'
+	printf 'around once will be there again next time.\n'
+fi
+
 # --------------------------------------------------------------------- verdict
 # Set before the block prints, not after: an interrupt landing midway through
 # these lines must not append a second, contradictory verdict to a partial one.
@@ -1251,6 +1376,12 @@ else
 fi
 if [ "$stream_rc" -ne 0 ]; then
 	v run 'PROBLEMS — see run report above'
+elif [ "${RECOVERED:-0}" = "1" ]; then
+	# The line GST-41 had no vocabulary for. Without it the only way to say
+	# "a tool call failed and the work still landed" was PROBLEMS — the same
+	# word as "nothing happened at all".
+	v run "clean, but $TOOL_ERRORS TOOL ERROR(S) the run worked around"
+	v '' 'proven by the report, the fence, the gates and the commit — see above'
 elif [ "$WALL_CAPPED" = "1" ]; then
 	# Distinct from the idle kill on purpose. WATCHDOG-KILLED says the run went
 	# quiet; WALL-CAPPED says it would not stop, which is where a model that has

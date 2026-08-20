@@ -5,17 +5,21 @@ Read this before debugging a run, and before ever calling `agy` by hand.
 Verified against **Antigravity CLI v1.1.12**. If your version differs, re-verify
 before trusting any of it.
 
-## The five traps
+## The six traps
 
 They share one property: **the failure is invisible from the outside.** The
 first three make a broken run report SUCCESS with exit 0. The fourth makes a
 *finished* run look like a hung one for 45 minutes. The fifth makes a fence you
-believe you have fail open silently. None was found by reading documentation —
-all five came out of probes.
+believe you have fail open silently. The sixth does it the other way round — it
+makes a *finished, committed, gate-green* run report failure, which costs you
+the same thing in the end, because a verdict word that fires on good runs stops
+being read. None was found by reading documentation; all six came out of probes
+or the field.
 
 Traps 1–4 shape `.agy/dispatch` directly, in the same order as its header
 comment. Trap 5 shapes nothing, because the harness had already abandoned the
-mechanism it breaks.
+mechanism it breaks. Trap 6 is documented in its own section below rather than
+here, because the answer to it is longer than the trap.
 
 ### 1. `--add-dir` is not optional
 
@@ -56,6 +60,19 @@ implementer must never touch, before and after.
 be used without the fence attached. If the fence will not arm, the dispatch
 refuses to start (exit 3). Do not work around this.
 
+**The flag does not skip `deny` rules.** Reported from the field: a
+`write_to_file` into the CLI's *own* scratch directory was auto-denied under
+`--dangerously-skip-permissions`, with the reason `Matches user-configured deny
+rule` — and `agy` exited **0 with `status SUCCESS`** anyway, which is trap 2
+again. So "dangerously skip permissions" names half of what it does. A
+machine-wide `deny` rule you forgot about will silently amputate a run and
+report success, and the only trace is in the event stream. `.agy/dispatch`
+catches it; `agy` on its own does not.
+
+That is also the second reason `setup.md` tells you to keep fencing in your own
+repository rather than in the machine-wide `settings.json`: the rule reaches
+runs it was never written for, including this harness's.
+
 ### 4. A finished run can hang forever without emitting its result
 
 `agy` can do the work, write the report, make the commit — and then never emit
@@ -90,10 +107,12 @@ killing, is what the harness keys on.
 
 A run with no `result` event is **deferred**, not failed: it was stopped, so
 status, response and exit code describe *how it ended* rather than whether the
-work was done, and are not judged. Nothing else is relaxed — a
-denial, a tool error or zero tool calls still fail a deferred run, because each
-is recorded in the stream and is evidence of what actually happened. A deferred
-run is also never quota-classified, so a hang can never open the reserve bucket.
+work was done, and are not judged. Nothing else is relaxed — a denial or zero
+tool calls still fail a deferred run, because each is recorded in the stream and
+is evidence of what actually happened. (A tool error is evidence too, but of the
+*path* rather than the outcome; trap 6 below settles those against what landed,
+on a deferred run like any other.) A deferred run is also never
+quota-classified, so a hang can never open the reserve bucket.
 
 What replaces the missing result is a **report freshness check**: the report
 must exist *and* be newer than the moment this dispatch started. A stale report
@@ -347,6 +366,66 @@ arrived at the other way — the chatty form of trap 4, where agy stopped on its
 own and the watchdog never fired. Read it identically. It is deliberately not
 `PROBLEMS`: the work landing and the session dying are different facts, and a
 harness with one word for both teaches you to discount that word.
+
+`run  clean, but N TOOL ERROR(S) the run worked around` is trap 6, below.
+
+## Trap 6: one failed call condemns a finished run
+
+`write_to_file` in Antigravity is sandboxed to the agent's own workspace and
+refuses a path outside it — including `.agy/work/mN/task-N-report.md`, the one
+file every dispatch is contractually required to produce. Observed in the field
+on the reserve model: the run recovered through `run_command`, wrote 564 accurate
+lines, and committed. agy had already downgraded the session to `status ERROR`
+for that one call, and the harness turned that into exit 1. At the exit code the
+run was indistinguishable from the quota failure forty minutes earlier that
+committed nothing, and every reserve run had to be adjudicated by hand.
+
+The exit code was the wrong instrument. It carries one bit and was being asked
+two questions — *did anything go wrong along the way* and *did the work land* —
+and the answers are independent. The fault injection behind the quota work had
+already found the same defect from the other side: an assertion that a run
+exited 0 passed against a run that never ran, because a run that never runs also
+exits 0.
+
+So a tool error stops being the verdict and becomes evidence, and recovery is
+**proven, not inferred**. Every one of these is measured on the run itself:
+
+| Measured | Why it is not enough on its own |
+|---|---|
+| the report exists, and *this* run wrote it | a stale one proves nothing |
+| it carries its contract sections | a truncated one proves nothing |
+| the fence is clean | no guarded surface moved |
+| the gates are **green** | `not run` is absent, and absent is never green |
+| the work is committed, and measured so | not "we could not tell" |
+| no number in the report is contradicted | the gates outrank the account |
+| the co-author trailer is the configured one | |
+| nothing in the stream is about conduct | see below |
+
+All of them must hold. Miss one and the run stays `PROBLEMS`, because an absent
+measurement is never a pass — including the sidecar itself, which is read back
+as *fail* when it cannot be read at all.
+
+**Conduct is never recovered from.** A blocked call or a bypass in the same
+stream fails the run however green everything else is, and the greenest possible
+tree does not answer it: the report will describe the work as done, accurately.
+A denial is a fact about the boundary holding; a tool error is a fact about the
+path the run took to get around something. Only the second is recoverable.
+
+Which puts the whole weight of that distinction on one regex, and the field
+promptly leaned on it. Antigravity's auto-denial for a `deny` rule says
+`Matches user-configured deny rule` — no *permission*, no *denied*, no *not
+allowed*. Under the wording list as it stood, that denial would have been filed
+as a tool error, and a tool error is now recoverable: the one exemption conduct
+must never get. The list was widened, with the field's verbatim sentence as the
+fixture.
+
+It errs toward calling things denials on purpose. A false denial costs one
+hand-adjudication. A missed one costs the boundary, and the boundary is the
+only thing here that cannot be rebuilt out of artifacts afterwards.
+
+The errors stay printed in the run report above the verdict and counted in the
+sidecar as `tool_errors=N`, next to `hard_fails=N`. Read them: a path a run had
+to work around once will be there again next time.
 
 ## When the dispatch refuses to start
 

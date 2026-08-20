@@ -250,4 +250,26 @@ fi
 		':(exclude)go.sum'
 } >"$out"
 
-printf '%s (%s lines)\n' "$out" "$(wc -l <"$out" | tr -d ' ')"
+lines="$(wc -l <"$out" | tr -d ' ')"
+printf '%s (%s lines)\n' "$out" "$lines"
+
+# The review is a unit of work with a budget, and this is the only moment its
+# size is known before a reviewer has been spent on it. The package is the floor
+# of that cost, not the whole of it: the reviewer also reads the brief, the
+# report and dispatch-context.md, and re-executes every command the report
+# pastes as proof. A milestone in the field lost three consecutive tasks to
+# reviewers hitting their session limit mid-review, each of which had read
+# everything and returned a file the --check rejected.
+#
+# So the size is stated rather than estimated. A controller asked to judge by eye
+# whether one session can carry a diff will answer optimistically every time,
+# and the cost of being wrong is the whole review.
+max="${AGY_REVIEW_MAX:-1200}"
+case "$max" in ''|*[!0-9]*) max=1200 ;; esac
+if [ "$lines" -gt "$max" ]; then
+	{
+		echo "WARNING: $lines lines, over the $max-line review budget."
+		echo "         One reviewer session may not finish this. Split the task, or"
+		echo "         send a scoped review and record the scoping in the ledger."
+	} >&2
+fi
