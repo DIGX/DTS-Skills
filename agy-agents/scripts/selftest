@@ -2308,6 +2308,55 @@ bash "$SKILL_DIR/scripts/install" --milestone m3 >"$TMP/m3.log" 2>&1
 has "an unmatched binding fails loudly" "COULD NOT REPOINT" "$TMP/m3.log"
 has "  and counts as a problem" "need attention" "$TMP/m3.log"
 
+# =================================================================== bench: clip
+printf '\n=== bench: clip ====================================================\n'
+BENCH="$SKILL_DIR/assets/bench"
+
+# Asserted rather than skipped over. A machine without node cannot run the
+# readers, and six unexplained module errors is a worse way to learn that than
+# one row that says it. Same bargain as the tripwire's PowerShell check: a
+# gate that disables itself quietly is worse than one that fails out loud.
+command -v node >/dev/null 2>&1 \
+	&& ok "node is available to run the bench readers" \
+	|| bad "node is available to run the bench readers" \
+		"the bench libraries are node; nothing below can run without it"
+
+node -e '
+const {clipActive, elapsed, IDLE_GAP_DEFAULT} = require(process.argv[1] + "/lib/clip.js");
+const t = n => Date.parse("2026-08-14T10:00:00Z") + n * 1000;
+const eq = (got, want, what) => { if (got !== want) throw new Error(what + ": " + got + " != " + want); };
+const a = [t(0), t(60), t(120)];
+eq(clipActive(a, 600), 120, "contiguous");
+const b = [t(0), t(60), t(60 + 8 * 3600), t(60 + 8 * 3600 + 30)];
+eq(clipActive(b, 600), 90, "clipped");
+eq(elapsed(b), 60 + 8 * 3600 + 30, "elapsed");
+eq(clipActive([t(0)], 600), 0, "single stamp");
+eq(clipActive([], 600), 0, "empty");
+eq(elapsed([t(0)]), 0, "elapsed single");
+eq(IDLE_GAP_DEFAULT, 600, "default gap");
+eq(clipActive([t(120), t(0), t(60)], 600), 120, "unsorted");
+eq(clipActive([t(0), t(600)], 600), 600, "gap exactly at the threshold is active");
+eq(clipActive([t(0), t(601)], 600), 0, "one second past the threshold is not");
+' "$BENCH" > "$TMP/clip.log" 2>&1
+want "clip: contiguous, clipped, elapsed, degenerate, unsorted, boundary" 0 $? "$(head -3 "$TMP/clip.log")"
+
+# A threshold that cannot be used must not behave like a threshold of zero.
+# BENCH_IDLE_GAP=10m is Number -> NaN, and `d <= NaN` is false for every gap,
+# so a malformed setting clips the entire run and reports 0s active for both
+# arms — a number that looks like a result. This is the project's standing rule
+# at its sharpest: an absent measurement is never a zero one. The refusal is
+# loud at the one point where the mistake is still cheap.
+for badgap in NaN 0 -1 undefined '"600"'; do
+	node -e '
+	const {clipActive} = require(process.argv[1] + "/lib/clip.js");
+	const t = Date.parse("2026-08-14T10:00:00Z");
+	let threw = false;
+	try { clipActive([t, t + 60000], eval(process.argv[2])); } catch (e) { threw = true; }
+	if (!threw) throw new Error("accepted an unusable gap: " + process.argv[2]);
+	' "$BENCH" "$badgap" > "$TMP/clipgap.log" 2>&1
+	want "  clip refuses an unusable idle gap: $badgap" 0 $? "$(head -2 "$TMP/clipgap.log")"
+done
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
