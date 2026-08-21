@@ -3063,6 +3063,186 @@ tnode "the reader carries the cache reads through to the run" '
 		throw new Error("cache_read: " + by["task-1-20260101-000001"].tokens.cache_read);
 '
 
+# =============================================================== bench: collect
+printf '\n=== bench: collect =================================================\n'
+# collect is the only thing that reads a log and the only thing that writes
+# runs.json. Everything below is about what it does with a source it cannot
+# read: the whole point of the file is that a hole in it is visible as a hole.
+
+CREPO="$TMP/collectrepo"
+rm -rf "$CREPO"; mkdir -p "$CREPO"
+git -C "$CREPO" init -q
+git -C "$CREPO" config user.email bench@example.invalid
+git -C "$CREPO" config user.name bench
+printf 'one\n' > "$CREPO/f.txt"
+git -C "$CREPO" add -A >/dev/null; git -C "$CREPO" commit -qm base
+CBASE="$(git -C "$CREPO" rev-parse HEAD)"
+printf 'one\ntwo\nthree\nfour\n' > "$CREPO/f.txt"
+git -C "$CREPO" add -A >/dev/null; git -C "$CREPO" commit -qm work
+CTIP="$(git -C "$CREPO" rev-parse HEAD)"
+CLOGS="$CREPO/.agy/work/logs"
+mkdir -p "$CLOGS"
+
+# cclass <file> <key=value>... - caller's keys first, defaults after, for the
+# same first-match-wins reason as the thread fixture above.
+cclass() {
+	f="$CLOGS/$1"; shift
+	{
+		for kv in "$@"; do printf '%s\n' "$kv"; done
+		printf 'arm=agy\nstatus=success\nwall=100\ntools=3\nquota=none\n'
+		printf 'model=gemini-3.7-flash\ntokens_scope=thread\ncontinued=0\n'
+		printf 'thread_turns=1\nconversation=C-1\nraw=\n'
+	} > "$f"
+}
+
+# A run that landed the second commit.
+cclass task-1-20260101-000001.class range="$CBASE..$CTIP" \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=200 tokens_total=1100
+# The solo arm goes through the same reader and the same git attribution.
+cclass solo-task-2-20260101-000002.class arm=solo task=task-2 \
+	range="$CBASE..$CTIP" \
+	tokens_in=500 tokens_out=50 tokens_think=10 tokens_cache_read=0 tokens_total=550
+# A range git cannot resolve: the commits were rebased away.
+cclass task-3-20260101-000003.class range=deadbee..f00dfac \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=0 tokens_total=1100
+# Continued with nothing in its thread to continue from: no attributable tokens.
+cclass task-4-20260101-000004.class range="$CBASE..$CTIP" \
+	conversation=C-9 thread_turns=4 continued=1 \
+	tokens_in=9000 tokens_out=900 tokens_think=300 tokens_cache_read=0 tokens_total=9900
+# The same run as task-1 but with no cache reads, so the two can be compared.
+cclass task-5-20260101-000005.class range="$CBASE..$CTIP" conversation=C-5 \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=0 tokens_total=1100
+
+# The Claude side. The last turn is a <synthetic> one, which is what a real
+# transcript very often ends on, and it is not a model.
+CPROJ2="$TMP/collectproj/d--Coll-Repo"
+rm -rf "$TMP/collectproj"; mkdir -p "$CPROJ2"
+node -e '
+const fs = require("fs");
+const t = n => new Date(Date.parse("2026-08-14T10:00:00Z") + n * 1000).toISOString();
+const turn = (n, id, model, side, out) => JSON.stringify({
+  type: "assistant", timestamp: t(n), isSidechain: side, sessionId: "s1",
+  message: {id: id, model: model, usage: {
+    input_tokens: 100, output_tokens: out, cache_read_input_tokens: 500,
+    cache_creation_input_tokens: 200,
+    output_tokens_details: {thinking_tokens: 5}}}});
+// A real synthetic turn carries every count at zero -- it is Claude Code own
+// interrupt and error records, not a model call. That is what makes it safe to
+// price at an unknown rate, and it is why the fixture must not invent tokens
+// for it: a synthetic turn with tokens would be unpriced for a real reason and
+// the row below would pass or fail for something other than what it tests.
+const synth = JSON.stringify({
+  type: "assistant", timestamp: t(90), isSidechain: false, sessionId: "s1",
+  message: {id: "m3", model: "<synthetic>", usage: {
+    input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    output_tokens_details: {thinking_tokens: 0}}}});
+const lines = [
+  turn(30, "m1", "claude-opus-5", false, 100),
+  turn(60, "m2", "claude-opus-5", true, 40),
+  synth
+];
+fs.writeFileSync(process.argv[1] + "/sess.jsonl", lines.join("\n") + "\n");
+' "$CPROJ2"
+
+crun() { # crun <projects-dir> <slug> -> exit code in $CRC, log in $TMP/collect.log
+	( cd "$CREPO" && AGY_WORKSPACE=".agy/work" \
+		CLAUDE_PROJECTS_DIR="$1" CLAUDE_PROJECT_SLUG="$2" \
+		node "$BENCH/collect" ) > "$TMP/collect.log" 2>&1
+	CRC=$?
+}
+
+crun "$TMP/collectproj" d--Coll-Repo
+want "collect runs" 0 "$CRC" "$(head -5 "$TMP/collect.log")"
+CRJ="$CREPO/.agy/work/bench/runs.json"
+if [ -f "$CRJ" ]; then ok "  and writes runs.json"; else bad "  and writes runs.json" "missing"; fi
+has "  and names the file it wrote" "runs.json" "$TMP/collect.log"
+
+cnode() { # cnode <label> <js over `j`>
+	node -e "
+	const j = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+	const by = t => j.runs.find(r => r.task === t);
+	$2
+	" "$CRJ" > "$TMP/cj.log" 2>&1
+	want "$1" 0 $? "$(grep -m1 '^Error:' "$TMP/cj.log")"
+}
+
+cnode "runs.json carries both arms, the claude block and the skipped list" '
+	if (!Array.isArray(j.runs)) throw new Error("no runs array");
+	if (!j.generated) throw new Error("no generated stamp");
+	if (j.idle_gap_s !== 600) throw new Error("gap: " + j.idle_gap_s);
+	if (!j.claude || typeof j.claude.active_s !== "number") throw new Error("no claude block");
+	if (j.claude.sidechain.turns !== 1) throw new Error("sidechain not carried through");
+	if (!Array.isArray(j.skipped)) throw new Error("no skipped array");
+	const solo = j.runs.find(r => r.arm === "solo");
+	if (!solo) throw new Error("solo arm missing from runs.json");
+	if (solo.insertions !== 3) throw new Error("solo not attributed by git: " + solo.insertions);
+'
+
+# git could not resolve the range. Zero insertions would read as a run that
+# landed nothing, which is a different claim and a false one.
+cnode "a range git cannot resolve is a hole, not a run that landed nothing" '
+	const r = by("task-3");
+	if (r.insertions !== null) throw new Error("insertions: " + r.insertions);
+	if (r.work_measured !== false) throw new Error("work_measured: " + r.work_measured);
+	if (!r.work_reason) throw new Error("no reason recorded for the hole");
+	if (by("task-1").work_measured !== true) throw new Error("a measurable run was marked unmeasured");
+'
+
+cnode "a run whose tokens cannot be attributed prices to null, not to free" '
+	const r = by("task-4");
+	if (r.usd !== null) throw new Error("usd: " + r.usd);
+	if (r.priced !== false) throw new Error("priced: " + r.priced);
+	if (by("task-1").usd === null) throw new Error("a measurable run lost its price");
+'
+
+# The cache-read row exists in the sidecar now. If collect still passes a
+# hardcoded 0 the two runs below cost exactly the same, and the row is a row
+# nothing spends.
+cnode "cache reads reach the price, so recording them changes the bill" '
+	const withRead = by("task-1").usd, without = by("task-5").usd;
+	if (!(withRead > without)) throw new Error(withRead + " vs " + without);
+'
+
+# Pricing the arm at turns[last].model bills every turn at whatever answered
+# last -- and what answers last is very often <synthetic>, which is not a model.
+cnode "the claude arm is priced per turn, not at whatever answered last" '
+	if (!(j.claude.usd_main > 0)) throw new Error("usd_main: " + j.claude.usd_main);
+	if (j.claude.priced !== true) throw new Error("one synthetic turn left the arm unpriced");
+	if (j.claude.model !== "claude-opus-5") throw new Error("headline model: " + j.claude.model);
+	const syn = j.claude.models.find(m => m.model === "<synthetic>");
+	if (!syn) throw new Error("the synthetic turns were not accounted for at all");
+	if (syn.usd !== 0) throw new Error("a synthetic turn was charged: " + syn.usd);
+'
+
+# claude.js throws on an unreadable project directory rather than answering []
+# so it cannot be mistaken for an arm that spent nothing. That is only worth
+# something if collect records the throw instead of dying on it -- the git work
+# is already done by then, and crashing would write no file at all.
+crun "$TMP/collectproj" d--Not-There
+want "an unreadable transcript directory is a skip, not a crash" 0 "$CRC" \
+	"$(head -3 "$TMP/collect.log")"
+cnode "  the run it did measure still reaches the file" '
+	if (by("task-1").insertions !== 3) throw new Error("git work was thrown away");
+	if (!j.skipped.some(s => /d--Not-There/.test(s.path))) throw new Error("the miss was not recorded");
+	if (j.claude.main.turns !== 0) throw new Error("turns invented: " + j.claude.main.turns);
+'
+has "  and the run says so on the way out" "SKIPPED" "$TMP/collect.log"
+
+# A directory that is there and holds no sessions is a different fact from one
+# that is not there, and claude.js answers [] for it rather than throwing --
+# because [] is true. It still has to reach runs.json as a skip: an arm with no
+# transcripts reads as an arm that spent nothing, which is the same wrong answer
+# arrived at politely.
+mkdir -p "$TMP/collectproj/d--Empty-Coll"
+crun "$TMP/collectproj" d--Empty-Coll
+want "a transcript directory with no sessions is still a skip" 0 "$CRC" \
+	"$(head -3 "$TMP/collect.log")"
+cnode "  because an arm with no transcripts reads as an arm that spent nothing" '
+	if (!j.skipped.some(s => /d--Empty-Coll/.test(s.path)))
+		throw new Error("an empty transcript directory passed as a measurement");
+'
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
