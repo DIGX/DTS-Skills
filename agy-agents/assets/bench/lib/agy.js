@@ -102,8 +102,15 @@ function readRuns(logDir) {
 			model: c.model || (arm === 'solo' ? '' : 'unknown'),
 			tokens: {
 				in: num(c.tokens_in), out: num(c.tokens_out),
-				think: num(c.tokens_think), total,
+				think: num(c.tokens_think), cache_read: num(c.tokens_cache_read),
+				total,
 			},
+			conversation: c.conversation || '',
+			threadTurns: num(c.thread_turns),
+			continued: c.continued === '1',
+			scope: c.tokens_scope || '',
+			tokensOf: '',
+			tokensNote: null,
 			tools: num(c.tools),
 			commits: num(c.commits),
 			range: c.range || '',
@@ -115,7 +122,131 @@ function readRuns(logDir) {
 		});
 	}
 
+	perTurn(runs);
 	return { runs, skipped };
 }
 
-module.exports = { readRuns, parseClass };
+// ---------------------------------------------------------------- per turn
+//
+// agy reports usage for the THREAD, not for the run. Measured against the real
+// binary: three calls, the second and third on --continue, reported output
+// 25 -> 49 -> 73 for turns that each did the same tiny amount of work. Every
+// fix round the protocol sends back on --continue therefore writes a sidecar
+// carrying every earlier round's tokens as well as its own, and a collector
+// that sums the sidecars counts the first turn once per round after it.
+//
+// The reserve handover is the sharp case. A primary that has already made tool
+// calls is handed over rather than restarted, on --continue, and the reserve
+// writes its own sidecar under a different model. The failed primary's tokens
+// sit inside that cumulative total, so summing bills them a second time at the
+// reserve's rate. Both errors inflate the agy arm, on exactly the long runs.
+//
+// conversation_id does all the work here: runs that share a thread difference
+// against each other, and a handover that opened a NEW thread carries a
+// different id and is correctly left alone rather than being differenced
+// against a total it never accumulated on.
+const TOKEN_KEYS = ['in', 'out', 'think', 'cache_read', 'total'];
+
+// Nulled, not guessed, and not left at the cumulative figure either. A number
+// that is known to be too large is worse than an absent one, because it reads
+// as a measurement. This is the project rule in its other direction: an absent
+// measurement must never read as a zero one, and an unattributable one must
+// never read as a measured one.
+function cannotAttribute(r, note) {
+	for (const k of TOKEN_KEYS) r.tokens[k] = null;
+	r.tokensOf = 'unknown';
+	r.tokensNote = note;
+	r.quality = 'partial';
+}
+
+function perTurn(runs) {
+	const threads = new Map();
+
+	for (const r of runs) {
+		if (r.scope !== 'thread') {
+			// Written before this instrumentation existed. The numbers may well
+			// be a turn's and may well be a thread's; nothing on disk says
+			// which. They are kept visible, because they are the only figures
+			// there are, and marked partial so nothing downstream reports them
+			// as a measured turn.
+			if (r.arm === 'agy' && r.tokens.total !== null) {
+				r.tokensOf = 'unknown';
+				r.tokensNote = 'logged before thread accounting: this may be the '
+					+ 'whole thread, not this run';
+				r.quality = 'partial';
+			}
+			continue;
+		}
+		if (!threads.has(r.conversation)) threads.set(r.conversation, []);
+		threads.get(r.conversation).push(r);
+	}
+
+	for (const group of threads.values()) {
+		// Position first, then start time for anything agy numbered the same.
+		group.sort((a, b) =>
+			((a.threadTurns === null ? Infinity : a.threadTurns)
+				- (b.threadTurns === null ? Infinity : b.threadTurns))
+			|| ((a.started || 0) - (b.started || 0)));
+
+		// The cumulative figures have to be read before any of them is
+		// overwritten, or the second subtraction runs against a delta.
+		const raw = group.map(r => Object.assign({}, r.tokens));
+
+		for (let i = 0; i < group.length; i++) {
+			const r = group[i];
+			const n = r.threadTurns;
+
+			// The run that opened the thread accumulated nothing before it, so
+			// its running total is its own. That is decided by `continued`, not
+			// by num_turns: one fresh dispatch that made four tool calls
+			// reports num_turns 4 and owns every one of those tokens, while a
+			// --continue reporting 4 is carrying three turns it did not spend.
+			// The two numbers are identical and mean opposite things.
+			if (!r.continued) { r.tokensOf = 'turn'; continue; }
+
+			// Continued, and there is nothing in the log to continue from. The
+			// earlier turns are inside this total and cannot be taken back out.
+			if (i === 0) {
+				cannotAttribute(r, 'this run continued a thread whose earlier '
+					+ 'turns are not in the log, and its total includes them');
+				continue;
+			}
+
+			if (n === null) {
+				cannotAttribute(r, 'agy reported no position in the thread, so '
+					+ 'this run cannot be separated from the ones before it');
+				continue;
+			}
+
+			const prev = group[i - 1];
+			if (prev.threadTurns === null || prev.threadTurns >= n) {
+				cannotAttribute(r, 'the run before this one in the thread has no '
+					+ 'position after it, so the two cannot be ordered');
+				continue;
+			}
+
+			const before = raw[i - 1];
+			const delta = {};
+			let ok = true;
+			for (const k of TOKEN_KEYS) {
+				const a = r.tokens[k], b = before[k];
+				if (a === null || b === null) { ok = false; break; }
+				// A running total cannot shrink. If it did, one of the two
+				// sidecars is not what it says it is, and the difference is not
+				// a measurement of anything.
+				if (a < b) { ok = false; break; }
+				delta[k] = a - b;
+			}
+			if (!ok) {
+				cannotAttribute(r, 'the thread total is not larger than the turn '
+					+ 'before it, so the difference is not this run');
+				continue;
+			}
+			Object.assign(r.tokens, delta);
+			r.tokensOf = 'turn';
+		}
+	}
+	return runs;
+}
+
+module.exports = { readRuns, parseClass, perTurn };

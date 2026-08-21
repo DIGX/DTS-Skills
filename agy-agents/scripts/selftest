@@ -116,7 +116,7 @@ case "$model" in
 	done ;;
 esac
 
-printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
+printf '%s\n' '{"event":"init","conversation_id":"'"${FAKE_CONV:-conv-fixture-0001}"'","init":{"model":"'"$model"'","cwd":"/repo"}}'
 
 # A real run reports token usage on its result event; this one does it only when
 # asked. Both halves need testing and they need separate runs: that the numbers
@@ -125,7 +125,19 @@ printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
 # deliberately unmistakable — no 0, no 1, nothing a miscount could land on — and
 # the total is the sum, so a reader that mixes the keys up is visible too.
 USAGE=""
-[ -n "${FAKE_USAGE:-}" ] && USAGE=',"usage":{"input_tokens":13571,"output_tokens":24680,"thinking_tokens":31415,"total_tokens":69666}'
+#
+# The arithmetic is the wire's, not a convenient one. Measured against the real
+# binary: in 13751, out 25, think 24, total 13776 - that is total = in + out,
+# with thinking counted INSIDE output and never added again. This fixture used
+# to make the total the sum of all three, which asserts the opposite of what
+# agy does and would keep a cost model that bills thinking twice green. Same
+# rule as the --effort case thirty lines up: a double that is not the thing it
+# doubles does not test the thing it doubles.
+#
+# cache_read_tokens is on the wire too and the sidecar never recorded it. It
+# reads 0 on a cold run, which is why it went unnoticed; it is deliberately
+# non-zero here so a reader that drops the key is visible.
+[ -n "${FAKE_USAGE:-}" ] && USAGE=',"usage":{"input_tokens":13571,"output_tokens":24680,"thinking_tokens":17280,"cache_read_tokens":2048,"total_tokens":38251}'
 
 # A report written by the run itself, so it is genuinely newer than RUN_START.
 if [ -n "${FAKE_REPORT:-}" ] && [ -n "${FAKE_REPORT_TEXT:-}" ]; then
@@ -264,7 +276,7 @@ ${FAKE_QUOTA_MODEL:-*gemini*})
 	along)    msg="Individual quota reached. Please try again later. Resets in 2d4h." ;;
 	unknown)  msg="429 RESOURCE_EXHAUSTED" ;;
 	none)     printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{}}}}'
-	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"The primary model did the work.","num_turns":2,"duration_seconds":5'"$USAGE"'}}'
+	          printf '%s\n' '{"event":"result","conversation_id":"'"${FAKE_CONV:-conv-fixture-0001}"'","result":{"status":"SUCCESS","response":"The primary model did the work.","num_turns":'"${FAKE_TURNS:-2}"',"duration_seconds":5'"$USAGE"'}}'
 	          exit 0 ;;
 	*)        msg="RESOURCE_EXHAUSTED: weekly limit reached for Gemini models" ;;
 	esac
@@ -1993,11 +2005,32 @@ else
 	# four at once and compare against what the stub actually reported.
 	btok="$(class_val "$BCLASS" tokens_in)/$(class_val "$BCLASS" tokens_out)"
 	btok="$btok/$(class_val "$BCLASS" tokens_think)/$(class_val "$BCLASS" tokens_total)"
-	if [ "$btok" = "13571/24680/31415/69666" ]; then
+	if [ "$btok" = "13571/24680/17280/38251" ]; then
 		ok "  records each count against its own key"
 	else
 		bad "  records each count against its own key" "in/out/think/total read '$btok'"
 	fi
+	# The arithmetic, not just the four values. agy reports total = in + out with
+	# thinking already inside output; a fixture or a parser that made the total
+	# the sum of all three would say thinking is billable on top, which is the
+	# one thing the cost model must not believe.
+	bti="$(class_val "$BCLASS" tokens_in)"
+	bto="$(class_val "$BCLASS" tokens_out)"
+	btt="$(class_val "$BCLASS" tokens_think)"
+	btl="$(class_val "$BCLASS" tokens_total)"
+	if [ "$((bti + bto))" = "$btl" ] && [ "$btt" -le "$bto" ]; then
+		ok "  the counts obey the wire: total is in+out, thinking inside output"
+	else
+		bad "  the counts obey the wire: total is in+out, thinking inside output" \
+			"in+out=$((bti + bto)) total=$btl think=$btt out=$bto"
+	fi
+	# The thread keys. agy reports usage for the THREAD, not the run, so a
+	# sidecar that does not say which thread it belongs to and where in it,
+	# cannot be reduced to what this run actually spent.
+	hasval "  records the thread it belongs to"   conversation      "$BCLASS"
+	hasval "  records its position in that thread" thread_turns     "$BCLASS"
+	has    "  records what its token counts cover" "tokens_scope=thread" "$BCLASS"
+	hasval "  records the cache reads agy reports" tokens_cache_read "$BCLASS"
 	has "  records the commit count" "commits=1" "$BCLASS"
 	hasval "  records the commit range" range "$BCLASS"
 	if grep -qE '^range=[0-9a-f]{40}\.\.[0-9a-f]{40}$' "$BCLASS" 2>/dev/null; then
@@ -2362,7 +2395,12 @@ printf '\n=== bench: agy reader ==============================================\n
 FIX="$TMP/fixlogs"
 rm -rf "$FIX"; mkdir -p "$FIX"
 
-# A fully instrumented run.
+# A fully instrumented run. The thread rows are part of what "fully"
+# means now: without tokens_scope the reader cannot tell a turn's own
+# usage from a whole thread's running total, and it downgrades the run
+# to partial rather than pass an unattributable number off as measured.
+# Strip them from this fixture and the row below stops describing a
+# current run.
 cat > "$FIX/task-7-20260814-100000.class" <<'CLS'
 quota=none
 tools=24
@@ -2377,6 +2415,10 @@ tokens_think=100
 tokens_total=2100
 model=gemini-3-pro
 commits=1
+conversation=conv-read-7
+thread_turns=2
+tokens_scope=thread
+continued=0
 range=aaaa..bbbb
 raw=
 CLS
@@ -2411,6 +2453,10 @@ tokens_think=0
 tokens_total=10
 model=gemini-3-pro
 commits=1
+conversation=conv-read-8
+thread_turns=
+tokens_scope=thread
+continued=0
 range=cccc..dddd
 raw=
 CLS
@@ -2855,6 +2901,167 @@ if (spent.priced !== false || spent.usd !== null)
   throw new Error("an unknown model that spent tokens must stay null: " + JSON.stringify(spent));
 ' "$BENCH" > "$TMP/costzero.log" 2>&1
 want "an unknown model that spent nothing costs nothing" 0 $? "$(head -3 "$TMP/costzero.log")"
+
+# =================================================== bench: agy thread accounting
+printf '\n=== bench: agy thread accounting ===================================\n'
+# agy reports usage for the THREAD, not for the run. Measured against the real
+# binary on 2026-08-21 — three calls, the second and third on --continue:
+#
+#   turns 1:  in 13751  out 25  think 24  total 13776
+#   turns 2:  in 27734  out 49  think 47  total 27783
+#   turns 3:  in 41948  out 73  think 70  total 42021
+#
+# Every count accumulates. protocol.md sends fix rounds 1-3 back on
+# `.agy/dispatch --continue`, each writing its own sidecar, so summing them
+# counts the first turn once per round that follows it. The reserve handover is
+# worse than a multiple: it continues the same thread under a different model,
+# so the failed primary's tokens are billed a second time at the reserve's rate.
+# Both errors inflate the agy arm, on exactly the long runs.
+TLOGS="$TMP/threadlogs"
+rm -rf "$TLOGS"; mkdir -p "$TLOGS"
+
+# tclass <file> <key=value>... - a sidecar with the caller's keys first and
+# the common ones defaulted after them. The order matters and is the point:
+# the reader is first-match-wins, deliberately, so that .agy/solo's rewritten
+# `status=open` line beats the one below it. Writing the defaults last is what
+# makes them defaults; writing them first would have quietly pinned every run
+# in this fixture to one model and one status, and the two rows that turn on
+# a per-run override would have passed by agreeing with the wrong value.
+tclass() {
+	f="$TLOGS/$1"; shift
+	{
+		for kv in "$@"; do printf '%s\n' "$kv"; done
+		printf 'arm=agy\nstatus=success\nwall=100\n'
+		printf 'model=gemini-3.7-flash-high\ntokens_scope=thread\n'
+	} > "$f"
+}
+
+# --- one thread, three runs. Positions 1, 3 and 7, because a dispatch makes
+# several turns of its own and the gaps between rounds are normal. Differencing
+# has to follow the recorded position, not assume consecutive numbering.
+tclass task-1-20260101-000001.class conversation=T-A thread_turns=1 continued=0 \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=10 tokens_total=1100
+tclass task-1-20260101-000002.class conversation=T-A thread_turns=3 continued=1 \
+	tokens_in=3000 tokens_out=300 tokens_think=120 tokens_cache_read=30 tokens_total=3300
+tclass task-1-20260101-000003.class conversation=T-A thread_turns=7 continued=1 \
+	tokens_in=6000 tokens_out=600 tokens_think=250 tokens_cache_read=60 tokens_total=6600
+
+# --- a reserve handover on --continue: same thread, different model. The
+# filenames sort the reserve FIRST ('-' before '.'), which is deliberate: the
+# order has to come from the recorded position, not from the directory listing.
+tclass task-2-20260101-000001.class conversation=T-B thread_turns=1 continued=0 \
+	status=error tokens_in=5000 tokens_out=500 tokens_think=200 tokens_cache_read=0 tokens_total=5500
+tclass task-2-20260101-000001-reserve.class conversation=T-B thread_turns=5 continued=1 \
+	model=claude-opus-4-6-thinking \
+	tokens_in=9000 tokens_out=900 tokens_think=400 tokens_cache_read=0 tokens_total=9900
+
+# --- a handover that could not resume, so it opened its own thread. num_turns 4
+# with continued=0: four turns that are all its own.
+tclass task-3-20260101-000001.class conversation=T-C1 thread_turns=1 continued=0 \
+	status=error tokens_in=2000 tokens_out=200 tokens_think=80 tokens_cache_read=0 tokens_total=2200
+tclass task-3-20260101-000001-reserve.class conversation=T-C2 thread_turns=4 continued=0 \
+	model=claude-opus-4-6-thinking \
+	tokens_in=7000 tokens_out=700 tokens_think=300 tokens_cache_read=0 tokens_total=7700
+
+# --- continued, with nothing in the log to continue from (the earlier rounds
+# were pruned). The total carries turns nobody can subtract.
+tclass task-4-20260101-000001.class conversation=T-D thread_turns=6 continued=1 \
+	tokens_in=8000 tokens_out=800 tokens_think=350 tokens_cache_read=0 tokens_total=8800
+
+# --- continued, but agy reported no position at all.
+tclass task-5-20260101-000001.class conversation=T-E thread_turns=1 continued=0 \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=0 tokens_total=1100
+tclass task-5-20260101-000002.class conversation=T-E thread_turns= continued=1 \
+	tokens_in=4000 tokens_out=400 tokens_think=150 tokens_cache_read=0 tokens_total=4400
+
+# --- a running total that shrank. One of the two sidecars is not what it says.
+tclass task-6-20260101-000001.class conversation=T-F thread_turns=1 continued=0 \
+	tokens_in=5000 tokens_out=500 tokens_think=200 tokens_cache_read=0 tokens_total=5500
+tclass task-6-20260101-000002.class conversation=T-F thread_turns=3 continued=1 \
+	tokens_in=4000 tokens_out=400 tokens_think=150 tokens_cache_read=0 tokens_total=4400
+
+# --- written before any of this existed: no thread keys at all.
+printf 'arm=agy\nstatus=success\nwall=50\nmodel=gemini-3.7-flash-high\n' \
+	> "$TLOGS/task-7-20260101-000001.class"
+printf 'tokens_in=1234\ntokens_out=234\ntokens_think=100\ntokens_total=1468\n' \
+	>> "$TLOGS/task-7-20260101-000001.class"
+
+# The bench paths go in as arguments, not spliced into the -e source: the
+# shell hands node a POSIX path and only argv gets translated back to a
+# Windows one on the way in. A path pasted into the script text arrives as
+# /tmp/... and node reports the directory as unreadable, which readRuns
+# correctly reports as a skip -- so every row would fail for the same wrong
+# reason and none of them would be testing what it says it tests.
+tnode() { # tnode <label> <js>
+	node -e "
+	const { readRuns } = require(process.argv[1] + '/lib/agy.js');
+	const { runs } = readRuns(process.argv[2]);
+	const by = {}; for (const r of runs) by[r.label] = r;
+	const t = l => by[l].tokens;
+	const shape = l => [t(l).in, t(l).out, t(l).think, t(l).cache_read, t(l).total].join('/');
+	const eq = (l, want) => { const g = shape(l);
+		if (g !== want) throw new Error(l + ': ' + g + ', want ' + want); };
+	$2
+	" "$BENCH" "$TLOGS" > "$TMP/thr.log" 2>&1
+	want "$1" 0 $? "$(grep -m1 '^Error:' "$TMP/thr.log")"
+}
+
+tnode "a continued run is counted for its own turn, not the thread's total" '
+	eq("task-1-20260101-000001", "1000/100/40/10/1100");
+	eq("task-1-20260101-000002", "2000/200/80/20/2200");
+	eq("task-1-20260101-000003", "3000/300/130/30/3300");
+	if (by["task-1-20260101-000003"].tokensOf !== "turn") throw new Error("not marked as a turn");
+'
+
+tnode "  so a reserve handover does not bill the failed attempt twice" '
+	eq("task-2-20260101-000001", "5000/500/200/0/5500");
+	eq("task-2-20260101-000001-reserve", "4000/400/200/0/4400");
+	if (by["task-2-20260101-000001-reserve"].model !== "claude-opus-4-6-thinking")
+		throw new Error("the reserve run lost its own model");
+'
+
+tnode "  and a handover that opened a new thread is left alone" '
+	eq("task-3-20260101-000001-reserve", "7000/700/300/0/7700");
+	if (by["task-3-20260101-000001-reserve"].tokensOf !== "turn")
+		throw new Error("a fresh thread was not trusted with its own tokens");
+'
+
+tnode "a continued run whose earlier turns are gone is unmeasured, not inflated" '
+	const r = by["task-4-20260101-000001"];
+	if (r.tokens.total !== null) throw new Error("kept an inflated total: " + r.tokens.total);
+	if (r.tokens.in !== null) throw new Error("kept an inflated input count");
+	if (r.tokensOf !== "unknown") throw new Error("tokensOf: " + r.tokensOf);
+	if (r.quality !== "partial") throw new Error("quality: " + r.quality);
+	if (!r.tokensNote) throw new Error("nulled the count without saying why");
+'
+
+tnode "  and a run that never reported its thread position is not trusted" '
+	const r = by["task-5-20260101-000002"];
+	if (r.tokens.total !== null) throw new Error("kept " + r.tokens.total);
+	if (!r.tokensNote) throw new Error("no reason recorded");
+	if (by["task-5-20260101-000001"].tokens.total !== 1100)
+		throw new Error("the turn that WAS measurable was dropped too");
+'
+
+tnode "a thread total that goes backwards is refused, not negated" '
+	const r = by["task-6-20260101-000002"];
+	if (r.tokens.in !== null) throw new Error("reported " + r.tokens.in);
+	if (typeof r.tokens.in === "number" && r.tokens.in < 0) throw new Error("negative tokens");
+'
+
+tnode "a sidecar written before this instrumentation is partial, not a turn count" '
+	const r = by["task-7-20260101-000001"];
+	if (r.tokens.in !== 1234) throw new Error("threw away the only figures there are");
+	if (r.tokensOf !== "unknown") throw new Error("tokensOf: " + r.tokensOf);
+	if (r.quality !== "partial") throw new Error("quality: " + r.quality);
+'
+
+# The reader has to carry the cache reads dispatch now records, or the row added
+# to the sidecar is a row nothing downstream can spend.
+tnode "the reader carries the cache reads through to the run" '
+	if (by["task-1-20260101-000001"].tokens.cache_read !== 10)
+		throw new Error("cache_read: " + by["task-1-20260101-000001"].tokens.cache_read);
+'
 
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"

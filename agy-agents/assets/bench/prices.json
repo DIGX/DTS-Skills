@@ -4,7 +4,7 @@
   "_assumptions": [
     "Standard tier only. Batch and flex halve these rates, priority raises them, and a regional endpoint adds ten percent.",
     "Gemini prices at the <=200k-token rate. The higher long-context rate is real, but it keys on the size of one prompt and the agy sidecar records only a run total, so it cannot be applied to the agy arm the way it could to the Claude arm. Applying it to one arm and not the other would be worse than applying it to neither.",
-    "Gemini's per-hour cache storage price is not modelled. agy reports no cache tokens at all, so the fields below are unexercised.",
+    "Gemini's per-hour cache storage price is not modelled. agy does report cache reads — cache_read_tokens is on the wire, and the sidecar records it — so cache_read below is exercised and charged. It read zero on the cold runs this was first measured against, which is the only reason it looked absent. No cache-write figure has been seen from agy, so cache_write and cache_write_1h below stay unexercised for that arm.",
     "Thinking tokens are not priced separately. Both vendors report them inside output: Anthropic as a breakdown of output_tokens, Google in a table row headed 'Output price (including thinking tokens)'.",
     "Anthropic cache writes are priced by lifetime — 1.25x input for five minutes, 2x for an hour. Claude Code writes hour-long entries, so cache_write_1h is the rate that usually applies."
   ],

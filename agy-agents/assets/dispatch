@@ -609,9 +609,9 @@ run_attempt() {
 
 	elapsed=$(( SECONDS - started ))
 
-	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" "$capped" <<'NODE'
+	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" "$capped" "$cont" <<'NODE'
 const fs = require('fs');
-const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg, cappedArg] =
+const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg, cappedArg, contArg] =
 	process.argv.slice(2);
 const killed = killedArg === '1';
 const capped = cappedArg === '1';
@@ -811,6 +811,32 @@ if (failed) {
 // Printed measurements are measurements the benchmark cannot read back. These
 // are the same numbers the summary prints below; they live here so a scraper
 // never has to re-derive them, and never has to guess a zero when it cannot.
+// agy reports usage for the THREAD, not for the run. Measured against the real
+// binary: three calls, the second and third on --continue, reported out 25 ->
+// 49 -> 73 and think 24 -> 47 -> 70 for turns that each did the same tiny
+// amount of work. This is the same defect as duration_seconds above, which is
+// worked around by timing the run here rather than trusting the field; the
+// token counts were carried through raw.
+//
+// It is not worked around here, because this process cannot see the thread. It
+// is recorded instead: conversation_id says which thread, num_turns says where
+// in it, and a reader with both can subtract the previous turn and recover what
+// this run actually spent. Recording the scope explicitly rather than leaving
+// it implied means a sidecar written before this line can be told apart from
+// one written after, and reported as unmeasured rather than believed.
+//
+// conversation_id is on the init event as well as the result event, and the
+// init one is what a deferred run has: no result event, but it still moved the
+// thread, and the next --continue still accumulates on top of it.
+//
+// `continued` is recorded beside it because num_turns cannot stand in for it.
+// A single fresh dispatch that made four tool calls reports num_turns 4 with
+// every one of those tokens its own; a --continue reporting 4 is carrying three
+// turns that belong to earlier runs. The counts are identical and the meanings
+// are opposite, and only this process knows which flag it passed.
+const convId = (resultEvent && resultEvent.conversation_id)
+	|| (events.find(e => e.event === 'init') || {}).conversation_id || '';
+
 const uw = result.usage || {};
 const nz = v => (typeof v === 'number' && isFinite(v)) ? v : '';
 // Every value is sanitised by the same rule, at the one place values enter the
@@ -836,6 +862,11 @@ const classRows = [
 	['tokens_think', nz(uw.thinking_tokens)],
 	['tokens_total', nz(uw.total_tokens)],
 	['model', init.model],
+	['conversation', convId],
+	['thread_turns', nz(result.num_turns)],
+	['tokens_scope', 'thread'],
+	['continued', contArg === '--continue' ? 1 : 0],
+	['tokens_cache_read', nz(uw.cache_read_tokens)],
 	['raw', quotaRaw],
 ];
 fs.writeFileSync(classPath, classRows.map(([k, v]) => `${k}=${one(v)}\n`).join(''));
