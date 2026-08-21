@@ -1,0 +1,282 @@
+#!/usr/bin/env node
+'use strict';
+//
+// The scraper. Reads logs, transcripts and git; writes one runs.json.
+//
+// It is deliberately the only thing that reads a log and the only thing that
+// writes runs.json. The dashboard reads runs.json and nothing else, so a bug in
+// rendering can never corrupt a measurement, and a number that looks wrong can
+// be checked by opening one JSON file rather than by re-running a scrape.
+//
+//   collect                 read $AGY_WORKSPACE and write its bench/runs.json
+//
+// Environment:
+//   AGY_WORKSPACE           default .agy/work
+//   BENCH_IDLE_GAP          default 600 (seconds)
+//   CLAUDE_PROJECTS_DIR     default ~/.claude/projects
+//   CLAUDE_PROJECT_SLUG     default: derived from the repo root
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const agy = require(path.join(__dirname, 'lib', 'agy.js'));
+const claude = require(path.join(__dirname, 'lib', 'claude.js'));
+const { numstat } = require(path.join(__dirname, 'lib', 'gitwork.js'));
+const { loadPrices, priceOf } = require(path.join(__dirname, 'lib', 'cost.js'));
+const { IDLE_GAP_DEFAULT } = require(path.join(__dirname, 'lib', 'clip.js'));
+
+function fail(code, headline, ...detail) {
+	process.stderr.write('\n--- verdict --------------------------------------------------------\n');
+	process.stderr.write(`  ${'run'.padEnd(7)} DID NOT RUN — ${headline}\n`);
+	for (const d of detail) process.stderr.write(`  ${''.padEnd(7)} ${d}\n`);
+	process.stderr.write(`  ${'exit'.padEnd(7)} ${code}\n`);
+	process.stderr.write('\n  Nothing was collected: no file was written.\n');
+	process.exit(code);
+}
+
+let root;
+try {
+	root = execFileSync('git', ['rev-parse', '--show-toplevel'],
+		{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+} catch (e) {
+	fail(2, 'not a git repository',
+		'the benchmark attributes landed work by git history');
+}
+
+const workspace = process.env.AGY_WORKSPACE || '.agy/work';
+const logDir = path.join(root, workspace, 'logs');
+if (!fs.existsSync(logDir)) {
+	fail(2, `no log directory at ${path.join(workspace, 'logs')}`,
+		'run a dispatch or a solo bracket first — there is nothing to measure');
+}
+
+const gapS = Number(process.env.BENCH_IDLE_GAP || IDLE_GAP_DEFAULT) || IDLE_GAP_DEFAULT;
+const projectsDir = process.env.CLAUDE_PROJECTS_DIR
+	|| path.join(os.homedir(), '.claude', 'projects');
+const slug = process.env.CLAUDE_PROJECT_SLUG || claude.slugFor(root);
+
+const prices = loadPrices(path.join(__dirname, 'prices.json'));
+const { runs, skipped } = agy.readRuns(logDir);
+
+for (const r of runs) {
+	const g = numstat(r.range, root);
+	r.insertions = g.insertions;
+	r.deletions = g.deletions;
+	if (r.commits === null) r.commits = g.commits;
+
+	// numstat's own verdict travels with the numbers. Dropping `measured` and
+	// keeping only the nulls would leave the dashboard unable to tell a run
+	// that landed nothing from a run whose range git could not resolve, and
+	// those two want opposite readings: one is a real zero, the other is a
+	// hole. The reason is what a reader needs to close the hole.
+	r.work_measured = g.measured;
+	r.work_reason = g.reason;
+
+	// A run whose tokens were never recorded, or whose share of a thread could
+	// not be separated out, prices to null and not to free. `perTurn` nulls
+	// every token key together, so `total` is a sound test for all of them.
+	if (r.tokens.total === null) {
+		r.usd = null;
+		r.priced = false;
+	} else {
+		const p = priceOf(r.model, {
+			in: r.tokens.in || 0,
+			out: r.tokens.out || 0,
+			// The sidecar records cache reads now. Hardcoding 0 here was safe
+			// only for as long as nothing wrote the row, and it stopped being
+			// safe the moment dispatch did.
+			cache_read: r.tokens.cache_read || 0,
+			cache_write: 0,
+		}, prices);
+		r.usd = p.usd;
+		r.priced = p.priced;
+	}
+}
+
+// An unreadable project directory is the Claude arm being unmeasurable, and
+// claude.js throws rather than answering [] precisely so it cannot be mistaken
+// for an arm that spent nothing. That contract is only worth anything if the
+// caller records the throw instead of dying on it: the git work above is
+// already done by this point, and crashing here would throw it away and write
+// no file at all.
+// Delegation share needs a denominator git measured, not one derived from the
+// runs themselves: attributed lines over attributed lines reads 100% whenever
+// any agy run landed anything, and 100% is not a measurement. So ask git what
+// landed across the whole window the runs sit in, and let the runs claim their
+// part of it.
+function landedLines() {
+	const bases = [];
+	for (const r of runs) {
+		const b = r.range ? String(r.range).split('..')[0] : '';
+		if (b) bases.push(b);
+	}
+	if (!bases.length) {
+		return { measured: false, reason: 'no run recorded a commit range' };
+	}
+
+	// A run whose own range git could not resolve cannot claim its lines, and the
+	// remainder would absorb them -- crediting work to "outside any run" precisely
+	// because nobody could measure it. Refusing the whole figure is the honest
+	// answer; a share quietly biased downward by an unknown amount is not.
+	const holes = runs.filter(r => r.work_measured === false).length;
+	if (holes) {
+		return {
+			measured: false,
+			reason: holes + ' run(s) have a range git could not resolve, so their'
+				+ ' lines cannot be told from lines no run wrote',
+		};
+	}
+
+	// Earliest base by distance to HEAD, not by the clock: a base is a commit, and
+	// commits are ordered by what reaches what, not by the time on whichever
+	// machine wrote them.
+	let base = null;
+	let furthest = -1;
+	for (const b of bases) {
+		let n;
+		try {
+			n = Number(execFileSync('git', ['rev-list', '--count', b + '..HEAD'],
+				{ cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+		} catch (e) {
+			continue;
+		}
+		if (Number.isFinite(n) && n > furthest) { furthest = n; base = b; }
+	}
+	if (base === null) {
+		return { measured: false, reason: 'git could not place any run base relative to HEAD' };
+	}
+
+	const w = numstat(base + '..HEAD', root);
+	if (!w.measured) return { measured: false, reason: w.reason };
+
+	const by_arm = {};
+	for (const r of runs) {
+		const a = by_arm[r.arm] || (by_arm[r.arm] = { insertions: 0, deletions: 0 });
+		a.insertions += r.insertions;
+		a.deletions += r.deletions;
+	}
+
+	// More lines claimed than the window holds means the ranges overlap or reach
+	// outside it. That is not a share of anything, and the arithmetic would still
+	// hand back a percentage, so it is refused by name.
+	const claimed = Object.values(by_arm)
+		.reduce((sum, a) => sum + a.insertions + a.deletions, 0);
+	const total = w.insertions + w.deletions;
+	if (claimed > total) {
+		return {
+			measured: false,
+			reason: 'the runs claim ' + claimed + ' lines but ' + base + '..HEAD holds '
+				+ total + ' -- the ranges overlap or reach outside the window',
+		};
+	}
+
+	return {
+		window: base + '..HEAD',
+		insertions: w.insertions,
+		deletions: w.deletions,
+		by_arm,
+		measured: true,
+		reason: null,
+	};
+}
+const landed = landedLines();
+
+let turns = [];
+try {
+	turns = claude.readTurns(projectsDir, slug);
+} catch (e) {
+	skipped.push({
+		path: path.join(projectsDir, slug),
+		reason: e.message,
+	});
+}
+
+let c;
+try {
+	c = claude.summarise(turns, gapS);
+} catch (e) {
+	fail(2, 'unusable idle gap', e.message,
+		'BENCH_IDLE_GAP is a positive number of seconds');
+}
+
+if (turns.length === 0 && !skipped.some(s => s.path.endsWith(slug))) {
+	skipped.push({
+		path: path.join(projectsDir, slug),
+		reason: 'no Claude transcripts found — Claude\'s side of every split reads as zero',
+	});
+}
+
+// Priced per turn, by the model that turn actually ran on.
+//
+// Pricing the whole arm at `turns[turns.length - 1].model` is wrong twice over.
+// A session that hands over between models bills every turn at whichever one
+// happened to answer last; and the last turn is very often a `<synthetic>` one,
+// which is not a model at all, so a single such turn at the tail would leave
+// the entire arm unpriced. A synthetic turn spends nothing, and priceOf charges
+// nothing for an unknown model that spent nothing, so per-turn pricing lets
+// those turns pass through at zero without taking the rest of the arm with them.
+function priceTurns(want) {
+	let usd = 0;
+	let priced = true;
+	const models = new Map();
+	for (const t of turns) {
+		if (Boolean(t.sidechain) !== want) continue;
+		const p = priceOf(t.model, t.tokens, prices);
+		if (p.priced) usd += p.usd; else priced = false;
+		const m = models.get(t.model) || { model: t.model, turns: 0, usd: 0, priced: true };
+		m.turns++;
+		if (p.priced) m.usd += p.usd; else m.priced = false;
+		models.set(t.model, m);
+	}
+	return { usd, priced, models: [...models.values()] };
+}
+
+const pm = priceTurns(false);
+const ps = priceTurns(true);
+
+// A headline needs one name, and the most output tokens is the least misleading
+// way to pick it — a handover's leftover turns should not outvote the model that
+// did the work. `models` below carries the whole breakdown for anyone who cares.
+let model = 'unknown';
+let mostOut = -1;
+const outBy = new Map();
+for (const t of turns) {
+	const n = (outBy.get(t.model) || 0) + t.tokens.out;
+	outBy.set(t.model, n);
+	if (n > mostOut) { mostOut = n; model = t.model; }
+}
+
+const out = {
+	generated: new Date().toISOString(),
+	root,
+	idle_gap_s: gapS,
+	prices_updated: prices._updated || 'unknown',
+	runs,
+	landed,
+	claude: {
+		active_s: c.active_s, elapsed_s: c.elapsed_s,
+		main: c.main, sidechain: c.sidechain,
+		model,
+		models: [...pm.models, ...ps.models],
+		usd_main: pm.usd, usd_sidechain: ps.usd,
+		priced: pm.priced && ps.priced,
+	},
+	skipped,
+};
+
+const outDir = path.join(root, workspace, 'bench');
+fs.mkdirSync(outDir, { recursive: true });
+const outFile = path.join(outDir, 'runs.json');
+fs.writeFileSync(outFile, JSON.stringify(out, null, 2) + '\n');
+
+const partial = runs.filter(r => r.quality === 'partial').length;
+const unmeasured = runs.filter(r => r.work_measured === false).length;
+console.log(`collected ${runs.length} run(s) -> ${path.relative(root, outFile)}`);
+if (partial) console.log(`  ${partial} run(s) reported as partial, not as zero`);
+if (unmeasured) console.log(`  ${unmeasured} run(s) whose landed work git could not measure`);
+if (skipped.length) {
+	console.log(`  ${skipped.length} source(s) SKIPPED — the split below them is incomplete:`);
+	for (const s of skipped.slice(0, 10)) console.log(`    ${path.basename(s.path)} — ${s.reason}`);
+}

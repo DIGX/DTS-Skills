@@ -322,6 +322,67 @@ It:
 Supports `--continue --file <path>` to resume the implementer's existing thread
 for a correction round, which is far cheaper than starting cold.
 
+### `.agy/solo` — the Claude-only baseline arm
+
+    .agy/solo 4        # open a bracket for task 4
+    ...                # do the work yourself, commit it
+    .agy/solo --done   # record what landed
+
+It runs no model. It opens a bracket, snapshots HEAD, and on `--done` writes the
+same `.class` sidecar `dispatch` writes — same keys, `arm=solo`. That is the
+whole point: both arms go through one reader, so a difference between them is a
+difference in the work and not in how the work was counted.
+
+Without a solo run the comparison has one arm, and "agy-agents is faster" has
+nothing to be faster than.
+
+### `.agy/bench/` — measuring the split
+
+`.agy/dispatch` prints a `share` line for the run it just did — the lines agy
+committed, one side only. The full picture needs the scraper:
+
+    node .agy/bench/collect      # logs + transcripts + git -> .agy/work/bench/runs.json
+    node .agy/bench/dashboard    # runs.json -> .agy/work/bench/index.html
+
+The pipeline is one-way. `collect` is the only thing that reads a run log and
+the only thing that writes `runs.json`; `dashboard` reads `runs.json` and
+nothing else. A rendering bug therefore cannot corrupt a measurement, and a
+measurement can be re-rendered without being re-taken.
+
+The dashboard has three tabs. **Split** answers whether the implementer is doing
+the work:
+
+- **Delegation share** — of the lines that landed in the window the runs sit in,
+  the share committed inside an agy run. The denominator comes from git, not
+  from the runs: attributed lines over attributed lines would read 100% whenever
+  any agy run landed anything, which is not a measurement. When the window
+  cannot be resolved — a rebased range, or runs claiming more lines than the
+  window holds — the panel reads `—` and names the reason rather than quoting a
+  share it cannot stand behind.
+- **Effort share** — tokens by side. Expect it to disagree with delegation
+  share. If agy writes most of the lines while Claude burns most of the tokens
+  supervising, the skill is not buying what it claims.
+- **Retry burden** — agy runs per landed task. A task that took three dispatches
+  counts once in delegation share and three times here; without this panel a
+  high share can be produced entirely by re-running a failing implementer.
+
+**Comparison** needs a baseline, and a baseline needs you to make one with
+`.agy/solo` above. Until a solo run exists the tab is observational — it reports
+the agy-agents arm against nothing, and says so. Cost there is **notional**:
+tokens at published list prices, not a bill either subscription issues. Credit
+usage is never summed across the two tools, because an agy-agents task spends
+both budgets and a single number would hide which one you actually ran out of.
+Claude's own cost is quoted once, undivided: one transcript covers both arms and
+nothing in it records which turn served which.
+
+**Runs** is the table everything else is computed from. `partial` marks a run
+missing figures the instrumentation now records — absent, not zero — and a dash
+in the lines column marks a range git could not resolve. Both are excluded from
+the panels that need them rather than counted as zeros, and every source that
+could not be read at all is listed in a banner above the figures. An unread run
+shifts every number below it in whichever direction that run would have pushed
+them, so it is never silent.
+
 ### `.agy/tripwire` — the integrity fence
 
 ```bash

@@ -116,7 +116,7 @@ case "$model" in
 	done ;;
 esac
 
-printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
+printf '%s\n' '{"event":"init","conversation_id":"'"${FAKE_CONV:-conv-fixture-0001}"'","init":{"model":"'"$model"'","cwd":"/repo"}}'
 
 # A real run reports token usage on its result event; this one does it only when
 # asked. Both halves need testing and they need separate runs: that the numbers
@@ -125,7 +125,19 @@ printf '%s\n' '{"event":"init","init":{"model":"'"$model"'","cwd":"/repo"}}'
 # deliberately unmistakable — no 0, no 1, nothing a miscount could land on — and
 # the total is the sum, so a reader that mixes the keys up is visible too.
 USAGE=""
-[ -n "${FAKE_USAGE:-}" ] && USAGE=',"usage":{"input_tokens":13571,"output_tokens":24680,"thinking_tokens":31415,"total_tokens":69666}'
+#
+# The arithmetic is the wire's, not a convenient one. Measured against the real
+# binary: in 13751, out 25, think 24, total 13776 - that is total = in + out,
+# with thinking counted INSIDE output and never added again. This fixture used
+# to make the total the sum of all three, which asserts the opposite of what
+# agy does and would keep a cost model that bills thinking twice green. Same
+# rule as the --effort case thirty lines up: a double that is not the thing it
+# doubles does not test the thing it doubles.
+#
+# cache_read_tokens is on the wire too and the sidecar never recorded it. It
+# reads 0 on a cold run, which is why it went unnoticed; it is deliberately
+# non-zero here so a reader that drops the key is visible.
+[ -n "${FAKE_USAGE:-}" ] && USAGE=',"usage":{"input_tokens":13571,"output_tokens":24680,"thinking_tokens":17280,"cache_read_tokens":2048,"total_tokens":38251}'
 
 # A report written by the run itself, so it is genuinely newer than RUN_START.
 if [ -n "${FAKE_REPORT:-}" ] && [ -n "${FAKE_REPORT_TEXT:-}" ]; then
@@ -264,7 +276,7 @@ ${FAKE_QUOTA_MODEL:-*gemini*})
 	along)    msg="Individual quota reached. Please try again later. Resets in 2d4h." ;;
 	unknown)  msg="429 RESOURCE_EXHAUSTED" ;;
 	none)     printf '%s\n' '{"event":"step_update","step_update":{"step_type":"tool","state":"DONE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{}}}}'
-	          printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"The primary model did the work.","num_turns":2,"duration_seconds":5'"$USAGE"'}}'
+	          printf '%s\n' '{"event":"result","conversation_id":"'"${FAKE_CONV:-conv-fixture-0001}"'","result":{"status":"SUCCESS","response":"The primary model did the work.","num_turns":'"${FAKE_TURNS:-2}"',"duration_seconds":5'"$USAGE"'}}'
 	          exit 0 ;;
 	*)        msg="RESOURCE_EXHAUSTED: weekly limit reached for Gemini models" ;;
 	esac
@@ -1759,6 +1771,75 @@ has "the dispatch template names the adopted runner" "scripts/gates" \
 # and fails here; a pinned line reworded out from under its fragment fails
 # too, and has to be re-justified rather than silently re-admitted. Same
 # bargain as the tripwire fingerprints: the churn is the point.
+# ============================================================ continue threads
+printf '\n=== continue threads ===============================================\n'
+
+# GST-47 (field report, GST Invoice). `agy --continue` resumes the last
+# conversation GLOBALLY — the flag is passed through verbatim and there is no
+# per-task selector. protocol.md sent fix rounds 1-3 back "in its existing
+# thread" on that flag, which holds only when no other dispatch has run since.
+# In the field it had not: task 4 ran after task 3, and a task-3 fix brief was
+# about to be dropped into a thread that thought it had just finished task 4.
+#
+# The prose form of this rule already existed and was already read as
+# unconditional, so the check is a refusal rather than a sentence.
+CT="$TMP/thread"
+rm -rf "$CT"; mkdir -p "$CT/src"
+(
+	cd "$CT" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project CT >install.log 2>&1
+	# Two things this fixture has to get right before any exit code it
+	# collects means anything. The installer ships dispatch-context.md
+	# unfilled and dispatch refuses on it at exit 2, which this section
+	# would read as its own refusal. And the install itself dirties the
+	# tree, which dispatch scores as NOT COMMITTED at exit 1. Either one
+	# makes every refusal row pass for a reason that has nothing to do
+	# with --continue, and makes the one row that must exit 0 unreachable.
+	sed -e 's/{{[^}]*}}/filled-in/g' -e '/Delete this quote block/d' 		.agy/work/m1/dispatch-context.md > ctx.filled
+	mv ctx.filled .agy/work/m1/dispatch-context.md
+	rm -f install.log
+	git add -A && git commit -qm installed
+) >/dev/null 2>&1 || bad "thread fixture installs" "setup failed"
+CTW="$CT/.agy/work/m1"
+printf '# task 3\nDo three.\n' > "$CTW/task-3-dispatch.md"
+printf '# task 4\nDo four.\n' > "$CTW/task-4-dispatch.md"
+
+# Nothing dispatched yet: --continue cannot name a conversation this harness
+# started, and resuming an unknown one is the defect, not a degraded mode.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --continue 3 > "$TMP/ct0.log" 2>&1 )
+want "--continue with no recorded thread refuses" 2 $?
+has  "  says nothing has been dispatched yet" "no thread recorded" "$TMP/ct0.log"
+
+# Two ordinary dispatches, task 3 then task 4. The second is what makes the
+# first one's thread unreachable, and nothing in agy's flag surface says so.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 3 > "$TMP/ct1.log" 2>&1 )
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch 4 > "$TMP/ct2.log" 2>&1 )
+has "the workspace records which thread is live" "task-4" "$CTW/.last-thread"
+
+# The field case exactly: a fix brief for task 3, sent after task 4 ran.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --continue 3 > "$TMP/ct3.log" 2>&1 )
+want "--continue after a different task refuses" 2 $?
+# Both needles are whole clauses from the refusal, not bare task labels: a
+# dispatch for task 3 prints "task-3" all over its own banner, so the bare
+# label passes on a binary with no guard in it at all.
+has  "  names the task the thread is actually on" "the live thread is task-4" "$TMP/ct3.log"
+has  "  and the one being dispatched"             "this brief is for task-3"  "$TMP/ct3.log"
+has  "  says why the flag cannot tell them apart" "globally" "$TMP/ct3.log"
+has  "  tells the controller to re-brief instead" "re-brief" "$TMP/ct3.log"
+
+# And the other side of it. A guard that refuses every --continue passes every
+# row above while breaking the one workflow the flag exists for: fix rounds
+# 1-3 back into the thread that is genuinely still live.
+( cd "$CT" && FAKE_ERROR=none AGY_SKIP_GATES=1 \
+	bash .agy/dispatch --continue 4 > "$TMP/ct4.log" 2>&1 )
+want "--continue on the still-live task runs" 0 $?
+
 printf '\n=== documentation ==================================================\n'
 
 GATES_PINS='
@@ -1799,6 +1880,46 @@ for doc in SKILL.md README.md reference/dispatch-traps.md reference/protocol.md;
 	has "  $doc resolves the runner through the config" \
 		'( . .agy/config && bash $AGY_GATES )' "$SKILL_DIR/$doc"
 done
+
+# GST-44/45/46 (field report, GST Invoice). The reviewer-cannot-run section sent
+# controllers straight to HELD without saying that a budget-killed reviewer is
+# resumable, that its partial review file is already on disk, or whether the
+# next task may dispatch while the hold stands. Two of those facts were in this
+# document the whole time — under other headings, which is the same as absent to
+# a controller reading the one section that names its situation. So these are
+# scoped to the section body, not to the file: file-scoped assertions were green
+# throughout the defect.
+SEC="$TMP/protocol-held.md"
+awk '/^### When the reviewer cannot run/{f=1} f&&/^## /{f=0} f' \
+	"$SKILL_DIR/reference/protocol.md" > "$SEC"
+# The prose rows read a flattened copy. Markdown wraps at 79 columns and the
+# wrap points are arbitrary, so a phrase that happens to straddle one is
+# invisible to a line-oriented grep — two of these rows were red against the
+# fixed document for exactly that reason. That is a false alarm, and a false
+# alarm costs more than the assertion is worth. Flattening takes the wrap out
+# of the contract and leaves the wording in it.
+SECF="$TMP/protocol-held.flat"
+tr -d '\r' < "$SEC" | tr '\n' ' ' | tr -s ' ' > "$SECF"
+if [ ! -s "$SEC" ]; then
+	bad "the reviewer-cannot-run section is findable" "extracted nothing — heading renamed?"
+else
+	ok "the reviewer-cannot-run section is findable"
+	has "  says a killed reviewer is resumable"        "resumed from its own transcript" "$SECF"
+	has "  and points where resuming is judged"        "When a run dies mid-task"        "$SECF"
+	has "  says the partial review is already on disk" "task-N-review.md"                "$SECF"
+	has "  and why it survives the kill"               "each finding as it finds it"     "$SECF"
+	has "  answers whether the next task may dispatch" "fence guards surfaces"           "$SECF"
+	has "  names the workspace as the safe surface"    "pruned from every guarded"       "$SECF"
+	has "  and the ledger as the exception inside it"  "guarded as a *file*"             "$SECF"
+fi
+
+# The claims above are only worth asserting if they are true of the fence. These
+# two hold the mechanism in place: the workspace is pruned from every guarded
+# directory, and the ledger is guarded as a file regardless of living in it.
+has "the tripwire prunes the workspace from guarded dirs" \
+	'for p in ".git" "$(norm "$AGY_WORKSPACE")"; do' "$SKILL_DIR/assets/tripwire"
+has "and the ledger is a guarded file in its own right" \
+	'for src in "$AGY_LEDGER" "$AGY_GUARD_FILES"; do' "$SKILL_DIR/assets/tripwire"
 
 # =================================================== bench instrumentation
 printf '\n=== bench instrumentation ==========================================\n'
@@ -1884,11 +2005,32 @@ else
 	# four at once and compare against what the stub actually reported.
 	btok="$(class_val "$BCLASS" tokens_in)/$(class_val "$BCLASS" tokens_out)"
 	btok="$btok/$(class_val "$BCLASS" tokens_think)/$(class_val "$BCLASS" tokens_total)"
-	if [ "$btok" = "13571/24680/31415/69666" ]; then
+	if [ "$btok" = "13571/24680/17280/38251" ]; then
 		ok "  records each count against its own key"
 	else
 		bad "  records each count against its own key" "in/out/think/total read '$btok'"
 	fi
+	# The arithmetic, not just the four values. agy reports total = in + out with
+	# thinking already inside output; a fixture or a parser that made the total
+	# the sum of all three would say thinking is billable on top, which is the
+	# one thing the cost model must not believe.
+	bti="$(class_val "$BCLASS" tokens_in)"
+	bto="$(class_val "$BCLASS" tokens_out)"
+	btt="$(class_val "$BCLASS" tokens_think)"
+	btl="$(class_val "$BCLASS" tokens_total)"
+	if [ "$((bti + bto))" = "$btl" ] && [ "$btt" -le "$bto" ]; then
+		ok "  the counts obey the wire: total is in+out, thinking inside output"
+	else
+		bad "  the counts obey the wire: total is in+out, thinking inside output" \
+			"in+out=$((bti + bto)) total=$btl think=$btt out=$bto"
+	fi
+	# The thread keys. agy reports usage for the THREAD, not the run, so a
+	# sidecar that does not say which thread it belongs to and where in it,
+	# cannot be reduced to what this run actually spent.
+	hasval "  records the thread it belongs to"   conversation      "$BCLASS"
+	hasval "  records its position in that thread" thread_turns     "$BCLASS"
+	has    "  records what its token counts cover" "tokens_scope=thread" "$BCLASS"
+	hasval "  records the cache reads agy reports" tokens_cache_read "$BCLASS"
 	has "  records the commit count" "commits=1" "$BCLASS"
 	hasval "  records the commit range" range "$BCLASS"
 	if grep -qE '^range=[0-9a-f]{40}\.\.[0-9a-f]{40}$' "$BCLASS" 2>/dev/null; then
@@ -2011,6 +2153,141 @@ else
 	no_cr "  and no carriage return survives into the file" "$BCLASS5"
 fi
 
+# ==================================================================== solo arm
+printf '\n=== solo arm =======================================================\n'
+
+# The Claude-only baseline. Without it the benchmark has one arm and nothing to
+# compare it against.
+#
+# This section sits above the milestone tests for the same reason the bench
+# section does: those end by appending a raw `AGY_WORKSPACE=.agy/work/mX` to
+# .agy/config, a plain assignment that beats the environment for everything
+# running after it. Below that line these assertions would resolve a workspace
+# that has no logs directory, and `ls -t` would hand them a sidecar from an
+# unrelated earlier run.
+SWS=".agy/work/msolo"
+rm -rf "${REPO:?}/$SWS"
+mkdir -p "$REPO/$SWS/logs"
+
+# Refusals first: solo runs no model, so its only failure modes are bracket
+# bookkeeping, and each one has to be loud in BOTH the output and the status.
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo > "$TMP/s0.log" 2>&1 )
+want "solo with no task number refuses" 2 $?
+has "  prints a verdict block"          "--- verdict"          "$TMP/s0.log"
+has "  names the failure"               "DID NOT RUN"          "$TMP/s0.log"
+has "  and the exit code agrees"        "exit    2"            "$TMP/s0.log"
+
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo --done > "$TMP/s1.log" 2>&1 )
+want "solo --done with no open bracket refuses" 2 $?
+has "  says why"                        "no open solo bracket" "$TMP/s1.log"
+
+# The happy path: open, do work, close. The closed record must carry both
+# endpoints and the git range, or it cannot be compared with an agy run.
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo 4 > "$TMP/s2.log" 2>&1 )
+want "solo opens a bracket" 0 $?
+has "  confirms the task"               "task-4"               "$TMP/s2.log"
+
+# Overlapping brackets cannot be attributed: the second one's commits are the
+# first one's commits, and nothing in either record says so.
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo 5 > "$TMP/s3.log" 2>&1 )
+want "solo refuses a second open bracket" 2 $?
+has "  says which one is open"          "already open"         "$TMP/s3.log"
+has "  and names the task holding it"   "task-4"               "$TMP/s3.log"
+
+(
+	cd "$REPO" || exit 1
+	mkdir -p src
+	printf 'claude did this\n' > src/solo.txt
+	git add -A >/dev/null 2>&1
+	git commit -qm "solo work" >/dev/null 2>&1
+	AGY_WORKSPACE="$SWS" bash .agy/solo --done > "$TMP/s4.log" 2>&1
+)
+want "solo closes the bracket" 0 $?
+
+SCLASS="$(ls -t "$REPO/$SWS"/logs/solo-*.class 2>/dev/null | head -1)"
+if [ -z "$SCLASS" ]; then
+	bad "solo wrote a .class" "none found — the measurement assertions cannot run"
+else
+	ok "solo wrote a .class"
+	has    "  marks the arm"                 "arm=solo"    "$SCLASS"
+	has    "  names the task"                "task=task-4" "$SCLASS"
+	hasval "  records wall seconds"          wall          "$SCLASS"
+	has    "  counts the commit"             "commits=1"   "$SCLASS"
+	hasval "  records the range"             range         "$SCLASS"
+	# One status key, not two. class_val takes the first match, so a close that
+	# appends a second status= line leaves a finished bracket reading back as
+	# still open to every reader downstream — including the skip rule, which
+	# keys on exactly this field to decide whether a run was measured at all.
+	sc="$(class_val "$SCLASS" status)"
+	if [ "$sc" = "success" ]; then
+		ok "  reads back as closed, not open"
+	else
+		bad "  reads back as closed, not open" "status resolves to '$sc'"
+	fi
+	nstat="$(grep -c '^status=' "$SCLASS" 2>/dev/null)"
+	if [ "$nstat" = "1" ]; then
+		ok "  and carries exactly one status key"
+	else
+		bad "  and carries exactly one status key" "found $nstat"
+	fi
+	# The same shape the agy arm records, so one reader can parse both.
+	if grep -qE '^range=[0-9a-f]{40}\.\.[0-9a-f]{40}$' "$SCLASS" 2>/dev/null; then
+		ok "  records the range as two resolved heads"
+	else
+		bad "  records the range as two resolved heads" "range=$(class_val "$SCLASS" range)"
+	fi
+fi
+
+( cd "$REPO" && AGY_WORKSPACE="$SWS" bash .agy/solo --done > "$TMP/s5.log" 2>&1 )
+want "solo refuses a double close" 2 $?
+
+# Both arms must land in the same place or `bench/collect` reads one of them
+# and reports half a comparison as though it were whole. dispatch resolves its
+# workspace by sourcing .agy/config and then applying `:=`, so environment
+# beats config beats default; solo has to resolve it the same way.
+#
+# Every assertion above sets AGY_WORKSPACE explicitly, so a solo that ignored
+# .agy/config entirely and hardcoded the default would pass all of them — and
+# would write to the wrong directory in every repo installed on a milestone,
+# which is most of them. This fixture is the only row that can see it: the
+# environment is unset, so the config is the sole source of the answer.
+SF="$TMP/solocfg"
+mkdir -p "$SF/src"
+(
+	cd "$SF" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project SF --milestone msolo >install.log 2>&1
+) || bad "solo config fixture installs" "setup failed"
+scfg="$( cd "$SF" && unset AGY_WORKSPACE && . ./.agy/config >/dev/null 2>&1; printf '%s' "${AGY_WORKSPACE:-}" )"
+if [ "$scfg" != ".agy/work/msolo" ]; then
+	bad "the config fixture points at its own milestone" "config resolves to '$scfg'"
+else
+	ok "the config fixture points at its own milestone"
+	( cd "$SF" && unset AGY_WORKSPACE && bash .agy/solo 7 > "$SF/s.log" 2>&1 )
+	want "  solo opens a bracket with no environment override" 0 $?
+	if [ -n "$(ls -t "$SF/$scfg"/logs/solo-*.class 2>/dev/null)" ]; then
+		ok "  and writes into the workspace .agy/config names"
+	else
+		bad "  and writes into the workspace .agy/config names" \
+			"nothing under $scfg/logs; .agy/work/logs holds: $(ls "$SF/.agy/work/logs" 2>/dev/null | tr '\n' ' ')"
+	fi
+fi
+
+# And the other side of the same rule: a repo with no config is not a repo with
+# a default config. dispatch refuses; solo, writing into the same workspace on
+# the same terms, has to refuse identically rather than inventing one.
+SN="$TMP/soloncfg"
+mkdir -p "$SN"
+(
+	cd "$SN" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > x.txt && git add -A && git commit -qm init
+) >/dev/null 2>&1
+( cd "$SN" && bash "$REPO/.agy/solo" 1 > "$SN/s.log" 2>&1 )
+want "solo in a repo with no .agy/config refuses" 2 $?
+has "  and names what is missing" "no .agy/config" "$SN/s.log"
+
 printf '\n=== milestone advance ==============================================\n'
 # A project outlives the milestone it was installed on. Passing --milestone used
 # to scaffold the new workspace and change nothing else: the adoption scan
@@ -2063,6 +2340,1146 @@ printf 'AGY_WORKSPACE=.agy/work/mX\n' >> .agy/config
 bash "$SKILL_DIR/scripts/install" --milestone m3 >"$TMP/m3.log" 2>&1
 has "an unmatched binding fails loudly" "COULD NOT REPOINT" "$TMP/m3.log"
 has "  and counts as a problem" "need attention" "$TMP/m3.log"
+
+# =================================================================== bench: clip
+printf '\n=== bench: clip ====================================================\n'
+BENCH="$SKILL_DIR/assets/bench"
+
+# Asserted rather than skipped over. A machine without node cannot run the
+# readers, and six unexplained module errors is a worse way to learn that than
+# one row that says it. Same bargain as the tripwire's PowerShell check: a
+# gate that disables itself quietly is worse than one that fails out loud.
+command -v node >/dev/null 2>&1 \
+	&& ok "node is available to run the bench readers" \
+	|| bad "node is available to run the bench readers" \
+		"the bench libraries are node; nothing below can run without it"
+
+node -e '
+const {clipActive, elapsed, IDLE_GAP_DEFAULT} = require(process.argv[1] + "/lib/clip.js");
+const t = n => Date.parse("2026-08-14T10:00:00Z") + n * 1000;
+const eq = (got, want, what) => { if (got !== want) throw new Error(what + ": " + got + " != " + want); };
+const a = [t(0), t(60), t(120)];
+eq(clipActive(a, 600), 120, "contiguous");
+const b = [t(0), t(60), t(60 + 8 * 3600), t(60 + 8 * 3600 + 30)];
+eq(clipActive(b, 600), 90, "clipped");
+eq(elapsed(b), 60 + 8 * 3600 + 30, "elapsed");
+eq(clipActive([t(0)], 600), 0, "single stamp");
+eq(clipActive([], 600), 0, "empty");
+eq(elapsed([t(0)]), 0, "elapsed single");
+eq(IDLE_GAP_DEFAULT, 600, "default gap");
+eq(clipActive([t(120), t(0), t(60)], 600), 120, "unsorted");
+eq(clipActive([t(0), t(600)], 600), 600, "gap exactly at the threshold is active");
+eq(clipActive([t(0), t(601)], 600), 0, "one second past the threshold is not");
+' "$BENCH" > "$TMP/clip.log" 2>&1
+want "clip: contiguous, clipped, elapsed, degenerate, unsorted, boundary" 0 $? "$(head -3 "$TMP/clip.log")"
+
+# A threshold that cannot be used must not behave like a threshold of zero.
+# BENCH_IDLE_GAP=10m is Number -> NaN, and `d <= NaN` is false for every gap,
+# so a malformed setting clips the entire run and reports 0s active for both
+# arms — a number that looks like a result. This is the project's standing rule
+# at its sharpest: an absent measurement is never a zero one. The refusal is
+# loud at the one point where the mistake is still cheap.
+for badgap in NaN 0 -1 undefined '"600"'; do
+	node -e '
+	const {clipActive} = require(process.argv[1] + "/lib/clip.js");
+	const t = Date.parse("2026-08-14T10:00:00Z");
+	let threw = false;
+	try { clipActive([t, t + 60000], eval(process.argv[2])); } catch (e) { threw = true; }
+	if (!threw) throw new Error("accepted an unusable gap: " + process.argv[2]);
+	' "$BENCH" "$badgap" > "$TMP/clipgap.log" 2>&1
+	want "  clip refuses an unusable idle gap: $badgap" 0 $? "$(head -2 "$TMP/clipgap.log")"
+done
+
+# ============================================================ bench: agy reader
+printf '\n=== bench: agy reader ==============================================\n'
+FIX="$TMP/fixlogs"
+rm -rf "$FIX"; mkdir -p "$FIX"
+
+# A fully instrumented run. The thread rows are part of what "fully"
+# means now: without tokens_scope the reader cannot tell a turn's own
+# usage from a whole thread's running total, and it downgrades the run
+# to partial rather than pass an unattributable number off as measured.
+# Strip them from this fixture and the row below stops describing a
+# current run.
+cat > "$FIX/task-7-20260814-100000.class" <<'CLS'
+quota=none
+tools=24
+status=success
+killed=0
+idle=0
+deferred=0
+wall=412
+tokens_in=1200
+tokens_out=800
+tokens_think=100
+tokens_total=2100
+model=gemini-3-pro
+commits=1
+conversation=conv-read-7
+thread_turns=2
+tokens_scope=thread
+continued=0
+range=aaaa..bbbb
+raw=
+CLS
+printf '{"event":"init"}\n' > "$FIX/task-7-20260814-100000.ndjson"
+
+# A run logged before the instrumentation existed. It is a real run and must be
+# counted, but its missing numbers must never read as zero.
+cat > "$FIX/task-6-20260813-090000.class" <<'CLS'
+quota=none
+tools=9
+status=success
+killed=0
+idle=0
+deferred=0
+raw=
+CLS
+printf '{"event":"init"}\n' > "$FIX/task-6-20260813-090000.ndjson"
+
+# A deferred run: its stream is truncated by definition, and it did real work.
+# Skipping it would undercount exactly the longest runs.
+cat > "$FIX/task-8-20260814-110000.class" <<'CLS'
+quota=none
+tools=31
+status=
+killed=0
+idle=1
+deferred=1
+wall=900
+tokens_in=5
+tokens_out=5
+tokens_think=0
+tokens_total=10
+model=gemini-3-pro
+commits=1
+conversation=conv-read-8
+thread_turns=
+tokens_scope=thread
+continued=0
+range=cccc..dddd
+raw=
+CLS
+printf '{"event":"init"\n' > "$FIX/task-8-20260814-110000.ndjson"
+
+# A stream whose parser never finished, so no sidecar exists. This is the only
+# genuine "not measured" case.
+printf '{"event":"init"}\n' > "$FIX/task-9-20260814-120000.ndjson"
+
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const {runs, skipped} = readRuns(process.argv[2]);
+const by = t => runs.find(r => r.task === t);
+if (runs.length !== 3) throw new Error("runs: " + runs.length);
+const a = by("task-7");
+if (a.quality !== "full") throw new Error("task-7 quality " + a.quality);
+if (a.wall !== 412 || a.tokens.total !== 2100 || a.tools !== 24) throw new Error("task-7 numbers");
+if (a.commits !== 1 || a.range !== "aaaa..bbbb") throw new Error("task-7 git");
+if (a.arm !== "agy") throw new Error("task-7 arm");
+const b = by("task-6");
+if (b.quality !== "partial") throw new Error("task-6 must be partial, got " + b.quality);
+if (b.wall !== null || b.tokens.total !== null) throw new Error("task-6 must not read as zero");
+const c = by("task-8");
+if (!c) throw new Error("deferred run was dropped");
+if (c.status !== "deferred") throw new Error("task-8 status " + c.status);
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+if (!/task-9/.test(skipped[0].path)) throw new Error("wrong skip");
+' "$BENCH" "$FIX" > "$TMP/agyread.log" 2>&1
+want "agy reader: full, partial, deferred, skipped" 0 $? "$(head -3 "$TMP/agyread.log")"
+
+# The solo arm goes through the same reader, or the two arms drift apart.
+cat > "$FIX/solo-task-4-20260814-130000.class" <<'CLS'
+arm=solo
+task=task-4
+started=1786000000
+head=aaaa
+status=success
+ended=1786001000
+wall=1000
+commits=1
+range=aaaa..eeee
+CLS
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const r = readRuns(process.argv[2]).runs.find(x => x.arm === "solo");
+if (!r) throw new Error("solo run not read");
+if (r.task !== "task-4" || r.wall !== 1000 || r.commits !== 1) throw new Error("solo fields");
+if (r.tokens.total !== null) throw new Error("solo tokens come from Claude, not here");
+' "$BENCH" "$FIX" > "$TMP/soloread.log" 2>&1
+want "agy reader reads the solo arm too" 0 $? "$(head -3 "$TMP/soloread.log")"
+
+# An open bracket is a task still being worked on. Counted as a run it reports
+# as finished in whatever time has passed so far, which is not a measurement of
+# anything. The reader has always had this rule; nothing exercised it.
+OPENFIX="$TMP/fixopen"
+rm -rf "$OPENFIX"; mkdir -p "$OPENFIX"
+cat > "$OPENFIX/solo-task-5-20260814-140000.class" <<'CLS'
+arm=solo
+task=task-5
+started=1786000000
+head=aaaa
+status=open
+CLS
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const {runs, skipped} = readRuns(process.argv[2]);
+if (runs.length !== 0) throw new Error("an open bracket was counted as a run");
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+if (!/solo --done/.test(skipped[0].reason)) throw new Error("skip reason does not say how to close it: " + skipped[0].reason);
+' "$BENCH" "$OPENFIX" > "$TMP/openread.log" 2>&1
+want "agy reader skips a solo bracket still open" 0 $? "$(head -3 "$TMP/openread.log")"
+
+# The shell reads these files with class_val(), which is `head -1`: first match
+# wins. A JS reader that took the last value would disagree with every shell
+# caller about the same bytes on disk — and the record it disagrees about is
+# exactly the one 1.8.16's solo close path exists to prevent, `status=open`
+# above `status=success`. Whichever rule is right, there can only be one.
+DUPFIX="$TMP/fixdup"
+rm -rf "$DUPFIX"; mkdir -p "$DUPFIX"
+cat > "$DUPFIX/solo-task-6-20260814-150000.class" <<'CLS'
+arm=solo
+task=task-6
+started=1786000000
+status=open
+wall=1000
+status=success
+CLS
+node -e '
+const {readRuns, parseClass} = require(process.argv[1] + "/lib/agy.js");
+const c = parseClass("k=first\nk=second\n");
+if (c.k !== "first") throw new Error("parseClass took the last value: " + c.k);
+const {runs, skipped} = readRuns(process.argv[2]);
+if (runs.length !== 0) throw new Error("a duplicated status read as closed, disagreeing with class_val()");
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+' "$BENCH" "$DUPFIX" > "$TMP/dupread.log" 2>&1
+want "agy reader takes the first value of a repeated key" 0 $? "$(head -3 "$TMP/dupread.log")"
+
+# Sidecars are written LF, and a CR that reaches one fails here in a shape worth
+# naming: Number("1000\r") is 1000, so every numeric field survives intact and
+# the record looks healthy, while `status === "open"` quietly stops matching.
+# The damage lands only on the string comparisons — which is to say, only on the
+# rules that decide whether a record counts at all.
+CRFIX="$TMP/fixcr"
+rm -rf "$CRFIX"; mkdir -p "$CRFIX"
+printf 'arm=solo\r\ntask=task-7\r\nstarted=1786000000\r\nstatus=open\r\n' \
+	> "$CRFIX/solo-task-7-20260814-160000.class"
+node -e '
+const {readRuns} = require(process.argv[1] + "/lib/agy.js");
+const {runs, skipped} = readRuns(process.argv[2]);
+if (runs.length !== 0) throw new Error("a CR made an open bracket read as closed");
+if (skipped.length !== 1) throw new Error("skipped: " + JSON.stringify(skipped));
+' "$BENCH" "$CRFIX" > "$TMP/crread.log" 2>&1
+want "agy reader parses a CRLF sidecar" 0 $? "$(head -3 "$TMP/crread.log")"
+
+# ========================================================= bench: claude reader
+printf '\n=== bench: claude reader ===========================================\n'
+CPROJ="$TMP/claudeproj/d--Fake-Repo"
+rm -rf "$TMP/claudeproj"; mkdir -p "$CPROJ"
+node -e '
+const fs = require("fs");
+const t = n => new Date(Date.parse("2026-08-14T10:00:00Z") + n * 1000).toISOString();
+const turn = (n, side, out) => JSON.stringify({
+  type: "assistant", timestamp: t(n), isSidechain: side,
+  sessionId: "s1",
+  message: {model: "claude-opus-5", usage: {
+    input_tokens: 10, output_tokens: out, cache_read_input_tokens: 500,
+    cache_creation_input_tokens: 200,
+    output_tokens_details: {thinking_tokens: 5}}}});
+const lines = [
+  JSON.stringify({type: "user", timestamp: t(0), message: {role: "user"}}),
+  turn(30, false, 100),
+  turn(90, true, 40),
+  turn(90 + 8 * 3600, false, 60)
+];
+fs.writeFileSync(process.argv[1] + "/sess.jsonl", lines.join("\n") + "\n");
+' "$CPROJ"
+
+# None of these four turns carries a message.id, which is the second thing this
+# row asserts without saying so: turns that cannot be deduplicated are kept, not
+# collapsed onto one another under a shared undefined key.
+node -e '
+const {readTurns, summarise, slugFor} = require(process.argv[1] + "/lib/claude.js");
+if (slugFor("d:\\Claude Code\\DTS Skills") !== "d--Claude-Code-DTS-Skills")
+  throw new Error("slug: " + slugFor("d:\\Claude Code\\DTS Skills"));
+const turns = readTurns(process.argv[2], "d--Fake-Repo");
+if (turns.length !== 3) throw new Error("turns: " + turns.length);
+const s = summarise(turns, 600);
+if (s.main.turns !== 2) throw new Error("main turns: " + s.main.turns);
+if (s.sidechain.turns !== 1) throw new Error("sidechain turns: " + s.sidechain.turns);
+if (s.sidechain.out !== 40) throw new Error("sidechain out: " + s.sidechain.out);
+if (s.main.cache_read !== 1000) throw new Error("cache read: " + s.main.cache_read);
+if (s.active_s !== 60) throw new Error("active must clip the 8h gap, got " + s.active_s);
+if (s.elapsed_s !== 90 + 8 * 3600 - 30) throw new Error("elapsed: " + s.elapsed_s);
+' "$BENCH" "$TMP/claudeproj" > "$TMP/cread.log" 2>&1
+want "claude reader: slug, sidechain split, cache, clipping" 0 $? "$(head -3 "$TMP/cread.log")"
+
+# Claude Code rewrites earlier turns into the new session file when a session
+# resumes, so the same turn is on disk several times over. Measured against this
+# project's own 27 transcripts: 1161 usage-bearing turns, 585 distinct ids, one
+# turn written out nine times. Summed naively that is 2.25x the real output
+# tokens and 1.91x the real cache reads — in the arm the whole benchmark exists
+# to compare against the other one.
+#
+# The copies are not always equal. Exactly one id in those 585 disagrees with
+# itself, and it disagrees in the shape that decides the rule: two copies
+# carrying real usage against four carrying zeroes. File order is
+# readdirSync().sort(), alphabetical by session uuid and otherwise arbitrary, so
+# "keep the first copy seen" would record that turn as free whenever the zero
+# copy sorted first. Keep the fullest copy, and date it from the earliest, since
+# the turn happened once and the timestamps are what clipping is computed from.
+#
+# The fixture puts the zero copy in the file that sorts first and gives the full
+# copy the later stamp, so first-seen and latest-stamp each fail a row of their
+# own rather than both failing the same one.
+DPROJ="$TMP/dupproj/d--Dup-Repo"
+rm -rf "$TMP/dupproj"; mkdir -p "$DPROJ"
+node -e '
+const fs = require("fs");
+const t = n => new Date(Date.parse("2026-08-14T10:00:00Z") + n * 1000).toISOString();
+const turn = (id, n, u) => JSON.stringify({
+  type: "assistant", timestamp: t(n), isSidechain: false, sessionId: "s1",
+  message: {id: id, model: "claude-opus-5", usage: {
+    input_tokens: u ? 10 : 0, output_tokens: u,
+    cache_read_input_tokens: u ? 500 : 0,
+    cache_creation_input_tokens: u ? 200 : 0,
+    output_tokens_details: {thinking_tokens: u ? 5 : 0}}}});
+const d = process.argv[1];
+fs.writeFileSync(d + "/a.jsonl",
+  [turn("m1", 0, 0), turn("m2", 60, 50), turn("m3", 120, 70)].join("\n") + "\n");
+fs.writeFileSync(d + "/b.jsonl",
+  [turn("m3", 120, 70), turn("m1", 300, 100)].join("\n") + "\n");
+' "$DPROJ"
+
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const turns = readTurns(process.argv[2], "d--Dup-Repo");
+if (turns.length !== 3) throw new Error("five copies of three turns read as " + turns.length);
+const s = summarise(turns, 600);
+if (s.main.turns !== 3) throw new Error("main turns: " + s.main.turns);
+if (s.main.cache_read !== 1500) throw new Error("cache read: " + s.main.cache_read + ", want 1500");
+if (s.main.in !== 30) throw new Error("in: " + s.main.in);
+' "$BENCH" "$TMP/dupproj" > "$TMP/cdup.log" 2>&1
+want "claude reader counts a replayed turn once" 0 $? "$(head -3 "$TMP/cdup.log")"
+
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const s = summarise(readTurns(process.argv[2], "d--Dup-Repo"), 600);
+if (s.main.out !== 220) throw new Error("out: " + s.main.out + ", want 220 (0 means the zero-filled copy won)");
+if (s.main.think !== 15) throw new Error("think: " + s.main.think);
+' "$BENCH" "$TMP/dupproj" > "$TMP/cfull.log" 2>&1
+want "  and keeps the fuller copy of a replayed turn" 0 $? "$(head -3 "$TMP/cfull.log")"
+
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const s = summarise(readTurns(process.argv[2], "d--Dup-Repo"), 600);
+if (s.elapsed_s !== 120) throw new Error("elapsed: " + s.elapsed_s + ", want 120 (240 means a replay stretched the session)");
+if (s.active_s !== 120) throw new Error("active: " + s.active_s);
+' "$BENCH" "$TMP/dupproj" > "$TMP/cstamp.log" 2>&1
+want "  and dates it from the earliest copy" 0 $? "$(head -3 "$TMP/cstamp.log")"
+
+# A slug that resolves to nothing is the arm being unmeasurable, not the arm
+# having done nothing. Swallowed, it yields active 0, elapsed 0 and every total
+# 0 — a complete-looking result that says Claude worked for no time at no cost.
+node -e '
+const {readTurns} = require(process.argv[1] + "/lib/claude.js");
+let threw = null;
+try { readTurns(process.argv[2], "d--No-Such-Repo"); } catch (e) { threw = e; }
+if (!threw) throw new Error("a missing project directory read as zero turns");
+if (!/d--No-Such-Repo/.test(threw.message)) throw new Error("refusal does not name the directory: " + threw.message);
+' "$BENCH" "$TMP/claudeproj" > "$TMP/cmiss.log" 2>&1
+want "claude reader refuses a project directory that is not there" 0 $? "$(head -3 "$TMP/cmiss.log")"
+
+# And the other half, without which the row above is a statement about
+# emptiness rather than about absence: a directory that exists and holds no
+# sessions is a real answer of none.
+mkdir -p "$TMP/claudeproj/d--Empty-Repo"
+node -e '
+const {readTurns} = require(process.argv[1] + "/lib/claude.js");
+const turns = readTurns(process.argv[2], "d--Empty-Repo");
+if (turns.length !== 0) throw new Error("turns: " + turns.length);
+' "$BENCH" "$TMP/claudeproj" > "$TMP/cempty.log" 2>&1
+want "  but an empty project directory is simply no turns" 0 $? "$(head -3 "$TMP/cempty.log")"
+
+# ========================================================== bench: git and cost
+printf '\n=== bench: git and cost ============================================\n'
+GREPO="$TMP/costrepo"
+rm -rf "$GREPO"; mkdir -p "$GREPO"
+(
+	cd "$GREPO" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'one\n' > a.txt && git add -A && git commit -qm first
+	printf 'one\ntwo\nthree\n' > a.txt && git add -A && git commit -qm second
+) >/dev/null 2>&1 || bad "cost fixture repo" "setup failed"
+
+node -e '
+const {numstat} = require(process.argv[1] + "/lib/gitwork.js");
+const repo = process.argv[2];
+const {execFileSync} = require("child_process");
+const head = execFileSync("git", ["rev-parse", "HEAD"], {cwd: repo}).toString().trim();
+const base = execFileSync("git", ["rev-parse", "HEAD~1"], {cwd: repo}).toString().trim();
+const r = numstat(base + ".." + head, repo);
+if (r.commits !== 1) throw new Error("commits: " + r.commits);
+if (r.insertions < 1) throw new Error("insertions: " + r.insertions);
+if (r.measured !== true) throw new Error("a range git resolved must be measured");
+const empty = numstat("", repo);
+if (empty.measured !== false) throw new Error("an empty range is not a measurement");
+const bogus = numstat("nope..nope", repo);
+if (bogus.measured !== false) throw new Error("a bad range must not throw, and must not measure");
+' "$BENCH" "$GREPO" > "$TMP/git.log" 2>&1
+want "gitwork: numstat, empty range, bad range" 0 $? "$(head -3 "$TMP/git.log")"
+
+# .agy/solo already wrote this rule down, about this exact quantity: a rewritten
+# history is not zero commits, it is a range nothing can measure, and recording
+# it as 0 tells every reader that a session which may have committed a dozen
+# times committed none. The reader has to carry the same distinction the writer
+# does, or the writer's care is discarded one module downstream.
+node -e '
+const {numstat} = require(process.argv[1] + "/lib/gitwork.js");
+const bogus = numstat("nope..nope", process.argv[2]);
+if (bogus.commits === 0) throw new Error("an unresolvable range read as zero commits landed");
+if (bogus.commits !== null || bogus.insertions !== null || bogus.deletions !== null)
+  throw new Error("counts must be null, got " + JSON.stringify(bogus));
+if (!bogus.reason) throw new Error("nothing said why it could not be measured");
+const empty = numstat("", process.argv[2]);
+if (empty.commits !== null) throw new Error("an absent range read as zero commits landed");
+' "$BENCH" "$GREPO" > "$TMP/gitnull.log" 2>&1
+want "gitwork does not report an unmeasurable range as zero work" 0 $? "$(head -3 "$TMP/gitnull.log")"
+
+# The failure mode this one guards is not an error. `git log --numstat
+# --format=%H --all` succeeds, and hands one task the entire history of the
+# repository. A wrong answer that large arrives with no exit code to notice it.
+node -e '
+const {numstat} = require(process.argv[1] + "/lib/gitwork.js");
+const {execFileSync} = require("child_process");
+const repo = process.argv[2];
+const all = Number(execFileSync("git", ["rev-list", "--count", "--all"], {cwd: repo}).toString().trim());
+if (all < 2) throw new Error("fixture has no history to mis-attribute");
+const r = numstat("--all", repo);
+if (r.commits === all) throw new Error("--all attributed the whole repository (" + all + " commits) to one task");
+if (r.measured !== false) throw new Error("--all was accepted as a range");
+if (!/range/.test(r.reason)) throw new Error("reason: " + r.reason);
+' "$BENCH" "$GREPO" > "$TMP/gitdash.log" 2>&1
+want "  and a range that is not one is refused, not run" 0 $? "$(head -3 "$TMP/gitdash.log")"
+
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const tk = {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0};
+const known = priceOf("claude-opus-5", tk, p);
+if (!known.priced) throw new Error("claude-opus-5 must be priced");
+if (typeof known.usd !== "number" || known.usd <= 0) throw new Error("usd: " + known.usd);
+const cheap = priceOf("claude-opus-5", {in: 0, out: 0, think: 0, cache_read: 1e6, cache_write: 0}, p);
+if (!(cheap.usd < known.usd)) throw new Error("a cache read must cost less than fresh input");
+const unknown = priceOf("some-model-9", tk, p);
+if (unknown.priced !== false || unknown.usd !== null)
+  throw new Error("an unknown model must be null, not zero");
+' "$BENCH" > "$TMP/cost.log" 2>&1
+want "cost: known, cache discount, unknown-is-null" 0 $? "$(head -3 "$TMP/cost.log")"
+
+# The two model ids are read out of .agy/dispatch rather than written here, so
+# changing a default without adding its rate fails this row instead of shipping
+# a cost panel that is null for every run of the arm being measured.
+DEF_MODEL="$(sed -n 's/^: "${AGY_MODEL:=\(.*\)}"$/\1/p' "$SKILL_DIR/assets/dispatch")"
+DEF_RESERVE="$(sed -n 's/^: "${AGY_FALLBACK_MODEL:=\(.*\)}"$/\1/p' "$SKILL_DIR/assets/dispatch")"
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const tk = {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0};
+for (const m of process.argv.slice(2)) {
+  if (!m) throw new Error("could not read a default model out of dispatch");
+  const r = priceOf(m, tk, p);
+  if (!r.priced) throw new Error(m + " is a shipped default and prices to null");
+  if (!(r.usd > 0)) throw new Error(m + " usd: " + r.usd);
+  if (!r.source) throw new Error(m + " is priced with no stated source");
+}
+' "$BENCH" "$DEF_MODEL" "$DEF_RESERVE" > "$TMP/costdef.log" 2>&1
+want "cost prices the models agy actually defaults to" 0 $? "$(head -3 "$TMP/costdef.log")"
+
+# Both tables hold the same two rates and differ only in which line was typed
+# first. If the answer moves, the rate a run is billed at is decided by JSON
+# authoring order.
+node -e '
+const {priceOf} = require(process.argv[1] + "/lib/cost.js");
+const broad = {in: 99, out: 0, cache_read: 0, cache_write: 0, source: "x"};
+const exact = {in: 1, out: 0, cache_read: 0, cache_write: 0, source: "x"};
+const a = {models: {"gemini-3": broad, "gemini-3.7-flash": exact}};
+const b = {models: {"gemini-3.7-flash": exact, "gemini-3": broad}};
+const tk = {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0};
+const ua = priceOf("gemini-3.7-flash-high", tk, a).usd;
+const ub = priceOf("gemini-3.7-flash-high", tk, b).usd;
+if (ua !== ub) throw new Error("key order decided the rate: " + ua + " vs " + ub);
+if (ua !== 1) throw new Error("the broader prefix won: " + ua);
+' "$BENCH" > "$TMP/costpfx.log" 2>&1
+want "  by the longest matching prefix, not the first key written" 0 $? "$(head -3 "$TMP/costpfx.log")"
+
+# Anthropic bills a five-minute cache write at 1.25x input and a one-hour write
+# at 2x. Every cache write in this project is a one-hour write — 4,411,940
+# tokens of them against zero five-minute ones — and cache writes are about half
+# the Claude arm's notional cost, so one rate for both understates the arm the
+# benchmark is comparing against by roughly a fifth.
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const base = {in: 0, out: 0, think: 0, cache_read: 0, cache_write: 1e6};
+const m5 = priceOf("claude-opus-5", base, p);
+const h1 = priceOf("claude-opus-5", Object.assign({}, base, {cache_write_1h: 1e6}), p);
+if (!(h1.usd > m5.usd)) throw new Error("an hour-long cache write cost no more than a five-minute one");
+if (m5.usd !== 6.25) throw new Error("five-minute write: " + m5.usd);
+if (h1.usd !== 10) throw new Error("one-hour write: " + h1.usd);
+const half = priceOf("claude-opus-5", Object.assign({}, base, {cache_write_1h: 5e5}), p);
+if (half.usd !== 8.125) throw new Error("a half-and-half write: " + half.usd);
+' "$BENCH" > "$TMP/costttl.log" 2>&1
+want "cost charges a one-hour cache write at the one-hour rate" 0 $? "$(head -3 "$TMP/costttl.log")"
+
+# And the rate is only reachable if the reader carries the split through.
+TTLP="$TMP/ttlproj/d--Ttl-Repo"
+rm -rf "$TMP/ttlproj"; mkdir -p "$TTLP"
+node -e '
+const fs = require("fs");
+fs.writeFileSync(process.argv[1] + "/s.jsonl", JSON.stringify({
+  type: "assistant", timestamp: "2026-08-14T10:00:00Z", isSidechain: false,
+  sessionId: "s1",
+  message: {id: "t1", model: "claude-opus-5", usage: {
+    input_tokens: 10, output_tokens: 20,
+    cache_read_input_tokens: 0, cache_creation_input_tokens: 500,
+    cache_creation: {ephemeral_1h_input_tokens: 400, ephemeral_5m_input_tokens: 100}}}}) + "\n");
+' "$TTLP"
+node -e '
+const {readTurns, summarise} = require(process.argv[1] + "/lib/claude.js");
+const t = readTurns(process.argv[2], "d--Ttl-Repo")[0];
+if (t.tokens.cache_write !== 500) throw new Error("cache_write: " + t.tokens.cache_write);
+if (t.tokens.cache_write_1h !== 400) throw new Error("cache_write_1h: " + t.tokens.cache_write_1h);
+const s = summarise([t], 600);
+if (s.main.cache_write_1h !== 400) throw new Error("the split did not survive summarise");
+' "$BENCH" "$TMP/ttlproj" > "$TMP/ttlread.log" 2>&1
+want "  and claude.js reports the hour-long writes separately" 0 $? "$(head -3 "$TMP/ttlread.log")"
+
+# Thinking is 39.2% of this project's output tokens. Both vendors report it as a
+# breakdown of output rather than beside it — Google's table row is labelled
+# "Output price (including thinking tokens)" — so charging it again adds two
+# fifths to one arm's output bill. The parameter is accepted and deliberately
+# unused, which reads as an oversight to anyone who has not been told otherwise.
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const plain = {in: 0, out: 1e6, think: 0, cache_read: 0, cache_write: 0};
+const a = priceOf("claude-opus-5", plain, p);
+const b = priceOf("claude-opus-5", Object.assign({}, plain, {think: 1e6}), p);
+if (a.usd !== b.usd) throw new Error("thinking was charged on top of output: " + a.usd + " vs " + b.usd);
+if (a.usd !== 25) throw new Error("output usd: " + a.usd);
+' "$BENCH" > "$TMP/costthink.log" 2>&1
+want "cost does not charge thinking tokens twice" 0 $? "$(head -3 "$TMP/costthink.log")"
+
+# One token of opus-5 input is $0.000005. Rounded to four places at the point of
+# pricing it is $0, and a thousand such runs sum to nothing at all. Rounding is
+# a thing a view does, once, to a number it is about to print.
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const one = {in: 1, out: 0, think: 0, cache_read: 0, cache_write: 0};
+let sum = 0;
+for (let i = 0; i < 1000; i++) sum += priceOf("claude-opus-5", one, p).usd;
+if (!(sum > 0)) throw new Error("a thousand priced runs summed to " + sum);
+const once = priceOf("claude-opus-5", {in: 1000, out: 0, think: 0, cache_read: 0, cache_write: 0}, p).usd;
+if (Math.abs(sum - once) > 1e-9) throw new Error("summed " + sum + ", but the same tokens priced at once are " + once);
+' "$BENCH" > "$TMP/costround.log" 2>&1
+want "cost does not round a small run away" 0 $? "$(head -3 "$TMP/costround.log")"
+
+# 28 turns per project carry model "<synthetic>" — Claude Code writing down its
+# own interrupts and errors — with every count zero. Zero tokens have a cost
+# that needs no rate. Reserving null for the case where there are tokens and no
+# rate is what keeps a null meaning "nobody knows" rather than "nothing here".
+node -e '
+const {loadPrices, priceOf} = require(process.argv[1] + "/lib/cost.js");
+const p = loadPrices(process.argv[1] + "/prices.json");
+const nothing = {in: 0, out: 0, think: 0, cache_read: 0, cache_write: 0};
+const free = priceOf("<synthetic>", nothing, p);
+if (free.priced !== true || free.usd !== 0)
+  throw new Error("a turn that spent nothing priced as unpriceable: " + JSON.stringify(free));
+const spent = priceOf("<synthetic>", {in: 1e6, out: 0, think: 0, cache_read: 0, cache_write: 0}, p);
+if (spent.priced !== false || spent.usd !== null)
+  throw new Error("an unknown model that spent tokens must stay null: " + JSON.stringify(spent));
+' "$BENCH" > "$TMP/costzero.log" 2>&1
+want "an unknown model that spent nothing costs nothing" 0 $? "$(head -3 "$TMP/costzero.log")"
+
+# =================================================== bench: agy thread accounting
+printf '\n=== bench: agy thread accounting ===================================\n'
+# agy reports usage for the THREAD, not for the run. Measured against the real
+# binary on 2026-08-21 — three calls, the second and third on --continue:
+#
+#   turns 1:  in 13751  out 25  think 24  total 13776
+#   turns 2:  in 27734  out 49  think 47  total 27783
+#   turns 3:  in 41948  out 73  think 70  total 42021
+#
+# Every count accumulates. protocol.md sends fix rounds 1-3 back on
+# `.agy/dispatch --continue`, each writing its own sidecar, so summing them
+# counts the first turn once per round that follows it. The reserve handover is
+# worse than a multiple: it continues the same thread under a different model,
+# so the failed primary's tokens are billed a second time at the reserve's rate.
+# Both errors inflate the agy arm, on exactly the long runs.
+TLOGS="$TMP/threadlogs"
+rm -rf "$TLOGS"; mkdir -p "$TLOGS"
+
+# tclass <file> <key=value>... - a sidecar with the caller's keys first and
+# the common ones defaulted after them. The order matters and is the point:
+# the reader is first-match-wins, deliberately, so that .agy/solo's rewritten
+# `status=open` line beats the one below it. Writing the defaults last is what
+# makes them defaults; writing them first would have quietly pinned every run
+# in this fixture to one model and one status, and the two rows that turn on
+# a per-run override would have passed by agreeing with the wrong value.
+tclass() {
+	f="$TLOGS/$1"; shift
+	{
+		for kv in "$@"; do printf '%s\n' "$kv"; done
+		printf 'arm=agy\nstatus=success\nwall=100\n'
+		printf 'model=gemini-3.7-flash-high\ntokens_scope=thread\n'
+	} > "$f"
+}
+
+# --- one thread, three runs. Positions 1, 3 and 7, because a dispatch makes
+# several turns of its own and the gaps between rounds are normal. Differencing
+# has to follow the recorded position, not assume consecutive numbering.
+tclass task-1-20260101-000001.class conversation=T-A thread_turns=1 continued=0 \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=10 tokens_total=1100
+tclass task-1-20260101-000002.class conversation=T-A thread_turns=3 continued=1 \
+	tokens_in=3000 tokens_out=300 tokens_think=120 tokens_cache_read=30 tokens_total=3300
+tclass task-1-20260101-000003.class conversation=T-A thread_turns=7 continued=1 \
+	tokens_in=6000 tokens_out=600 tokens_think=250 tokens_cache_read=60 tokens_total=6600
+
+# --- a reserve handover on --continue: same thread, different model. The
+# filenames sort the reserve FIRST ('-' before '.'), which is deliberate: the
+# order has to come from the recorded position, not from the directory listing.
+tclass task-2-20260101-000001.class conversation=T-B thread_turns=1 continued=0 \
+	status=error tokens_in=5000 tokens_out=500 tokens_think=200 tokens_cache_read=0 tokens_total=5500
+tclass task-2-20260101-000001-reserve.class conversation=T-B thread_turns=5 continued=1 \
+	model=claude-opus-4-6-thinking \
+	tokens_in=9000 tokens_out=900 tokens_think=400 tokens_cache_read=0 tokens_total=9900
+
+# --- a handover that could not resume, so it opened its own thread. num_turns 4
+# with continued=0: four turns that are all its own.
+tclass task-3-20260101-000001.class conversation=T-C1 thread_turns=1 continued=0 \
+	status=error tokens_in=2000 tokens_out=200 tokens_think=80 tokens_cache_read=0 tokens_total=2200
+tclass task-3-20260101-000001-reserve.class conversation=T-C2 thread_turns=4 continued=0 \
+	model=claude-opus-4-6-thinking \
+	tokens_in=7000 tokens_out=700 tokens_think=300 tokens_cache_read=0 tokens_total=7700
+
+# --- continued, with nothing in the log to continue from (the earlier rounds
+# were pruned). The total carries turns nobody can subtract.
+tclass task-4-20260101-000001.class conversation=T-D thread_turns=6 continued=1 \
+	tokens_in=8000 tokens_out=800 tokens_think=350 tokens_cache_read=0 tokens_total=8800
+
+# --- continued, but agy reported no position at all.
+tclass task-5-20260101-000001.class conversation=T-E thread_turns=1 continued=0 \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=0 tokens_total=1100
+tclass task-5-20260101-000002.class conversation=T-E thread_turns= continued=1 \
+	tokens_in=4000 tokens_out=400 tokens_think=150 tokens_cache_read=0 tokens_total=4400
+
+# --- a running total that shrank. One of the two sidecars is not what it says.
+tclass task-6-20260101-000001.class conversation=T-F thread_turns=1 continued=0 \
+	tokens_in=5000 tokens_out=500 tokens_think=200 tokens_cache_read=0 tokens_total=5500
+tclass task-6-20260101-000002.class conversation=T-F thread_turns=3 continued=1 \
+	tokens_in=4000 tokens_out=400 tokens_think=150 tokens_cache_read=0 tokens_total=4400
+
+# --- written before any of this existed: no thread keys at all.
+printf 'arm=agy\nstatus=success\nwall=50\nmodel=gemini-3.7-flash-high\n' \
+	> "$TLOGS/task-7-20260101-000001.class"
+printf 'tokens_in=1234\ntokens_out=234\ntokens_think=100\ntokens_total=1468\n' \
+	>> "$TLOGS/task-7-20260101-000001.class"
+
+# The bench paths go in as arguments, not spliced into the -e source: the
+# shell hands node a POSIX path and only argv gets translated back to a
+# Windows one on the way in. A path pasted into the script text arrives as
+# /tmp/... and node reports the directory as unreadable, which readRuns
+# correctly reports as a skip -- so every row would fail for the same wrong
+# reason and none of them would be testing what it says it tests.
+tnode() { # tnode <label> <js>
+	node -e "
+	const { readRuns } = require(process.argv[1] + '/lib/agy.js');
+	const { runs } = readRuns(process.argv[2]);
+	const by = {}; for (const r of runs) by[r.label] = r;
+	const t = l => by[l].tokens;
+	const shape = l => [t(l).in, t(l).out, t(l).think, t(l).cache_read, t(l).total].join('/');
+	const eq = (l, want) => { const g = shape(l);
+		if (g !== want) throw new Error(l + ': ' + g + ', want ' + want); };
+	$2
+	" "$BENCH" "$TLOGS" > "$TMP/thr.log" 2>&1
+	want "$1" 0 $? "$(grep -m1 '^Error:' "$TMP/thr.log")"
+}
+
+tnode "a continued run is counted for its own turn, not the thread's total" '
+	eq("task-1-20260101-000001", "1000/100/40/10/1100");
+	eq("task-1-20260101-000002", "2000/200/80/20/2200");
+	eq("task-1-20260101-000003", "3000/300/130/30/3300");
+	if (by["task-1-20260101-000003"].tokensOf !== "turn") throw new Error("not marked as a turn");
+'
+
+tnode "  so a reserve handover does not bill the failed attempt twice" '
+	eq("task-2-20260101-000001", "5000/500/200/0/5500");
+	eq("task-2-20260101-000001-reserve", "4000/400/200/0/4400");
+	if (by["task-2-20260101-000001-reserve"].model !== "claude-opus-4-6-thinking")
+		throw new Error("the reserve run lost its own model");
+'
+
+tnode "  and a handover that opened a new thread is left alone" '
+	eq("task-3-20260101-000001-reserve", "7000/700/300/0/7700");
+	if (by["task-3-20260101-000001-reserve"].tokensOf !== "turn")
+		throw new Error("a fresh thread was not trusted with its own tokens");
+'
+
+tnode "a continued run whose earlier turns are gone is unmeasured, not inflated" '
+	const r = by["task-4-20260101-000001"];
+	if (r.tokens.total !== null) throw new Error("kept an inflated total: " + r.tokens.total);
+	if (r.tokens.in !== null) throw new Error("kept an inflated input count");
+	if (r.tokensOf !== "unknown") throw new Error("tokensOf: " + r.tokensOf);
+	if (r.quality !== "partial") throw new Error("quality: " + r.quality);
+	if (!r.tokensNote) throw new Error("nulled the count without saying why");
+'
+
+tnode "  and a run that never reported its thread position is not trusted" '
+	const r = by["task-5-20260101-000002"];
+	if (r.tokens.total !== null) throw new Error("kept " + r.tokens.total);
+	if (!r.tokensNote) throw new Error("no reason recorded");
+	if (by["task-5-20260101-000001"].tokens.total !== 1100)
+		throw new Error("the turn that WAS measurable was dropped too");
+'
+
+tnode "a thread total that goes backwards is refused, not negated" '
+	const r = by["task-6-20260101-000002"];
+	if (r.tokens.in !== null) throw new Error("reported " + r.tokens.in);
+	if (typeof r.tokens.in === "number" && r.tokens.in < 0) throw new Error("negative tokens");
+'
+
+tnode "a sidecar written before this instrumentation is partial, not a turn count" '
+	const r = by["task-7-20260101-000001"];
+	if (r.tokens.in !== 1234) throw new Error("threw away the only figures there are");
+	if (r.tokensOf !== "unknown") throw new Error("tokensOf: " + r.tokensOf);
+	if (r.quality !== "partial") throw new Error("quality: " + r.quality);
+'
+
+# The reader has to carry the cache reads dispatch now records, or the row added
+# to the sidecar is a row nothing downstream can spend.
+tnode "the reader carries the cache reads through to the run" '
+	if (by["task-1-20260101-000001"].tokens.cache_read !== 10)
+		throw new Error("cache_read: " + by["task-1-20260101-000001"].tokens.cache_read);
+'
+
+# =============================================================== bench: collect
+printf '\n=== bench: collect =================================================\n'
+# collect is the only thing that reads a log and the only thing that writes
+# runs.json. Everything below is about what it does with a source it cannot
+# read: the whole point of the file is that a hole in it is visible as a hole.
+
+CREPO="$TMP/collectrepo"
+rm -rf "$CREPO"; mkdir -p "$CREPO"
+git -C "$CREPO" init -q
+git -C "$CREPO" config user.email bench@example.invalid
+git -C "$CREPO" config user.name bench
+printf 'one\n' > "$CREPO/f.txt"
+git -C "$CREPO" add -A >/dev/null; git -C "$CREPO" commit -qm base
+CBASE="$(git -C "$CREPO" rev-parse HEAD)"
+printf 'one\ntwo\nthree\nfour\n' > "$CREPO/f.txt"
+git -C "$CREPO" add -A >/dev/null; git -C "$CREPO" commit -qm work
+CTIP="$(git -C "$CREPO" rev-parse HEAD)"
+CLOGS="$CREPO/.agy/work/logs"
+mkdir -p "$CLOGS"
+
+# cclass <file> <key=value>... - caller's keys first, defaults after, for the
+# same first-match-wins reason as the thread fixture above.
+cclass() {
+	f="$CLOGS/$1"; shift
+	{
+		for kv in "$@"; do printf '%s\n' "$kv"; done
+		printf 'arm=agy\nstatus=success\nwall=100\ntools=3\nquota=none\n'
+		printf 'model=gemini-3.7-flash\ntokens_scope=thread\ncontinued=0\n'
+		printf 'thread_turns=1\nconversation=C-1\nraw=\n'
+	} > "$f"
+}
+
+# A run that landed the second commit.
+cclass task-1-20260101-000001.class range="$CBASE..$CTIP" \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=200 tokens_total=1100
+# The solo arm goes through the same reader and the same git attribution.
+cclass solo-task-2-20260101-000002.class arm=solo task=task-2 \
+	range="$CBASE..$CTIP" \
+	tokens_in=500 tokens_out=50 tokens_think=10 tokens_cache_read=0 tokens_total=550
+# A range git cannot resolve: the commits were rebased away.
+cclass task-3-20260101-000003.class range=deadbee..f00dfac \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=0 tokens_total=1100
+# Continued with nothing in its thread to continue from: no attributable tokens.
+cclass task-4-20260101-000004.class range="$CBASE..$CTIP" \
+	conversation=C-9 thread_turns=4 continued=1 \
+	tokens_in=9000 tokens_out=900 tokens_think=300 tokens_cache_read=0 tokens_total=9900
+# The same run as task-1 but with no cache reads, so the two can be compared.
+cclass task-5-20260101-000005.class range="$CBASE..$CTIP" conversation=C-5 \
+	tokens_in=1000 tokens_out=100 tokens_think=40 tokens_cache_read=0 tokens_total=1100
+
+# The Claude side. The last turn is a <synthetic> one, which is what a real
+# transcript very often ends on, and it is not a model.
+CPROJ2="$TMP/collectproj/d--Coll-Repo"
+rm -rf "$TMP/collectproj"; mkdir -p "$CPROJ2"
+node -e '
+const fs = require("fs");
+const t = n => new Date(Date.parse("2026-08-14T10:00:00Z") + n * 1000).toISOString();
+const turn = (n, id, model, side, out) => JSON.stringify({
+  type: "assistant", timestamp: t(n), isSidechain: side, sessionId: "s1",
+  message: {id: id, model: model, usage: {
+    input_tokens: 100, output_tokens: out, cache_read_input_tokens: 500,
+    cache_creation_input_tokens: 200,
+    output_tokens_details: {thinking_tokens: 5}}}});
+// A real synthetic turn carries every count at zero -- it is Claude Code own
+// interrupt and error records, not a model call. That is what makes it safe to
+// price at an unknown rate, and it is why the fixture must not invent tokens
+// for it: a synthetic turn with tokens would be unpriced for a real reason and
+// the row below would pass or fail for something other than what it tests.
+const synth = JSON.stringify({
+  type: "assistant", timestamp: t(90), isSidechain: false, sessionId: "s1",
+  message: {id: "m3", model: "<synthetic>", usage: {
+    input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    output_tokens_details: {thinking_tokens: 0}}}});
+const lines = [
+  turn(30, "m1", "claude-opus-5", false, 100),
+  turn(60, "m2", "claude-opus-5", true, 40),
+  synth
+];
+fs.writeFileSync(process.argv[1] + "/sess.jsonl", lines.join("\n") + "\n");
+' "$CPROJ2"
+
+crun() { # crun <projects-dir> <slug> -> exit code in $CRC, log in $TMP/collect.log
+	( cd "$CREPO" && AGY_WORKSPACE=".agy/work" \
+		CLAUDE_PROJECTS_DIR="$1" CLAUDE_PROJECT_SLUG="$2" \
+		node "$BENCH/collect" ) > "$TMP/collect.log" 2>&1
+	CRC=$?
+}
+
+crun "$TMP/collectproj" d--Coll-Repo
+want "collect runs" 0 "$CRC" "$(head -5 "$TMP/collect.log")"
+CRJ="$CREPO/.agy/work/bench/runs.json"
+if [ -f "$CRJ" ]; then ok "  and writes runs.json"; else bad "  and writes runs.json" "missing"; fi
+has "  and names the file it wrote" "runs.json" "$TMP/collect.log"
+
+cnode() { # cnode <label> <js over `j`>
+	node -e "
+	const j = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+	const by = t => j.runs.find(r => r.task === t);
+	$2
+	" "$CRJ" > "$TMP/cj.log" 2>&1
+	want "$1" 0 $? "$(grep -m1 '^Error:' "$TMP/cj.log")"
+}
+
+cnode "runs.json carries both arms, the claude block and the skipped list" '
+	if (!Array.isArray(j.runs)) throw new Error("no runs array");
+	if (!j.generated) throw new Error("no generated stamp");
+	if (j.idle_gap_s !== 600) throw new Error("gap: " + j.idle_gap_s);
+	if (!j.claude || typeof j.claude.active_s !== "number") throw new Error("no claude block");
+	if (j.claude.sidechain.turns !== 1) throw new Error("sidechain not carried through");
+	if (!Array.isArray(j.skipped)) throw new Error("no skipped array");
+	const solo = j.runs.find(r => r.arm === "solo");
+	if (!solo) throw new Error("solo arm missing from runs.json");
+	if (solo.insertions !== 3) throw new Error("solo not attributed by git: " + solo.insertions);
+'
+
+# git could not resolve the range. Zero insertions would read as a run that
+# landed nothing, which is a different claim and a false one.
+cnode "a range git cannot resolve is a hole, not a run that landed nothing" '
+	const r = by("task-3");
+	if (r.insertions !== null) throw new Error("insertions: " + r.insertions);
+	if (r.work_measured !== false) throw new Error("work_measured: " + r.work_measured);
+	if (!r.work_reason) throw new Error("no reason recorded for the hole");
+	if (by("task-1").work_measured !== true) throw new Error("a measurable run was marked unmeasured");
+'
+
+cnode "a run whose tokens cannot be attributed prices to null, not to free" '
+	const r = by("task-4");
+	if (r.usd !== null) throw new Error("usd: " + r.usd);
+	if (r.priced !== false) throw new Error("priced: " + r.priced);
+	if (by("task-1").usd === null) throw new Error("a measurable run lost its price");
+'
+
+# The cache-read row exists in the sidecar now. If collect still passes a
+# hardcoded 0 the two runs below cost exactly the same, and the row is a row
+# nothing spends.
+cnode "cache reads reach the price, so recording them changes the bill" '
+	const withRead = by("task-1").usd, without = by("task-5").usd;
+	if (!(withRead > without)) throw new Error(withRead + " vs " + without);
+'
+
+# Pricing the arm at turns[last].model bills every turn at whatever answered
+# last -- and what answers last is very often <synthetic>, which is not a model.
+cnode "the claude arm is priced per turn, not at whatever answered last" '
+	if (!(j.claude.usd_main > 0)) throw new Error("usd_main: " + j.claude.usd_main);
+	if (j.claude.priced !== true) throw new Error("one synthetic turn left the arm unpriced");
+	if (j.claude.model !== "claude-opus-5") throw new Error("headline model: " + j.claude.model);
+	const syn = j.claude.models.find(m => m.model === "<synthetic>");
+	if (!syn) throw new Error("the synthetic turns were not accounted for at all");
+	if (syn.usd !== 0) throw new Error("a synthetic turn was charged: " + syn.usd);
+'
+
+# claude.js throws on an unreadable project directory rather than answering []
+# so it cannot be mistaken for an arm that spent nothing. That is only worth
+# something if collect records the throw instead of dying on it -- the git work
+# is already done by then, and crashing would write no file at all.
+crun "$TMP/collectproj" d--Not-There
+want "an unreadable transcript directory is a skip, not a crash" 0 "$CRC" \
+	"$(head -3 "$TMP/collect.log")"
+cnode "  the run it did measure still reaches the file" '
+	if (by("task-1").insertions !== 3) throw new Error("git work was thrown away");
+	if (!j.skipped.some(s => /d--Not-There/.test(s.path))) throw new Error("the miss was not recorded");
+	if (j.claude.main.turns !== 0) throw new Error("turns invented: " + j.claude.main.turns);
+'
+has "  and the run says so on the way out" "SKIPPED" "$TMP/collect.log"
+
+# A directory that is there and holds no sessions is a different fact from one
+# that is not there, and claude.js answers [] for it rather than throwing --
+# because [] is true. It still has to reach runs.json as a skip: an arm with no
+# transcripts reads as an arm that spent nothing, which is the same wrong answer
+# arrived at politely.
+mkdir -p "$TMP/collectproj/d--Empty-Coll"
+crun "$TMP/collectproj" d--Empty-Coll
+want "a transcript directory with no sessions is still a skip" 0 "$CRC" \
+	"$(head -3 "$TMP/collect.log")"
+cnode "  because an arm with no transcripts reads as an arm that spent nothing" '
+	if (!j.skipped.some(s => /d--Empty-Coll/.test(s.path)))
+		throw new Error("an empty transcript directory passed as a measurement");
+'
+
+
+# ---- the landed-lines window ---------------------------------------------
+# Delegation share is the one figure on the dashboard that measures work
+# product rather than effort, and it needs a denominator git measured. Taken
+# from the runs themselves it is the numerator over itself: 100% whenever any
+# agy run landed a line, null otherwise, two reachable values and neither of
+# them a measurement. So collect resolves the window here, where it has the
+# repository and every run's range in hand, and refuses it out loud when it
+# cannot.
+cnode "a run git could not place refuses the whole window, not just its own line" '
+	if (!j.landed) throw new Error("no landed block at all");
+	if (j.landed.measured !== false) throw new Error("measured: " + j.landed.measured);
+	if (!/could not resolve/.test(j.landed.reason || "")) throw new Error("reason: " + j.landed.reason);
+'
+
+# A second repository, because the one above deliberately contains a range git
+# cannot resolve and so can never produce a measured window. Three commits, and
+# each arm gets a range of its own: overlapping ranges are a different case and
+# are tested as one below.
+CREPO2="$TMP/landedrepo"
+rm -rf "$CREPO2"; mkdir -p "$CREPO2"
+git -C "$CREPO2" init -q
+git -C "$CREPO2" config user.email bench@example.invalid
+git -C "$CREPO2" config user.name bench
+printf 'one\n' > "$CREPO2/f.txt"
+git -C "$CREPO2" add -A >/dev/null; git -C "$CREPO2" commit -qm base
+LBASE="$(git -C "$CREPO2" rev-parse HEAD)"
+printf 'one\ntwo\nthree\nfour\n' > "$CREPO2/f.txt"
+git -C "$CREPO2" add -A >/dev/null; git -C "$CREPO2" commit -qm agywork
+LMID="$(git -C "$CREPO2" rev-parse HEAD)"
+printf 'one\ntwo\nthree\nfour\nfive\n' > "$CREPO2/f.txt"
+git -C "$CREPO2" add -A >/dev/null; git -C "$CREPO2" commit -qm solowork
+LTIP="$(git -C "$CREPO2" rev-parse HEAD)"
+LLOGS="$CREPO2/.agy/work/logs"
+mkdir -p "$LLOGS"
+
+lclass() { # same first-match-wins ordering as cclass above
+	f="$LLOGS/$1"; shift
+	{
+		for kv in "$@"; do printf '%s\n' "$kv"; done
+		printf 'arm=agy\nstatus=success\nwall=100\ntools=3\nquota=none\n'
+		printf 'model=gemini-3.7-flash\ntokens_scope=thread\ncontinued=0\n'
+		printf 'thread_turns=1\nconversation=L-1\nraw=\n'
+	} > "$f"
+}
+lseed() { # lseed <agy-range> <solo-range>
+	rm -f "$LLOGS"/*.class
+	lclass task-1-20260101-000001.class range="$1" \
+		tokens_in=10 tokens_out=1 tokens_think=0 tokens_cache_read=0 tokens_total=11
+	lclass solo-task-2-20260101-000002.class arm=solo task=task-2 conversation=L-2 \
+		range="$2" \
+		tokens_in=10 tokens_out=1 tokens_think=0 tokens_cache_read=0 tokens_total=11
+}
+crun2() { # crun2 <repo> -> exit code in $CRC
+	( cd "$1" && AGY_WORKSPACE=".agy/work" \
+		CLAUDE_PROJECTS_DIR="$TMP/collectproj" CLAUDE_PROJECT_SLUG=d--Coll-Repo \
+		node "$BENCH/collect" ) > "$TMP/collect2.log" 2>&1
+	CRC=$?
+}
+LRJ="$CREPO2/.agy/work/bench/runs.json"
+lnode() { # lnode <label> <js over `j`>
+	node -e "
+	const j = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+	$2
+	" "$LRJ" > "$TMP/lj.log" 2>&1
+	want "$1" 0 $? "$(grep -m1 '^Error:' "$TMP/lj.log")"
+}
+
+lseed "$LBASE..$LMID" "$LMID..$LTIP"
+crun2 "$CREPO2"
+want "collect runs against a window git can resolve" 0 "$CRC" "$(head -5 "$TMP/collect2.log")"
+
+# Four lines landed in the window; three of them inside the agy run. A share of
+# 75% is the point: the number the old shape could not produce was any number
+# other than 100.
+lnode "  the window reports every line that landed in it" '
+	if (j.landed.measured !== true) throw new Error("measured: " + j.landed.measured + " " + j.landed.reason);
+	if (j.landed.insertions !== 4) throw new Error("insertions: " + j.landed.insertions);
+	if (j.landed.deletions !== 0) throw new Error("deletions: " + j.landed.deletions);
+	if (!j.landed.window.endsWith("..HEAD")) throw new Error("window: " + j.landed.window);
+'
+lnode "  and attributes them to the arm that landed them" '
+	if (j.landed.by_arm.agy.insertions !== 3) throw new Error("agy: " + JSON.stringify(j.landed.by_arm.agy));
+	if (j.landed.by_arm.solo.insertions !== 1) throw new Error("solo: " + JSON.stringify(j.landed.by_arm.solo));
+	const share = j.landed.by_arm.agy.insertions / j.landed.insertions;
+	if (share === 1) throw new Error("the denominator is the numerator again");
+'
+
+# Both arms claiming the whole window is what overlapping ranges look like from
+# outside, and the division still hands back a percentage - 200% of the lines
+# that exist. Refused by name rather than clamped or averaged.
+lseed "$LBASE..$LTIP" "$LBASE..$LTIP"
+crun2 "$CREPO2"
+want "collect runs against overlapping ranges" 0 "$CRC" "$(head -5 "$TMP/collect2.log")"
+lnode "  runs claiming more lines than the window holds is refused, not averaged" '
+	if (j.landed.measured !== false) throw new Error("measured: " + j.landed.measured);
+	if (!/overlap/.test(j.landed.reason || "")) throw new Error("reason: " + j.landed.reason);
+'
+
+printf '\n=== bench: dashboard ===============================================\n'
+# The dashboard reads nothing but runs.json, so its fixture is a runs.json
+# written by hand. Two of them: one where git could resolve the window these
+# lines landed in, and one where it could not. The second exists because the
+# interesting failure is not a wrong share, it is a confident one — a panel
+# that reads 100% because its denominator was never measured looks exactly
+# like a panel that measured 100%.
+DRJ="$TMP/fixed-runs.json"
+cat > "$DRJ" <<'JSON'
+{
+  "generated": "2026-08-14T12:00:00.000Z",
+  "root": "/fake",
+  "idle_gap_s": 600,
+  "prices_updated": "2026-08-14",
+  "runs": [
+    {"arm":"agy","task":"task-7","wall":400,"tokens":{"in":10,"out":10,"think":0,"total":20},
+     "tools":24,"commits":1,"range":"a..b","insertions":80,"deletions":0,
+     "work_measured":true,"work_reason":null,
+     "status":"success","quality":"full","usd":0.01,"priced":true,"path":"/fake/a.class"},
+    {"arm":"agy","task":"task-9","wall":200,"tokens":{"in":null,"out":null,"think":null,"total":null},
+     "tools":null,"commits":null,"range":"e..f","insertions":null,"deletions":null,
+     "work_measured":false,"work_reason":"bad revision e..f",
+     "status":"success","quality":"partial","usd":null,"priced":false,"path":"/fake/c.class"},
+    {"arm":"solo","task":"task-4","wall":1000,
+     "tokens":{"in":null,"out":null,"think":null,"total":1234567},
+     "tools":null,"commits":1,"range":"c..d","insertions":20,"deletions":0,
+     "work_measured":true,"work_reason":null,
+     "status":"success","quality":"full","usd":null,"priced":false,"path":"/fake/b.class"}
+  ],
+  "landed": {
+    "window":"a..HEAD","insertions":100,"deletions":0,
+    "by_arm":{"agy":{"insertions":80,"deletions":0},"solo":{"insertions":20,"deletions":0}},
+    "measured":true,"reason":null
+  },
+  "claude": {"active_s":300,"elapsed_s":900,
+    "main":{"turns":10,"in":100,"out":200,"think":10,"cache_read":50,"cache_write":25},
+    "sidechain":{"turns":3,"in":30,"out":60,"think":0,"cache_read":10,"cache_write":5},
+    "model":"claude-opus-5","models":[],"usd_main":0.02,"usd_sidechain":0.005,"priced":true},
+  "skipped": [{"path":"/fake/orphan.ndjson","reason":"no .class sidecar"}]
+}
+JSON
+
+# LANG is set hostile on purpose. A page whose numbers come out "1.234.567" on
+# one machine and "1,234,567" on another has made every exact-string assertion
+# below green or red by accident of where it ran.
+LANG=de_DE.UTF-8 LC_ALL=de_DE.UTF-8 node "$BENCH/dashboard" "$DRJ" "$TMP/dash.html" > "$TMP/dash.log" 2>&1
+want "dashboard renders" 0 $? "$(head -3 "$TMP/dash.log")"
+has   "  delegation share is computed"           ">80%<"           "$TMP/dash.html"
+hasnt "  and is not the numerator over itself"   ">100%<"          "$TMP/dash.html"
+has   "  the split tab exists"                   "Split"           "$TMP/dash.html"
+has   "  the comparison tab exists"              "Comparison"      "$TMP/dash.html"
+has   "  the runs tab exists"                    "Runs"            "$TMP/dash.html"
+has   "  skipped sources raise a banner"         "1 source"        "$TMP/dash.html"
+has   "  cost is labelled notional"              "notional"        "$TMP/dash.html"
+has   "  time is a median, not a mean"           "median per task" "$TMP/dash.html"
+has   "  provenance is stated"                   "controlled"      "$TMP/dash.html"
+has   "  credits are not summed"                 "not comparable"  "$TMP/dash.html"
+hasnt "  nothing is loaded over the network"     "https://"        "$TMP/dash.html"
+has   "  an unattributable run leaves effort share, and says so"  "left out" "$TMP/dash.html"
+hasnt "  rather than joining it as a run that spent nothing"      "+0/-0"    "$TMP/dash.html"
+has   "  claude's cost is charged once, undivided"     "across both arms"   "$TMP/dash.html"
+has   "  an unmeasurable run does not inflate retry"   "inflate this figure" "$TMP/dash.html"
+has   "  numbers group the same way on every machine"  "1,234,567"          "$TMP/dash.html"
+# D6 showed the row above is only as good as the machine that runs it: node on
+# Windows takes its default locale from the OS and ignores LANG, so the mutant
+# rendered en-IN's "12,34,567" here and would have rendered "1,234,567" -- green
+# -- on a US machine. A row whose verdict depends on where the suite ran is not
+# a check. The contract that holds everywhere is that the formatter is never
+# consulted, so this one reads the source instead of the page. The needle is
+# the call and not the word: the source says in a comment that it groups by
+# hand rather than through toLocaleString, and a literal grep cannot tell a
+# prohibition from its own statement -- the first draft of this row was red
+# against a clean file for exactly that reason.
+hasnt "  and never through the reader's locale"        ".toLocaleString"    "$BENCH/dashboard"
+
+# Same figures, one field different: git could not resolve the window. Every
+# panel that needs a denominator has to change its answer, and the one it must
+# not change to is 100%.
+#
+# The numbers are left in place on purpose. collect refuses a window by
+# returning the verdict alone, so this fixture is not a copy of collect's
+# output - it is a producer that computed the lines and then withdrew their
+# provenance, which is the case the dashboard cannot verify for itself. Reading
+# `measured` is the whole defence, and a fixture that dropped the numbers too
+# would pass whether the dashboard reads it or not.
+sed 's/"measured":true,"reason":null$/"measured":false,"reason":"no run recorded a range git could resolve"/' "$DRJ" > "$TMP/unresolved-runs.json"
+node "$BENCH/dashboard" "$TMP/unresolved-runs.json" "$TMP/dash2.html" > "$TMP/dash2.log" 2>&1
+want "dashboard renders an unresolved window" 0 $? "$(head -3 "$TMP/dash2.log")"
+has   "  which reads as a dash and says why"     "Not computed"    "$TMP/dash2.html"
+hasnt "  and never as a measured 100%"           ">100%<"          "$TMP/dash2.html"
+has   "  the run saying so on the way out"       "not computed"    "$TMP/dash2.log"
+
+printf '\n=== bench: verdict share ===========================================\n'
+# l3 above is the committing fixture: FAKE_COMMIT=1, so a commit landed and the
+# range git is asked about resolves. That is the only case this line is allowed
+# to print in. The needle carries the verdict block's own column spacing, so a
+# stray "share" in a report body cannot answer for the line.
+has "the verdict reports this run's share"  "share   agy:" "$TMP/l3.log"
+has "  counting the lines agy committed"    "insertion"    "$TMP/l3.log"
+has "  and saying it is one side only"      "one side"     "$TMP/l3.log"
+
+# l1 is a run that produced nothing at all. It must not print a share of
+# nothing -- and neither must a run whose commits git could not count, which
+# reaches the verdict block with LANDED_COMMITS at 0 looking exactly the same.
+# That is why the line reads LANDED_MEASURED as well as the count.
+hasnt "  and not at all when nothing landed" "one side"    "$TMP/l1.log"
+
+# The engine has to be installed, not just authored. A skill that ships a
+# benchmark nobody can run has shipped a directory.
+for f in bench/collect bench/dashboard bench/prices.json \
+	bench/lib/agy.js bench/lib/claude.js bench/lib/clip.js \
+	bench/lib/cost.js bench/lib/gitwork.js; do
+	if [ -f "$REPO/.agy/$f" ]; then ok "  install deploys .agy/$f"
+	else bad "  install deploys .agy/$f" "missing"; fi
+done
+if [ -x "$REPO/.agy/solo" ]; then ok "  install deploys .agy/solo"
+else bad "  install deploys .agy/solo" "missing"; fi
+if [ -d "$REPO/.agy/work/m1/bench" ]; then ok "  and creates the bench workspace"
+else bad "  and creates the bench workspace" "missing"; fi
+
+# The installed copy is the one that runs, so it has to be the one that was
+# tested. Every row above is satisfied by an installer that copies the engine
+# once and never looks at it again -- and a stale .agy/bench is the normal way
+# an upgraded project ends up executing code nobody tested. So make it stale
+# on purpose and install over it. Existence was never the question.
+echo stale >> "$REPO/.agy/bench/collect"
+( cd "$REPO" && bash "$SKILL_DIR/scripts/install" >/dev/null 2>&1 )
+if diff -q "$SKILL_DIR/assets/bench/collect" "$REPO/.agy/bench/collect" >/dev/null 2>&1; then
+	ok "  and deploys the collect that was just tested"
+else
+	bad "  and deploys the collect that was just tested" "installed copy differs from assets"
+fi
+
+# AGY-22. The two commands and the baseline arm are useless undocumented, and
+# the verdict block gains a line a reader will meet before any of this prose.
+has "  the README documents the scraper"      "node .agy/bench/collect" "$SKILL_DIR/README.md"
+has "  and the baseline arm that feeds it"    ".agy/solo --done"        "$SKILL_DIR/README.md"
+has "  the verdict table carries the row"     '| `share` |'             "$SKILL_DIR/reference/dispatch-traps.md"
 
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"

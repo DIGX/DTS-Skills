@@ -324,7 +324,7 @@ detect_gates() {
 # ------------------------------------------------------------------- write it
 printf -- '--- writing --------------------------------------------------------\n'
 
-if do_it; then mkdir -p .agy "$WORKSPACE/logs"; fi
+if do_it; then mkdir -p .agy "$WORKSPACE/logs" "$WORKSPACE/bench"; fi
 say mkdir ".agy/ and $WORKSPACE/logs/"
 
 # What is installed here already, read before the copy overwrites it. An install
@@ -344,7 +344,7 @@ else
 	say version "upgrading $PRIOR_VERSION → $SKILL_VERSION"
 fi
 
-for f in dispatch tripwire review-pkg fingerprint-tree.ps1; do
+for f in dispatch solo tripwire review-pkg fingerprint-tree.ps1; do
 	if do_it; then
 		# Substituted rather than copied, because the version has to reach the
 		# installed file and only the installer knows it. These scripts are the
@@ -355,6 +355,22 @@ for f in dispatch tripwire review-pkg fingerprint-tree.ps1; do
 	fi
 	say script ".agy/$f"
 done
+
+# The benchmark engine is a directory, not a file, and it is the skill's to
+# own - refreshed on every install like the scripts beside it, never merged
+# with a copy the project has edited. Replaced wholesale rather than copied
+# over, so a file dropped from a later version does not linger and get
+# required by a lib that no longer ships it.
+if do_it; then
+	rm -rf .agy/bench
+	mkdir -p .agy/bench/lib
+	cp "$ASSETS/bench/collect" "$ASSETS/bench/dashboard" .agy/bench/ || exit 1
+	cp "$ASSETS/bench/prices.json" .agy/bench/ || exit 1
+	cp "$ASSETS/bench/lib/"*.js .agy/bench/lib/ || exit 1
+	chmod +x .agy/bench/collect .agy/bench/dashboard
+fi
+say engine ".agy/bench/ (collect, dashboard, lib/, prices.json)"
+
 
 # Gates: never clobber one that already exists and may have been tuned.
 if [ "$GATES" = ".agy/gates" ]; then

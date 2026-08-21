@@ -247,6 +247,44 @@ else
 		'usage: .agy/dispatch [--continue] <task-number> | --file <path>'
 fi
 
+# ------------------------------------------------------- which thread is that
+# GST-47. `agy --continue` resumes the last conversation GLOBALLY. There is no
+# per-task selector — the flag is passed through verbatim below — and nothing
+# used to record which conversation belonged to which task. protocol.md sends
+# fix rounds 1-3 back "in its existing thread" on that flag, which is true only
+# when no other dispatch has run since. In the field it had not: task 4 ran
+# after task 3, so a fix brief for task 3 would have been dropped into a thread
+# that believed it had just finished task 4 — a warm implementer confidently
+# holding the wrong context, which is worse than a cold one holding none.
+#
+# The caveat form was already tried and is what failed: the sentence was there
+# and read as unconditional. This is deterministic — the recorded label either
+# matches or it does not — so it refuses rather than warns, per the same rule
+# as the report contract and the trailer check.
+#
+# Recorded at launch rather than at exit, because a run that crashed still
+# moved the conversation, and that is exactly when someone reaches for
+# --continue. The file lives in the workspace, which the tripwire prunes from
+# every guarded surface, so keeping this note costs no fence violation.
+LAST_THREAD="$AGY_WORKSPACE/.last-thread"
+task_num() { printf '%s' "${1:-}" | sed -n 's/^task-\([0-9][0-9]*\).*/\1/p'; }
+if [ -n "$CONTINUE" ]; then
+	PREV_LABEL="$(head -1 "$LAST_THREAD" 2>/dev/null)"
+	NOW_N="$(task_num "$LABEL")"
+	PREV_N="$(task_num "$PREV_LABEL")"
+	if [ -z "$PREV_LABEL" ]; then
+		die 2 'no thread recorded, so --continue would resume an unknown conversation' \
+			'nothing has been dispatched from this workspace yet' \
+			'dispatch without --continue; the implementer reads the brief cold'
+	elif [ -z "$NOW_N" ] || [ -z "$PREV_N" ] || [ "$NOW_N" != "$PREV_N" ]; then
+		die 2 "--continue would resume $PREV_LABEL, not $LABEL" \
+			'agy resumes the last conversation globally — there is no per-task selector' \
+			"the live thread is $PREV_LABEL; this brief is for $LABEL" \
+			'drop --continue and re-brief: a cold implementer with a full brief' \
+			'is cheaper than a warm one holding the wrong task'
+	fi
+fi
+
 # ------------------------------------------------------- the brief must be real
 # The installer writes dispatch-context.md and the task template from stubs full
 # of {{PLACEHOLDER}} markers, and it cannot fill them — only the controller knows
@@ -571,9 +609,9 @@ run_attempt() {
 
 	elapsed=$(( SECONDS - started ))
 
-	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" "$capped" <<'NODE'
+	node - "$out.ndjson" "$out.stderr" "$out.response.md" "$rc" "$out.class" "$elapsed" "$killed" "$idle" "$capped" "$cont" <<'NODE'
 const fs = require('fs');
-const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg, cappedArg] =
+const [ndjson, stderrPath, responsePath, agyCode, classPath, wall, killedArg, idleArg, cappedArg, contArg] =
 	process.argv.slice(2);
 const killed = killedArg === '1';
 const capped = cappedArg === '1';
@@ -773,6 +811,32 @@ if (failed) {
 // Printed measurements are measurements the benchmark cannot read back. These
 // are the same numbers the summary prints below; they live here so a scraper
 // never has to re-derive them, and never has to guess a zero when it cannot.
+// agy reports usage for the THREAD, not for the run. Measured against the real
+// binary: three calls, the second and third on --continue, reported out 25 ->
+// 49 -> 73 and think 24 -> 47 -> 70 for turns that each did the same tiny
+// amount of work. This is the same defect as duration_seconds above, which is
+// worked around by timing the run here rather than trusting the field; the
+// token counts were carried through raw.
+//
+// It is not worked around here, because this process cannot see the thread. It
+// is recorded instead: conversation_id says which thread, num_turns says where
+// in it, and a reader with both can subtract the previous turn and recover what
+// this run actually spent. Recording the scope explicitly rather than leaving
+// it implied means a sidecar written before this line can be told apart from
+// one written after, and reported as unmeasured rather than believed.
+//
+// conversation_id is on the init event as well as the result event, and the
+// init one is what a deferred run has: no result event, but it still moved the
+// thread, and the next --continue still accumulates on top of it.
+//
+// `continued` is recorded beside it because num_turns cannot stand in for it.
+// A single fresh dispatch that made four tool calls reports num_turns 4 with
+// every one of those tokens its own; a --continue reporting 4 is carrying three
+// turns that belong to earlier runs. The counts are identical and the meanings
+// are opposite, and only this process knows which flag it passed.
+const convId = (resultEvent && resultEvent.conversation_id)
+	|| (events.find(e => e.event === 'init') || {}).conversation_id || '';
+
 const uw = result.usage || {};
 const nz = v => (typeof v === 'number' && isFinite(v)) ? v : '';
 // Every value is sanitised by the same rule, at the one place values enter the
@@ -798,6 +862,11 @@ const classRows = [
 	['tokens_think', nz(uw.thinking_tokens)],
 	['tokens_total', nz(uw.total_tokens)],
 	['model', init.model],
+	['conversation', convId],
+	['thread_turns', nz(result.num_turns)],
+	['tokens_scope', 'thread'],
+	['continued', contArg === '--continue' ? 1 : 0],
+	['tokens_cache_read', nz(uw.cache_read_tokens)],
 	['raw', quotaRaw],
 ];
 fs.writeFileSync(classPath, classRows.map(([k, v]) => `${k}=${one(v)}\n`).join(''));
@@ -910,6 +979,9 @@ NODE
 }
 
 # ------------------------------------------------------------------- attempt 1
+# Claim the thread before the model is called, not after it returns: a run that
+# crashes still moved the conversation, and the next --continue has to know.
+printf '%s\n' "$LABEL" > "$LAST_THREAD" 2>/dev/null || true
 printf -- '\n--- run report -----------------------------------------------------\n'
 run_attempt "$FIRST_MODEL" "$BASE" "$CONTINUE"
 stream_rc=$?
@@ -1426,6 +1498,28 @@ if [ "$COAUTHOR_RC" -ne 0 ]; then
 	v trailer "WRONG CO-AUTHOR on $BAD_TRAILERS commit(s) — see attribution above"
 	v '' 'amend before pushing: the trailer names a real account, by email'
 fi
+# One run's contribution, from numbers already in hand. Deliberately not a
+# split: dispatch cannot see Claude's tokens for this task, and a figure that
+# counts one side while looking like a ratio is worse than no figure. The real
+# split needs the scraper, and this line says so.
+#
+# LANDED_MEASURED is read as well as the count, and a mutant proved it changes
+# nothing today: the block above sets LANDED_COMMITS to a non-zero value only
+# on the path that also sets LANDED_MEASURED, so "counted but unmeasured" is
+# currently unreachable and no fixture can make it. It stays because the
+# coupling lives forty lines away and is not obvious there -- a later edit
+# that fills LANDED_COMMITS from anywhere else would otherwise reach this line
+# with a guess wearing a measurement's clothes. Read it as a statement of what
+# this line requires, not as a tested branch.
+if [ "${LANDED_MEASURED:-0}" = "1" ] && [ "${LANDED_COMMITS:-0}" -gt 0 ] \
+	&& [ -n "${WAS_HEAD:-}" ] && [ -n "${IS_HEAD:-}" ]; then
+	SHARE_STAT="$(git --no-pager diff --shortstat "$WAS_HEAD..$IS_HEAD" 2>/dev/null | sed 's/^ *//')"
+	if [ -n "$SHARE_STAT" ]; then
+		v share "agy: $SHARE_STAT"
+		v '' 'one side only — run .agy/bench/collect for the split against Claude'
+	fi
+fi
+
 # Printed here as well as in the header because the header's copy was written
 # before any attempt ran. On a fallback the two differ, and this is the one a
 # reader acts on: it names the attempt that produced the work rather than the

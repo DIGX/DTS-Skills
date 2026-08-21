@@ -87,6 +87,259 @@ structural rather than a matter of care.
 
 ## agy-agents
 
+### [1.9.0] — 2026-08-21
+
+The skill has been telling people it delegates implementation work. This release
+is the instrument that can say whether it does — a second arm to compare against,
+a scraper that reads what actually happened, and a page that refuses to quote a
+figure it cannot stand behind. Several of the numbers it was designed to print
+turned out to be unmeasurable; those read as dashes with a reason attached, which
+is the point rather than a shortfall.
+
+#### Added
+
+- **`.agy/solo`, the Claude-only baseline arm.** Opens a bracket, you do the task
+  yourself, `--done` records what landed. It runs no model, and it writes the same
+  `.class` sidecar `dispatch` writes — same keys, `arm=solo` — so both arms go
+  through one reader and a difference between them is a difference in the work,
+  not in how the work was counted. Without it the comparison has one arm, and
+  "agy-agents is faster" has nothing to be faster than.
+- **`.agy/bench/collect` and `.agy/bench/dashboard`.** A post-hoc scraper reading
+  run sidecars, Claude transcripts and git history into one `runs.json`, and an
+  emitter turning that into one static, self-contained HTML file. The pipeline is
+  one-way — `collect` is the only thing that reads a log, `dashboard` reads
+  `runs.json` and nothing else — so a rendering bug cannot corrupt a measurement,
+  and a measurement can be re-rendered without being re-taken.
+- **The verdict block gained a `share` line**, stating what the run just committed
+  and stating plainly that it is one side only. It prints only when git could
+  actually resolve what landed: a run whose commits could not be counted reaches
+  that line looking exactly like a run that committed nothing, and the difference
+  is the whole reason the line is guarded.
+- **The installer ships the engine.** `.agy/bench/` is replaced wholesale on every
+  install rather than merged, so a file dropped in a later version cannot linger
+  and be required by a lib that no longer ships it.
+
+#### Changed
+
+- **The harness now measures itself.** `dispatch` persists wall seconds, token
+  totals and the commit range into the `.class` sidecar it already wrote. These
+  were printed before and printed only, which meant nothing could read them back —
+  a measurement that exists solely on screen is one every later tool has to invent.
+- **A run's tokens are its own turn's, not its whole thread's.** `agy --continue`
+  reports the thread's running total, so a second run in a thread was billed for
+  the first as well. The sidecar now records which scope the number is in and how
+  many turns the thread had, and a run whose own share cannot be separated out
+  reports nothing rather than reporting the thread's.
+
+#### Fixed
+
+- **Delegation share has a denominator git measured.** The share of landed lines
+  committed inside an agy run has to be counted against every line that landed,
+  which means asking git about the window the runs sit in. Counted against the
+  attributed lines alone it reads 100% whenever any agy run landed anything and
+  null otherwise — two reachable values, neither of them a measurement, on the one
+  panel captioned as measuring work product rather than effort. Where the window
+  cannot be resolved, or the runs claim more lines than it holds, the panel reads
+  `—` and names the reason.
+- **A missing measurement is never a zero.** Runs logged before the instrumentation
+  read as `partial`. A range git could not resolve reads as a dash, not as a run
+  that landed nothing. A run whose tokens could not be attributed prices to null,
+  not to free, and leaves effort share rather than joining it as a run that spent
+  nothing. An unmeasurable run is excluded from *both* sides of retry burden,
+  because `null > 0` is false and would otherwise have read as a task that never
+  landed.
+- **Unread sources raise a banner rather than shifting the numbers quietly.** The
+  scraper's failure mode was never a crash — it was an unparseable log becoming a
+  run that simply is not counted, moving the split in whichever direction that run
+  would have pushed it. Every skip is recorded with a reason and rendered above
+  the figures.
+- **Credits and cost are kept apart.** An agy-agents task spends two subscriptions
+  with no shared denominator, so the dashboard shows two figures that do not add
+  up and one notional dollar amount, labelled as notional everywhere it appears.
+  Claude's own cost is quoted once and undivided, because one transcript covers
+  both arms and nothing in it records which turn served which. No blended score is
+  reported and no lone speedup figure: a ratio without both task descriptions in
+  view is not evidence.
+- **The page reads the same on every machine.** Numbers are grouped by hand rather
+  than through `toLocaleString`, which returns a different string per locale and
+  would have made every exact-string assertion in the suite green or red by
+  accident of where it ran.
+
+#### Notes
+
+The dashboard in the plan was measured rather than read, and did not survive
+being tested. `const claudeLines = 0` made the delegation denominator equal its
+own numerator, so the panel had two reachable values — 100% and null — and the
+plan's own test row asserting 80% could not have passed against the plan's own
+code. Six further corrections came out of the same pass, each carrying its
+reasoning at the site rather than in a commit message nobody will read again.
+
+Falsification, predictions written to disk before each run. Eleven mutants across
+the two engines, each restoring the plan's own version of a line: seven on the
+dashboard (518/5, 522/1, 522/1, 522/1, 522/1, 522/1, 521/2) and four on the
+verdict line and installer (541/0, 540/1, 536/5, 540/1). Two predictions missed
+and both are recorded rather than corrected after the fact — one mutant killed
+two rows where three were predicted, because the unresolved fixture keeps its
+numbers and the guardless page renders 80% rather than the 100% that row names;
+and the locale row did not discriminate at all, because node on Windows takes its
+default locale from the OS and ignores `LANG`, which made the suite's hostile-
+`LANG` setup a comment rather than a control.
+
+One mutant killed nothing, as predicted: the share line's `LANDED_MEASURED`
+condition is unreachable in the current code, since `LANDED_COMMITS` is only ever
+set non-zero on the path that also sets it. The clause stays with a comment
+saying exactly that. Adding an assertion to make the mutant die would have pinned
+the text without evidence the condition ever decides anything.
+
+Two rows were found to be weaker than their own comments claimed — a `hasnt`
+against a file that was never written, and a diff against two things the suite
+never made differ. Both were caught by writing the mutant first and asking what
+it would have to change to be noticed.
+
+selftest: 394 → 541 passed, 0 failed. The two field-report fixes that landed on
+this branch shipped separately as 1.8.16 and 1.8.17.
+
+Prices in `.agy/bench/prices.json` are placeholders. Check them against current
+published pricing before quoting any dollar figure to anyone; every figure the
+dashboard derives from them is labelled notional for the same reason.
+
+### [1.8.17] — 2026-08-20
+
+One field report, and the fix is a refusal rather than a sentence because the
+sentence was already there and was already being read the wrong way.
+
+#### Fixed
+
+- **`--continue` resumes the last conversation, not this task's.** The fix loop
+  sends rounds 1–3 back to the implementer "in its existing thread" via
+  `.agy/dispatch --continue --file <correction>`. `agy --continue` resumes the
+  last conversation **globally** — the flag is passed through verbatim, there is
+  no per-task selector, and nothing recorded which conversation belonged to
+  which task. So the instruction is true only while no other dispatch has run
+  since. In the field it had not: task 4 ran after task 3, and a `pcp.sh` fix
+  brief for task 3 was about to be dropped into a thread that believed it had
+  just finished the text-domain task. The reporter caught it and dispatched
+  fresh. A warm implementer holding the wrong context is worse than a cold one
+  holding none, because the correction reads as a follow-up to work it never
+  did — and nothing in the flag surface says so.
+
+  `dispatch` now records the label it is about to send in
+  `<workspace>/.last-thread` and refuses a `--continue` whose task number does
+  not match it, naming both tasks and printing the remedy. Written at launch
+  rather than at exit, because a run that crashed still moved the conversation
+  and that is exactly when someone reaches for the flag. The note lives in the
+  workspace, which the tripwire prunes from every guarded surface, so keeping it
+  costs no fence violation.
+
+  `protocol.md` states the constraint beside the instruction: run the fix rounds
+  before the next task goes out, and once one has, drop `--continue` and
+  re-brief. That paragraph gets no pin of its own. The pin would assert prose
+  about behaviour the eight rows below already assert directly, and the prose
+  can now only mislead someone who never runs the command — the refusal prints
+  the remedy at the moment it is needed.
+
+#### Notes
+
+The report offered "either a caveat or a thread-id flag". Neither was taken. A
+thread-id flag needs a selector `agy` does not expose. A caveat is what already
+failed — the conditional was implicit in "its existing thread" and read as
+unconditional, which is the same failure mode as the `Co-Authored-By:` line that
+asked for a trailer without saying what to put in it. Telling the reader harder
+is the wrong lever when the reader was already told. This one is deterministic —
+the recorded label either matches or it does not — so it fails the run, per the
+same rule as the report contract and the trailer check.
+
+Falsification took three RED runs, and the first two are the entry worth
+reading. Predictions were on disk before each.
+
+- **Run 1** predicted five red and got seven, with two rows contradicting the
+  prediction: a refusal row passed on the unguarded binary, and the one row that
+  must exit 0 failed. Cause: the fixture installs and never fills
+  `dispatch-context.md`, and dispatch refuses an unfilled context at exit 2 —
+  before reaching the guard.
+- **Run 2**, context filled, still had the must-succeed row red at exit 1:
+  `landed NOT COMMITTED — 4 change(s) outside the workspace`. The fixture had
+  never committed the install, so every dispatch in the section was scored a
+  failed run. Two independent fixture faults, each of which made the refusal
+  rows pass on a binary with no guard in it.
+- Run 2 also passed `and the one being dispatched` unguarded: the needle was the
+  bare string `task-3`, which a dispatch **for task 3** prints in its own
+  banner. Both sub-rows now match whole clauses of the refusal — `the live
+  thread is task-4`, `this brief is for task-3`.
+- **Run 3** predicted eight red and one green and got exactly that.
+
+None of this was visible in the totals. Run 1 showed seven red on a binary with
+no guard, which is what a healthy RED looks like; only the row-by-row comparison
+against a prediction written first showed that the section was green for reasons
+unrelated to what it tests. The row that carried it throughout is `--continue on
+the still-live task runs` — a guard that refused every `--continue` would pass
+all eight refusal rows while breaking the one workflow the flag exists for.
+
+selftest: 431 → 440 passed, 0 failed.
+
+### [1.8.16] — 2026-08-20
+
+One field report, three defects, all in the same section — and two of the three
+were already answered elsewhere in the same file. A fact filed under the wrong
+heading is not a fact the reader has.
+
+#### Added
+
+- **A killed reviewer is not an unavailable reviewer.** *When the reviewer
+  cannot run* offered one exit, "wait for a reviewer to become available", and
+  never said that a budget-killed subagent can be resumed from its own
+  transcript with everything it read still in it. The field report is explicit
+  about the cost: *"I'd have re-run a review that already existed."* The
+  resumability rule was in `protocol.md` the whole time, under *When a run dies
+  mid-task* — one occurrence, zero of them in the section a controller reads
+  when its reviewer has just died. The section now says it and points there.
+- **The partial review is on disk.** The same section never mentioned that a
+  reviewer instructed to write each finding as it finds it leaves those findings
+  behind and loses only the verdict table — the difference the reporter measured
+  between one task where the full review survived the kill and one where nothing
+  did. That instruction lives in the dispatch brief, 100 lines earlier, which is
+  where the reviewer is *told* it and not where the controller *needs* it. Check
+  the file before holding: what looks like a dead review is usually a review
+  missing its last section.
+- **Whether the next task may dispatch while this one is held.** Nothing in the
+  skill answered this — zero matches, not a locality defect this time but an
+  absence. It now does, with the mechanism rather than a caution: the fence
+  guards surfaces, not agents. The workspace is pruned from every guarded
+  directory, so a reviewer writing `<workspace>/task-N-review.md` during someone
+  else's dispatch is clean. The ledger is not, because it is guarded as a *file*
+  and living inside the workspace does not exempt it — the same rule as *Never
+  write to the ledger during a dispatch*, now stated to bind the held task's
+  bookkeeping too. Neither is anything under `docs/`, `.claude/`, or the rest of
+  `.agy/`. A violation is expensive out of proportion to the note that caused
+  it: it lands on the *implementer's* verdict, and the investigation ends at the
+  controller's own bookkeeping.
+
+#### Notes
+
+The field report's third claim named the workspace as the thing that trips the
+fence. It is the one surface that does not. That was established by fixture
+rather than by reading: install into a scratch repo, arm the fence, then write
+`<workspace>/task-4-review.md` (clean), the ledger (VIOLATION, `files`), and
+`docs/review-notes.md` (VIOLATION, `docs`). The guidance shipped is the measured
+behaviour, not the reported one, and it is more useful than the report asked
+for — the workspace is the only safe place to write, and the ledger is the trap
+precisely because it sits inside it.
+
+Per AGY-22 each of the three ships with a machine check, and the checks are
+scoped to the **section body** rather than to the file. That scoping is the
+whole point: for two of the three defects, `grep` against `protocol.md` was
+green throughout — the fragments were present once, twice, and zero times in the
+file against zero, zero, and zero times in the section. A file-scoped assertion
+could not have failed on a defect that was entirely about location. Two further
+assertions pin the fence mechanism in `tripwire` itself, so the prose cannot
+outlive the behaviour it describes.
+
+Falsification, predictions written to disk first: reverting `protocol.md` while
+keeping the assertions predicted 7 red and got exactly those 7. The three rows
+predicted to stay green stayed green — the section extractor (which fails only
+if the harness breaks, not if the defect returns) and both fence-mechanism rows.
+selftest: 421 → 431 passed, 0 failed.
+
 ### [1.8.15] — 2026-08-20
 
 Three field reports. The first two shipped together because fixing either one

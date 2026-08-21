@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+#
+# The Claude-only baseline arm.
+#
+#   solo <task-number>    open a bracket — you then do the task yourself
+#   solo --done           close it, and record what landed
+#
+# This script runs no model and makes no decisions. Its whole job is to make a
+# task Claude did alone leave the same shape of trace an agy run leaves, so the
+# two arms are measured by identical code rather than by two code paths that
+# drift apart. Without it the benchmark has one arm and no comparison.
+#
+# It resolves its workspace exactly the way .agy/dispatch does — source
+# .agy/config, then `:=`, so environment beats config beats default — and for
+# the same reason. A solo arm that wrote to the default while dispatch wrote to
+# the configured milestone would put the two arms in different directories, and
+# the collector would read one of them and report half a comparison as whole.
+
+set -uo pipefail
+
+# Stamped at install time, for the same reason .agy/dispatch is: a pasted solo
+# banner has to be adjudicable in one read, and a repo running a stale copy has
+# to be able to say so. If the marker itself shows up below, this file was
+# copied by hand rather than installed.
+AGY_SKILL_VERSION='{{SKILL_VERSION}}'
+
+die() { # die <exit-code> <headline> [extra lines...]
+	code="$1"; headline="$2"; shift 2
+	{
+		printf -- '\n--- verdict --------------------------------------------------------\n'
+		printf '  %-7s %s\n' run "DID NOT RUN — $headline"
+		while [ $# -gt 0 ]; do printf '  %-7s %s\n' '' "$1"; shift; done
+		printf '  %-7s %s\n' exit "$code"
+		printf '\n  Nothing was recorded: the bracket is unchanged and the tree is untouched.\n'
+	} >&2
+	exit "$code"
+}
+
+git rev-parse --show-toplevel >/dev/null 2>&1 \
+	|| die 2 'not a git repository' 'the benchmark reads git history to see what landed'
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || die 2 "cannot enter the repository root ($ROOT)"
+
+# A repo with no config is not a repo with a default config. Guessing here would
+# scatter solo sidecars into a directory no reader is looking at, and the run
+# they measure is unrepeatable — the work is already done by the time anyone
+# notices.
+[ -f .agy/config ] || die 2 'no .agy/config' \
+	'run the agy-agents installer in this repository'
+. .agy/config
+
+: "${AGY_WORKSPACE:=.agy/work}"
+LOGDIR="$AGY_WORKSPACE/logs"
+OPEN="$LOGDIR/.solo-open"
+mkdir -p "$LOGDIR" || die 2 "cannot create the log directory ($LOGDIR)"
+
+if [ "${1:-}" = "--done" ]; then
+	[ -f "$OPEN" ] || die 2 'no open solo bracket' \
+		'open one with `.agy/solo <task-number>` before closing it'
+	CLASS="$(head -1 "$OPEN")"
+	[ -f "$CLASS" ] || die 2 "the open bracket points at a missing file ($CLASS)" \
+		"delete $OPEN and open a fresh bracket"
+
+	STARTED="$(awk -F= '$1=="started"{print $2}' "$CLASS")"
+	WAS_HEAD="$(awk -F= '$1=="head"{print $2}' "$CLASS")"
+	ENDED="$(date +%s)"
+	IS_HEAD="$(git rev-parse HEAD 2>/dev/null)"
+
+	# Same rule the agy arm uses: a count is only written when both endpoints
+	# resolved and the older one is still an ancestor of the newer. A rewritten
+	# history is not zero commits, it is a range nothing can measure, and
+	# writing it as 0 would tell every reader downstream that a session which
+	# may have committed a dozen times committed none.
+	COMMITS=0; RANGE=""
+	if [ -n "$WAS_HEAD" ] && [ -n "$IS_HEAD" ] && [ "$WAS_HEAD" != "$IS_HEAD" ] \
+		&& git merge-base --is-ancestor "$WAS_HEAD" "$IS_HEAD" 2>/dev/null; then
+		COMMITS="$(git rev-list --count "$WAS_HEAD..$IS_HEAD" 2>/dev/null || printf 0)"
+		RANGE="$WAS_HEAD..$IS_HEAD"
+	fi
+
+	# The status line is rewritten, not appended to. Readers take the first
+	# match for a key, so a closed bracket carrying `status=open` above
+	# `status=success` reads back as still open — including to the collector's
+	# skip rule, which keys on this exact field to decide whether a run was
+	# measured at all. One key, one answer.
+	{
+		grep -v '^status=' "$CLASS"
+		printf 'ended=%s\n' "$ENDED"
+		printf 'wall=%s\n' "$(( ENDED - STARTED ))"
+		printf 'commits=%s\n' "$COMMITS"
+		printf 'range=%s\n' "$RANGE"
+		printf 'status=success\n'
+	} > "$CLASS.closing" && mv -f "$CLASS.closing" "$CLASS" \
+		|| die 2 "could not write the closed record ($CLASS)" \
+			'the bracket is still open; the tree is untouched'
+	rm -f "$OPEN"
+
+	printf '\n--- solo -----------------------------------------------------------\n'
+	printf '  %-7s %s\n' closed "$(awk -F= '$1=="task"{print $2}' "$CLASS")"
+	printf '  %-7s %ss\n' wall "$(( ENDED - STARTED ))"
+	printf '  %-7s %s\n' landed "$COMMITS commit(s)"
+	printf '  %-7s %s\n' log "$CLASS"
+	printf '\n  Recorded as the Claude-only arm. Nothing here is a measurement of\n'
+	printf '  agy: this run is the thing agy is being compared against.\n'
+	exit 0
+fi
+
+N="${1:-}"
+case "$N" in
+	''|*[!0-9]*) die 2 'no task number given' \
+		'usage: .agy/solo <task-number> | .agy/solo --done' ;;
+esac
+
+if [ -f "$OPEN" ]; then
+	PREV="$(head -1 "$OPEN")"
+	die 2 "a solo bracket is already open ($(awk -F= '$1=="task"{print $2}' "$PREV" 2>/dev/null))" \
+		'close it with `.agy/solo --done` first — overlapping brackets cannot be attributed'
+fi
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+CLASS="$LOGDIR/solo-task-$N-$STAMP.class"
+{
+	printf 'arm=solo\n'
+	printf 'task=task-%s\n' "$N"
+	printf 'started=%s\n' "$(date +%s)"
+	printf 'head=%s\n' "$(git rev-parse HEAD 2>/dev/null)"
+	printf 'status=open\n'
+} > "$CLASS"
+printf '%s\n' "$CLASS" > "$OPEN"
+
+printf '\n--- solo -----------------------------------------------------------\n'
+printf '  %-7s %s\n' opened "task-$N"
+printf '  %-7s %s\n' head "$(git rev-parse --short HEAD 2>/dev/null)"
+printf '  %-7s %s\n' log "$CLASS"
+printf '\n  Do the task yourself, commit it, then run `.agy/solo --done`.\n'
+printf '  An unclosed bracket records nothing at all.\n'
