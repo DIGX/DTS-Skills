@@ -101,6 +101,88 @@ for (const r of runs) {
 // caller records the throw instead of dying on it: the git work above is
 // already done by this point, and crashing here would throw it away and write
 // no file at all.
+// Delegation share needs a denominator git measured, not one derived from the
+// runs themselves: attributed lines over attributed lines reads 100% whenever
+// any agy run landed anything, and 100% is not a measurement. So ask git what
+// landed across the whole window the runs sit in, and let the runs claim their
+// part of it.
+function landedLines() {
+	const bases = [];
+	for (const r of runs) {
+		const b = r.range ? String(r.range).split('..')[0] : '';
+		if (b) bases.push(b);
+	}
+	if (!bases.length) {
+		return { measured: false, reason: 'no run recorded a commit range' };
+	}
+
+	// A run whose own range git could not resolve cannot claim its lines, and the
+	// remainder would absorb them -- crediting work to "outside any run" precisely
+	// because nobody could measure it. Refusing the whole figure is the honest
+	// answer; a share quietly biased downward by an unknown amount is not.
+	const holes = runs.filter(r => r.work_measured === false).length;
+	if (holes) {
+		return {
+			measured: false,
+			reason: holes + ' run(s) have a range git could not resolve, so their'
+				+ ' lines cannot be told from lines no run wrote',
+		};
+	}
+
+	// Earliest base by distance to HEAD, not by the clock: a base is a commit, and
+	// commits are ordered by what reaches what, not by the time on whichever
+	// machine wrote them.
+	let base = null;
+	let furthest = -1;
+	for (const b of bases) {
+		let n;
+		try {
+			n = Number(execFileSync('git', ['rev-list', '--count', b + '..HEAD'],
+				{ cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+		} catch (e) {
+			continue;
+		}
+		if (Number.isFinite(n) && n > furthest) { furthest = n; base = b; }
+	}
+	if (base === null) {
+		return { measured: false, reason: 'git could not place any run base relative to HEAD' };
+	}
+
+	const w = numstat(base + '..HEAD', root);
+	if (!w.measured) return { measured: false, reason: w.reason };
+
+	const by_arm = {};
+	for (const r of runs) {
+		const a = by_arm[r.arm] || (by_arm[r.arm] = { insertions: 0, deletions: 0 });
+		a.insertions += r.insertions;
+		a.deletions += r.deletions;
+	}
+
+	// More lines claimed than the window holds means the ranges overlap or reach
+	// outside it. That is not a share of anything, and the arithmetic would still
+	// hand back a percentage, so it is refused by name.
+	const claimed = Object.values(by_arm)
+		.reduce((sum, a) => sum + a.insertions + a.deletions, 0);
+	const total = w.insertions + w.deletions;
+	if (claimed > total) {
+		return {
+			measured: false,
+			reason: 'the runs claim ' + claimed + ' lines but ' + base + '..HEAD holds '
+				+ total + ' -- the ranges overlap or reach outside the window',
+		};
+	}
+
+	return {
+		window: base + '..HEAD',
+		insertions: w.insertions,
+		deletions: w.deletions,
+		by_arm,
+		measured: true,
+		reason: null,
+	};
+}
+const landed = landedLines();
+
 let turns = [];
 try {
 	turns = claude.readTurns(projectsDir, slug);
@@ -172,6 +254,7 @@ const out = {
 	idle_gap_s: gapS,
 	prices_updated: prices._updated || 'unknown',
 	runs,
+	landed,
 	claude: {
 		active_s: c.active_s, elapsed_s: c.elapsed_s,
 		main: c.main, sidechain: c.sidechain,

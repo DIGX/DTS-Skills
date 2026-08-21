@@ -3243,6 +3243,197 @@ cnode "  because an arm with no transcripts reads as an arm that spent nothing" 
 		throw new Error("an empty transcript directory passed as a measurement");
 '
 
+
+# ---- the landed-lines window ---------------------------------------------
+# Delegation share is the one figure on the dashboard that measures work
+# product rather than effort, and it needs a denominator git measured. Taken
+# from the runs themselves it is the numerator over itself: 100% whenever any
+# agy run landed a line, null otherwise, two reachable values and neither of
+# them a measurement. So collect resolves the window here, where it has the
+# repository and every run's range in hand, and refuses it out loud when it
+# cannot.
+cnode "a run git could not place refuses the whole window, not just its own line" '
+	if (!j.landed) throw new Error("no landed block at all");
+	if (j.landed.measured !== false) throw new Error("measured: " + j.landed.measured);
+	if (!/could not resolve/.test(j.landed.reason || "")) throw new Error("reason: " + j.landed.reason);
+'
+
+# A second repository, because the one above deliberately contains a range git
+# cannot resolve and so can never produce a measured window. Three commits, and
+# each arm gets a range of its own: overlapping ranges are a different case and
+# are tested as one below.
+CREPO2="$TMP/landedrepo"
+rm -rf "$CREPO2"; mkdir -p "$CREPO2"
+git -C "$CREPO2" init -q
+git -C "$CREPO2" config user.email bench@example.invalid
+git -C "$CREPO2" config user.name bench
+printf 'one\n' > "$CREPO2/f.txt"
+git -C "$CREPO2" add -A >/dev/null; git -C "$CREPO2" commit -qm base
+LBASE="$(git -C "$CREPO2" rev-parse HEAD)"
+printf 'one\ntwo\nthree\nfour\n' > "$CREPO2/f.txt"
+git -C "$CREPO2" add -A >/dev/null; git -C "$CREPO2" commit -qm agywork
+LMID="$(git -C "$CREPO2" rev-parse HEAD)"
+printf 'one\ntwo\nthree\nfour\nfive\n' > "$CREPO2/f.txt"
+git -C "$CREPO2" add -A >/dev/null; git -C "$CREPO2" commit -qm solowork
+LTIP="$(git -C "$CREPO2" rev-parse HEAD)"
+LLOGS="$CREPO2/.agy/work/logs"
+mkdir -p "$LLOGS"
+
+lclass() { # same first-match-wins ordering as cclass above
+	f="$LLOGS/$1"; shift
+	{
+		for kv in "$@"; do printf '%s\n' "$kv"; done
+		printf 'arm=agy\nstatus=success\nwall=100\ntools=3\nquota=none\n'
+		printf 'model=gemini-3.7-flash\ntokens_scope=thread\ncontinued=0\n'
+		printf 'thread_turns=1\nconversation=L-1\nraw=\n'
+	} > "$f"
+}
+lseed() { # lseed <agy-range> <solo-range>
+	rm -f "$LLOGS"/*.class
+	lclass task-1-20260101-000001.class range="$1" \
+		tokens_in=10 tokens_out=1 tokens_think=0 tokens_cache_read=0 tokens_total=11
+	lclass solo-task-2-20260101-000002.class arm=solo task=task-2 conversation=L-2 \
+		range="$2" \
+		tokens_in=10 tokens_out=1 tokens_think=0 tokens_cache_read=0 tokens_total=11
+}
+crun2() { # crun2 <repo> -> exit code in $CRC
+	( cd "$1" && AGY_WORKSPACE=".agy/work" \
+		CLAUDE_PROJECTS_DIR="$TMP/collectproj" CLAUDE_PROJECT_SLUG=d--Coll-Repo \
+		node "$BENCH/collect" ) > "$TMP/collect2.log" 2>&1
+	CRC=$?
+}
+LRJ="$CREPO2/.agy/work/bench/runs.json"
+lnode() { # lnode <label> <js over `j`>
+	node -e "
+	const j = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+	$2
+	" "$LRJ" > "$TMP/lj.log" 2>&1
+	want "$1" 0 $? "$(grep -m1 '^Error:' "$TMP/lj.log")"
+}
+
+lseed "$LBASE..$LMID" "$LMID..$LTIP"
+crun2 "$CREPO2"
+want "collect runs against a window git can resolve" 0 "$CRC" "$(head -5 "$TMP/collect2.log")"
+
+# Four lines landed in the window; three of them inside the agy run. A share of
+# 75% is the point: the number the old shape could not produce was any number
+# other than 100.
+lnode "  the window reports every line that landed in it" '
+	if (j.landed.measured !== true) throw new Error("measured: " + j.landed.measured + " " + j.landed.reason);
+	if (j.landed.insertions !== 4) throw new Error("insertions: " + j.landed.insertions);
+	if (j.landed.deletions !== 0) throw new Error("deletions: " + j.landed.deletions);
+	if (!j.landed.window.endsWith("..HEAD")) throw new Error("window: " + j.landed.window);
+'
+lnode "  and attributes them to the arm that landed them" '
+	if (j.landed.by_arm.agy.insertions !== 3) throw new Error("agy: " + JSON.stringify(j.landed.by_arm.agy));
+	if (j.landed.by_arm.solo.insertions !== 1) throw new Error("solo: " + JSON.stringify(j.landed.by_arm.solo));
+	const share = j.landed.by_arm.agy.insertions / j.landed.insertions;
+	if (share === 1) throw new Error("the denominator is the numerator again");
+'
+
+# Both arms claiming the whole window is what overlapping ranges look like from
+# outside, and the division still hands back a percentage - 200% of the lines
+# that exist. Refused by name rather than clamped or averaged.
+lseed "$LBASE..$LTIP" "$LBASE..$LTIP"
+crun2 "$CREPO2"
+want "collect runs against overlapping ranges" 0 "$CRC" "$(head -5 "$TMP/collect2.log")"
+lnode "  runs claiming more lines than the window holds is refused, not averaged" '
+	if (j.landed.measured !== false) throw new Error("measured: " + j.landed.measured);
+	if (!/overlap/.test(j.landed.reason || "")) throw new Error("reason: " + j.landed.reason);
+'
+
+printf '\n=== bench: dashboard ===============================================\n'
+# The dashboard reads nothing but runs.json, so its fixture is a runs.json
+# written by hand. Two of them: one where git could resolve the window these
+# lines landed in, and one where it could not. The second exists because the
+# interesting failure is not a wrong share, it is a confident one — a panel
+# that reads 100% because its denominator was never measured looks exactly
+# like a panel that measured 100%.
+DRJ="$TMP/fixed-runs.json"
+cat > "$DRJ" <<'JSON'
+{
+  "generated": "2026-08-14T12:00:00.000Z",
+  "root": "/fake",
+  "idle_gap_s": 600,
+  "prices_updated": "2026-08-14",
+  "runs": [
+    {"arm":"agy","task":"task-7","wall":400,"tokens":{"in":10,"out":10,"think":0,"total":20},
+     "tools":24,"commits":1,"range":"a..b","insertions":80,"deletions":0,
+     "work_measured":true,"work_reason":null,
+     "status":"success","quality":"full","usd":0.01,"priced":true,"path":"/fake/a.class"},
+    {"arm":"agy","task":"task-9","wall":200,"tokens":{"in":null,"out":null,"think":null,"total":null},
+     "tools":null,"commits":null,"range":"e..f","insertions":null,"deletions":null,
+     "work_measured":false,"work_reason":"bad revision e..f",
+     "status":"success","quality":"partial","usd":null,"priced":false,"path":"/fake/c.class"},
+    {"arm":"solo","task":"task-4","wall":1000,
+     "tokens":{"in":null,"out":null,"think":null,"total":1234567},
+     "tools":null,"commits":1,"range":"c..d","insertions":20,"deletions":0,
+     "work_measured":true,"work_reason":null,
+     "status":"success","quality":"full","usd":null,"priced":false,"path":"/fake/b.class"}
+  ],
+  "landed": {
+    "window":"a..HEAD","insertions":100,"deletions":0,
+    "by_arm":{"agy":{"insertions":80,"deletions":0},"solo":{"insertions":20,"deletions":0}},
+    "measured":true,"reason":null
+  },
+  "claude": {"active_s":300,"elapsed_s":900,
+    "main":{"turns":10,"in":100,"out":200,"think":10,"cache_read":50,"cache_write":25},
+    "sidechain":{"turns":3,"in":30,"out":60,"think":0,"cache_read":10,"cache_write":5},
+    "model":"claude-opus-5","models":[],"usd_main":0.02,"usd_sidechain":0.005,"priced":true},
+  "skipped": [{"path":"/fake/orphan.ndjson","reason":"no .class sidecar"}]
+}
+JSON
+
+# LANG is set hostile on purpose. A page whose numbers come out "1.234.567" on
+# one machine and "1,234,567" on another has made every exact-string assertion
+# below green or red by accident of where it ran.
+LANG=de_DE.UTF-8 LC_ALL=de_DE.UTF-8 node "$BENCH/dashboard" "$DRJ" "$TMP/dash.html" > "$TMP/dash.log" 2>&1
+want "dashboard renders" 0 $? "$(head -3 "$TMP/dash.log")"
+has   "  delegation share is computed"           ">80%<"           "$TMP/dash.html"
+hasnt "  and is not the numerator over itself"   ">100%<"          "$TMP/dash.html"
+has   "  the split tab exists"                   "Split"           "$TMP/dash.html"
+has   "  the comparison tab exists"              "Comparison"      "$TMP/dash.html"
+has   "  the runs tab exists"                    "Runs"            "$TMP/dash.html"
+has   "  skipped sources raise a banner"         "1 source"        "$TMP/dash.html"
+has   "  cost is labelled notional"              "notional"        "$TMP/dash.html"
+has   "  time is a median, not a mean"           "median per task" "$TMP/dash.html"
+has   "  provenance is stated"                   "controlled"      "$TMP/dash.html"
+has   "  credits are not summed"                 "not comparable"  "$TMP/dash.html"
+hasnt "  nothing is loaded over the network"     "https://"        "$TMP/dash.html"
+has   "  an unattributable run leaves effort share, and says so"  "left out" "$TMP/dash.html"
+hasnt "  rather than joining it as a run that spent nothing"      "+0/-0"    "$TMP/dash.html"
+has   "  claude's cost is charged once, undivided"     "across both arms"   "$TMP/dash.html"
+has   "  an unmeasurable run does not inflate retry"   "inflate this figure" "$TMP/dash.html"
+has   "  numbers group the same way on every machine"  "1,234,567"          "$TMP/dash.html"
+# D6 showed the row above is only as good as the machine that runs it: node on
+# Windows takes its default locale from the OS and ignores LANG, so the mutant
+# rendered en-IN's "12,34,567" here and would have rendered "1,234,567" -- green
+# -- on a US machine. A row whose verdict depends on where the suite ran is not
+# a check. The contract that holds everywhere is that the formatter is never
+# consulted, so this one reads the source instead of the page. The needle is
+# the call and not the word: the source says in a comment that it groups by
+# hand rather than through toLocaleString, and a literal grep cannot tell a
+# prohibition from its own statement -- the first draft of this row was red
+# against a clean file for exactly that reason.
+hasnt "  and never through the reader's locale"        ".toLocaleString"    "$BENCH/dashboard"
+
+# Same figures, one field different: git could not resolve the window. Every
+# panel that needs a denominator has to change its answer, and the one it must
+# not change to is 100%.
+#
+# The numbers are left in place on purpose. collect refuses a window by
+# returning the verdict alone, so this fixture is not a copy of collect's
+# output - it is a producer that computed the lines and then withdrew their
+# provenance, which is the case the dashboard cannot verify for itself. Reading
+# `measured` is the whole defence, and a fixture that dropped the numbers too
+# would pass whether the dashboard reads it or not.
+sed 's/"measured":true,"reason":null$/"measured":false,"reason":"no run recorded a range git could resolve"/' "$DRJ" > "$TMP/unresolved-runs.json"
+node "$BENCH/dashboard" "$TMP/unresolved-runs.json" "$TMP/dash2.html" > "$TMP/dash2.log" 2>&1
+want "dashboard renders an unresolved window" 0 $? "$(head -3 "$TMP/dash2.log")"
+has   "  which reads as a dash and says why"     "Not computed"    "$TMP/dash2.html"
+hasnt "  and never as a measured 100%"           ">100%<"          "$TMP/dash2.html"
+has   "  the run saying so on the way out"       "not computed"    "$TMP/dash2.log"
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -1,0 +1,269 @@
+#!/usr/bin/env node
+'use strict';
+//
+// runs.json -> one self-contained HTML file.
+//
+//   dashboard [runs.json] [out.html]
+//
+// Reads nothing but runs.json, writes nothing but the HTML. No network: the
+// page must open from a file:// URL on a machine with no connection, because a
+// dashboard that needs a CDN is a dashboard that is blank exactly when you are
+// offline and reading it.
+
+const fs = require('fs');
+const path = require('path');
+
+const inFile = process.argv[2] || path.join('.agy', 'work', 'bench', 'runs.json');
+const outFile = process.argv[3] || path.join(path.dirname(inFile), 'index.html');
+
+let j;
+try {
+	j = JSON.parse(fs.readFileSync(inFile, 'utf8'));
+} catch (e) {
+	process.stderr.write('\n--- verdict --------------------------------------------------------\n');
+	process.stderr.write(`  ${'run'.padEnd(7)} DID NOT RUN — cannot read ${inFile}\n`);
+	process.stderr.write(`  ${''.padEnd(7)} run \`node .agy/bench/collect\` first\n`);
+	process.stderr.write(`  ${'exit'.padEnd(7)} 2\n`);
+	process.stderr.write('\n  Nothing was rendered: no file was written.\n');
+	process.exit(2);
+}
+
+const esc = s => String(s).replace(/[&<>"]/g, c =>
+	({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// Grouped by hand rather than through toLocaleString. The page is written on
+// one machine and read on another, and a locale-dependent separator makes two
+// renderings of the same measurement differ for a reason that is not a
+// measurement — and makes a test asserting an exact figure green by accident.
+const n0 = v => (v === null || v === undefined)
+	? '—'
+	: String(Math.round(Number(v))).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const usd = v => (v === null || v === undefined) ? '—' : '$' + Number(v).toFixed(4);
+const mins = s => (s === null || s === undefined) ? '—' : (s / 60).toFixed(1) + ' min';
+const pct = v => v === null ? '—' : v + '%';
+
+const agyRuns = j.runs.filter(r => r.arm === 'agy');
+const soloRuns = j.runs.filter(r => r.arm === 'solo');
+
+// Delegation share: of the lines that landed, how many landed inside an agy run.
+//
+// The denominator has to come from git, not from the runs. Taking it from the
+// runs themselves — attributed lines over attributed lines — is the shape the
+// number had before this was measured, and it reads 100% whenever any agy run
+// landed anything at all. Two reachable values, neither of them a measurement,
+// on the panel captioned as the headline.
+//
+// collect resolves the window and refuses it when it cannot, so a share that
+// cannot be computed reads "—" and says why, rather than reading 100%.
+const L = j.landed || { measured: false, reason: 'this runs.json predates the landed-lines window' };
+const arm = a => (L.by_arm && L.by_arm[a])
+	? L.by_arm[a].insertions + L.by_arm[a].deletions : 0;
+const landedTotal = L.measured ? L.insertions + L.deletions : null;
+const landedAgy = L.measured ? arm('agy') : null;
+const landedSolo = L.measured ? arm('solo') : null;
+const delegation = (landedTotal && landedAgy !== null)
+	? Math.round((landedAgy / landedTotal) * 100)
+	: null;
+
+// A run whose share of a thread could not be separated out has null tokens, and
+// folding those in as zero is the whole thing Task 7a exists to stop. They are
+// left out of the sum and counted, so the note can say how many.
+let agyTok = 0;
+let agyTokMissing = 0;
+for (const r of agyRuns) {
+	if (r.tokens.total === null) agyTokMissing++;
+	else agyTok += r.tokens.total;
+}
+const cMain = j.claude.main, cSide = j.claude.sidechain;
+const claudeTok = ['in', 'out', 'cache_read', 'cache_write']
+	.reduce((a, k) => a + (cMain[k] || 0) + (cSide[k] || 0), 0);
+const effort = (agyRuns.length && agyTokMissing === agyRuns.length)
+	? null
+	: ((agyTok + claudeTok) ? Math.round((agyTok / (agyTok + claudeTok)) * 100) : null);
+
+// A run whose range git could not resolve has null commits, and `null > 0` is
+// false — so counting it with the rest reads it as a task that never landed and
+// inflates the retry burden by exactly the runs nobody can check.
+const landedTasks = new Set(agyRuns
+	.filter(r => r.commits !== null && r.commits > 0).map(r => r.task));
+const retryUnknown = agyRuns.filter(r => r.commits === null).length;
+const retryRuns = agyRuns.length - retryUnknown;
+const retry = landedTasks.size ? (retryRuns / landedTasks.size).toFixed(2) : '—';
+
+// Median per task, not a sum and not a mean. The arms will have different run
+// counts, so a sum compares "how much work was done" rather than "how long a
+// task takes"; and at these sample sizes one 40-minute outlier would decide a
+// mean outright. With n=1 the median is simply that run, which is honest.
+function medianByTask(list) {
+	const byTask = new Map();
+	for (const r of list) {
+		if (r.wall === null || r.wall === undefined) continue;
+		byTask.set(r.task, (byTask.get(r.task) || 0) + r.wall);
+	}
+	const v = [...byTask.values()].sort((a, b) => a - b);
+	if (!v.length) return null;
+	const m = Math.floor(v.length / 2);
+	return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
+}
+const agyActive = medianByTask(agyRuns);
+const soloActive = medianByTask(soloRuns);
+
+// Each arm is charged what that arm's own runs spent, and Claude is charged
+// once on a row of its own.
+//
+// Adding the whole Claude figure into the agy column and its main-thread half
+// into the solo column puts the same turns in both, which is not a split of
+// anything: one transcript covers both arms and nothing in it records which
+// turn served which. A number that cannot be divided is reported undivided.
+const agyUsd = agyRuns.some(r => r.usd === null)
+	? null
+	: agyRuns.reduce((a, r) => a + r.usd, 0);
+const soloUsd = soloRuns.some(r => r.usd === null)
+	? null
+	: soloRuns.reduce((a, r) => a + r.usd, 0);
+const claudeUsd = (j.claude.priced === false)
+	? null
+	: (j.claude.usd_main || 0) + (j.claude.usd_sidechain || 0);
+
+const provenance = soloRuns.length
+	? `controlled — ${soloRuns.length} solo run(s)`
+	: 'observational — no solo run recorded yet, so this arm is not a measurement';
+
+const rows = j.runs.map(r => `<tr>
+	<td>${esc(r.arm)}</td><td>${esc(r.task)}</td><td>${esc(r.status)}</td>
+	<td>${mins(r.wall)}</td><td>${n0(r.tokens.total)}</td><td>${n0(r.tools)}</td>
+	<td>${n0(r.commits)}</td>
+	<td class="${r.work_measured === false ? 'warn' : ''}">${
+		r.work_measured === false ? '—' : '+' + n0(r.insertions) + '/-' + n0(r.deletions)}</td>
+	<td>${usd(r.usd)}</td>
+	<td class="${r.quality === 'partial' ? 'warn' : ''}">${esc(r.quality)}</td>
+	<td class="path">${esc(r.path)}</td></tr>`).join('\n');
+
+const banner = j.skipped.length ? `<div class="banner">
+	<strong>${j.skipped.length} source(s) were not read.</strong>
+	Every figure below is computed without them, so the split is incomplete —
+	an unread run shifts the numbers in whichever direction it would have pushed them.
+	<ul>${j.skipped.map(s => `<li><code>${esc(path.basename(s.path))}</code> — ${esc(s.reason)}</li>`).join('')}</ul>
+</div>` : '';
+
+const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agy-agents benchmark</title>
+<style>
+ :root { --bg:#fff; --fg:#1a1a1a; --mut:#666; --line:#e2e2e2; --warn:#9a6700; --warnbg:#fff8e5; }
+ @media (prefers-color-scheme: dark) {
+   :root { --bg:#151515; --fg:#e8e8e8; --mut:#999; --line:#333; --warn:#e3b341; --warnbg:#2a2210; } }
+ body { background:var(--bg); color:var(--fg); font:15px/1.55 ui-sans-serif,system-ui,sans-serif;
+        margin:0; padding:2rem; }
+ h1 { font-size:1.3rem; margin:0 0 .25rem; }
+ .sub { color:var(--mut); font-size:.85rem; margin-bottom:1.5rem; }
+ .tabs { display:flex; gap:.5rem; border-bottom:1px solid var(--line); margin-bottom:1.5rem; }
+ .tabs button { background:none; border:0; border-bottom:2px solid transparent; color:var(--mut);
+                font:inherit; padding:.6rem 1rem; cursor:pointer; }
+ .tabs button[aria-selected=true] { color:var(--fg); border-bottom-color:var(--fg); }
+ section[hidden] { display:none; }
+ .panels { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:1rem; }
+ .card { border:1px solid var(--line); border-radius:8px; padding:1rem; }
+ .card h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--mut);
+            margin:0 0 .5rem; }
+ .big { font-size:2rem; font-weight:600; }
+ .note { color:var(--mut); font-size:.8rem; margin-top:.5rem; }
+ table { border-collapse:collapse; width:100%; font-size:.85rem; }
+ th,td { text-align:left; padding:.4rem .6rem; border-bottom:1px solid var(--line); }
+ th { color:var(--mut); font-weight:600; }
+ .path { color:var(--mut); font-family:ui-monospace,monospace; font-size:.75rem; }
+ .warn { color:var(--warn); font-weight:600; }
+ .banner { background:var(--warnbg); border:1px solid var(--warn); color:var(--warn);
+           border-radius:8px; padding:1rem; margin-bottom:1.5rem; font-size:.9rem; }
+ .banner ul { margin:.5rem 0 0; padding-left:1.2rem; }
+ .wrap { overflow-x:auto; }
+</style></head><body>
+<h1>agy-agents benchmark</h1>
+<div class="sub">generated ${esc(j.generated)} · idle gap ${j.idle_gap_s}s · prices dated ${esc(j.prices_updated)}</div>
+${banner}
+<div class="tabs" role="tablist">
+ <button role="tab" aria-selected="true" data-t="split">Split</button>
+ <button role="tab" aria-selected="false" data-t="cmp">Comparison</button>
+ <button role="tab" aria-selected="false" data-t="runs">Runs</button>
+</div>
+
+<section id="split">
+ <div class="panels">
+  <div class="card"><h2>Delegation share</h2>
+   <div class="big">${pct(delegation)}</div>
+   <div class="note">${delegation === null
+		? `Not computed: ${esc(L.reason || 'the window that landed these lines could not be resolved')}.
+      The denominator has to come from git — taken from the runs themselves it would read
+      100% whenever an agy run landed anything, which is not a measurement.`
+		: `Of the ${n0(landedTotal)} lines that landed in <code>${esc(L.window)}</code>,
+      the share committed inside an agy run. The headline: the only panel that measures work
+      product rather than effort. ${n0(landedSolo)} landed in a solo run and
+      ${n0(landedTotal - landedAgy - landedSolo)} outside any recorded run at all.`}</div></div>
+  <div class="card"><h2>Effort share</h2>
+   <div class="big">${pct(effort)}</div>
+   <div class="note">agy's share of all tokens. Claude: ${n0(cMain.turns)} main-thread turns,
+    ${n0(cSide.turns)} reviewer turns. Expect this to disagree with delegation share — if agy
+    writes most of the lines while Claude burns most of the tokens supervising, the skill is
+    not buying what it claims.${agyTokMissing
+		? ` ${agyTokMissing} agy run(s) left out: their share of a thread could not be separated
+      out, and counting them as zero tokens would understate this figure.`
+		: ''}</div></div>
+  <div class="card"><h2>Retry burden</h2>
+   <div class="big">${retry}</div>
+   <div class="note">agy runs per landed task. A task that took three dispatches counts once
+    in delegation share and three times here; without this panel a high share can be produced
+    entirely by re-running a failing implementer.${retryUnknown
+		? ` ${retryUnknown} run(s) whose range git could not resolve are excluded — counted in,
+      they would read as tasks that never landed and inflate this figure.`
+		: ''}</div></div>
+ </div>
+</section>
+
+<section id="cmp" hidden>
+ <div class="wrap"><table>
+  <tr><th></th><th>Claude-only</th><th>agy-agents</th></tr>
+  <tr><td>Active time (median per task)</td><td>${mins(soloActive)}</td>
+      <td>${mins(agyActive)}</td></tr>
+  <tr><td>Credits</td>
+      <td>Claude window only</td>
+      <td>Claude window <em>and</em> agy quota — <strong>not comparable</strong>, never summed</td></tr>
+  <tr><td>Cost of this arm's own runs (notional)</td><td>${usd(soloUsd)}</td><td>${usd(agyUsd)}</td></tr>
+  <tr><td>Claude, across both arms (notional)</td><td colspan="2">${usd(claudeUsd)} — one
+      transcript covers both arms and nothing in it records which turn served which, so this
+      is reported undivided rather than counted twice</td></tr>
+  <tr><td>n</td><td>${soloRuns.length}</td><td>${agyRuns.length}</td></tr>
+ </table></div>
+ <p class="note">Provenance: ${esc(provenance)}. Cost is <strong>notional</strong> — tokens at
+  published list prices, not a bill either subscription issues. An agy-agents task spends both
+  budgets, so the credits row shows two things that do not add up. No speedup figure is printed:
+  two tasks are never identical, and a ratio without both task descriptions in view is not evidence.</p>
+</section>
+
+<section id="runs" hidden>
+ <div class="wrap"><table>
+  <tr><th>arm</th><th>task</th><th>status</th><th>wall</th><th>tokens</th><th>tools</th>
+      <th>commits</th><th>lines</th><th>notional</th><th>quality</th><th>log</th></tr>
+  ${rows}
+ </table></div>
+ <p class="note"><code>partial</code> means the run is missing figures the instrumentation now
+  records: they are absent, not zero, and it is excluded from the panels that need them. A dash
+  in the lines column means git could not resolve that run's range — also not a zero.</p>
+</section>
+
+<script>
+ const tabs = [...document.querySelectorAll('.tabs button')];
+ tabs.forEach(b => b.addEventListener('click', () => {
+   tabs.forEach(x => x.setAttribute('aria-selected', String(x === b)));
+   ['split','cmp','runs'].forEach(id =>
+     document.getElementById(id).hidden = (id !== b.dataset.t));
+ }));
+</script>
+</body></html>
+`;
+
+fs.mkdirSync(path.dirname(outFile), { recursive: true });
+fs.writeFileSync(outFile, html);
+console.log(`rendered ${j.runs.length} run(s) -> ${outFile}`);
+if (j.skipped.length) console.log(`  banner raised: ${j.skipped.length} source(s) unread`);
+if (delegation === null) console.log('  delegation share not computed — the landed-lines window is unresolved');
