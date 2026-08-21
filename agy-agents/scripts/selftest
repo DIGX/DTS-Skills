@@ -3434,6 +3434,53 @@ has   "  which reads as a dash and says why"     "Not computed"    "$TMP/dash2.h
 hasnt "  and never as a measured 100%"           ">100%<"          "$TMP/dash2.html"
 has   "  the run saying so on the way out"       "not computed"    "$TMP/dash2.log"
 
+printf '\n=== bench: verdict share ===========================================\n'
+# l3 above is the committing fixture: FAKE_COMMIT=1, so a commit landed and the
+# range git is asked about resolves. That is the only case this line is allowed
+# to print in. The needle carries the verdict block's own column spacing, so a
+# stray "share" in a report body cannot answer for the line.
+has "the verdict reports this run's share"  "share   agy:" "$TMP/l3.log"
+has "  counting the lines agy committed"    "insertion"    "$TMP/l3.log"
+has "  and saying it is one side only"      "one side"     "$TMP/l3.log"
+
+# l1 is a run that produced nothing at all. It must not print a share of
+# nothing -- and neither must a run whose commits git could not count, which
+# reaches the verdict block with LANDED_COMMITS at 0 looking exactly the same.
+# That is why the line reads LANDED_MEASURED as well as the count.
+hasnt "  and not at all when nothing landed" "one side"    "$TMP/l1.log"
+
+# The engine has to be installed, not just authored. A skill that ships a
+# benchmark nobody can run has shipped a directory.
+for f in bench/collect bench/dashboard bench/prices.json \
+	bench/lib/agy.js bench/lib/claude.js bench/lib/clip.js \
+	bench/lib/cost.js bench/lib/gitwork.js; do
+	if [ -f "$REPO/.agy/$f" ]; then ok "  install deploys .agy/$f"
+	else bad "  install deploys .agy/$f" "missing"; fi
+done
+if [ -x "$REPO/.agy/solo" ]; then ok "  install deploys .agy/solo"
+else bad "  install deploys .agy/solo" "missing"; fi
+if [ -d "$REPO/.agy/work/m1/bench" ]; then ok "  and creates the bench workspace"
+else bad "  and creates the bench workspace" "missing"; fi
+
+# The installed copy is the one that runs, so it has to be the one that was
+# tested. Every row above is satisfied by an installer that copies the engine
+# once and never looks at it again -- and a stale .agy/bench is the normal way
+# an upgraded project ends up executing code nobody tested. So make it stale
+# on purpose and install over it. Existence was never the question.
+echo stale >> "$REPO/.agy/bench/collect"
+( cd "$REPO" && bash "$SKILL_DIR/scripts/install" >/dev/null 2>&1 )
+if diff -q "$SKILL_DIR/assets/bench/collect" "$REPO/.agy/bench/collect" >/dev/null 2>&1; then
+	ok "  and deploys the collect that was just tested"
+else
+	bad "  and deploys the collect that was just tested" "installed copy differs from assets"
+fi
+
+# AGY-22. The two commands and the baseline arm are useless undocumented, and
+# the verdict block gains a line a reader will meet before any of this prose.
+has "  the README documents the scraper"      "node .agy/bench/collect" "$SKILL_DIR/README.md"
+has "  and the baseline arm that feeds it"    ".agy/solo --done"        "$SKILL_DIR/README.md"
+has "  the verdict table carries the row"     '| `share` |'             "$SKILL_DIR/reference/dispatch-traps.md"
+
 printf '\n====================================================================\n'
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

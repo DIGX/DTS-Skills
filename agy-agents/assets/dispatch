@@ -1498,6 +1498,28 @@ if [ "$COAUTHOR_RC" -ne 0 ]; then
 	v trailer "WRONG CO-AUTHOR on $BAD_TRAILERS commit(s) — see attribution above"
 	v '' 'amend before pushing: the trailer names a real account, by email'
 fi
+# One run's contribution, from numbers already in hand. Deliberately not a
+# split: dispatch cannot see Claude's tokens for this task, and a figure that
+# counts one side while looking like a ratio is worse than no figure. The real
+# split needs the scraper, and this line says so.
+#
+# LANDED_MEASURED is read as well as the count, and a mutant proved it changes
+# nothing today: the block above sets LANDED_COMMITS to a non-zero value only
+# on the path that also sets LANDED_MEASURED, so "counted but unmeasured" is
+# currently unreachable and no fixture can make it. It stays because the
+# coupling lives forty lines away and is not obvious there -- a later edit
+# that fills LANDED_COMMITS from anywhere else would otherwise reach this line
+# with a guess wearing a measurement's clothes. Read it as a statement of what
+# this line requires, not as a tested branch.
+if [ "${LANDED_MEASURED:-0}" = "1" ] && [ "${LANDED_COMMITS:-0}" -gt 0 ] \
+	&& [ -n "${WAS_HEAD:-}" ] && [ -n "${IS_HEAD:-}" ]; then
+	SHARE_STAT="$(git --no-pager diff --shortstat "$WAS_HEAD..$IS_HEAD" 2>/dev/null | sed 's/^ *//')"
+	if [ -n "$SHARE_STAT" ]; then
+		v share "agy: $SHARE_STAT"
+		v '' 'one side only — run .agy/bench/collect for the split against Claude'
+	fi
+fi
+
 # Printed here as well as in the header because the header's copy was written
 # before any attempt ran. On a fallback the two differ, and this is the one a
 # reader acts on: it names the attempt that produced the work rather than the

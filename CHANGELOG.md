@@ -87,6 +87,122 @@ structural rather than a matter of care.
 
 ## agy-agents
 
+### [1.9.0] — 2026-08-21
+
+The skill has been telling people it delegates implementation work. This release
+is the instrument that can say whether it does — a second arm to compare against,
+a scraper that reads what actually happened, and a page that refuses to quote a
+figure it cannot stand behind. Several of the numbers it was designed to print
+turned out to be unmeasurable; those read as dashes with a reason attached, which
+is the point rather than a shortfall.
+
+#### Added
+
+- **`.agy/solo`, the Claude-only baseline arm.** Opens a bracket, you do the task
+  yourself, `--done` records what landed. It runs no model, and it writes the same
+  `.class` sidecar `dispatch` writes — same keys, `arm=solo` — so both arms go
+  through one reader and a difference between them is a difference in the work,
+  not in how the work was counted. Without it the comparison has one arm, and
+  "agy-agents is faster" has nothing to be faster than.
+- **`.agy/bench/collect` and `.agy/bench/dashboard`.** A post-hoc scraper reading
+  run sidecars, Claude transcripts and git history into one `runs.json`, and an
+  emitter turning that into one static, self-contained HTML file. The pipeline is
+  one-way — `collect` is the only thing that reads a log, `dashboard` reads
+  `runs.json` and nothing else — so a rendering bug cannot corrupt a measurement,
+  and a measurement can be re-rendered without being re-taken.
+- **The verdict block gained a `share` line**, stating what the run just committed
+  and stating plainly that it is one side only. It prints only when git could
+  actually resolve what landed: a run whose commits could not be counted reaches
+  that line looking exactly like a run that committed nothing, and the difference
+  is the whole reason the line is guarded.
+- **The installer ships the engine.** `.agy/bench/` is replaced wholesale on every
+  install rather than merged, so a file dropped in a later version cannot linger
+  and be required by a lib that no longer ships it.
+
+#### Changed
+
+- **The harness now measures itself.** `dispatch` persists wall seconds, token
+  totals and the commit range into the `.class` sidecar it already wrote. These
+  were printed before and printed only, which meant nothing could read them back —
+  a measurement that exists solely on screen is one every later tool has to invent.
+- **A run's tokens are its own turn's, not its whole thread's.** `agy --continue`
+  reports the thread's running total, so a second run in a thread was billed for
+  the first as well. The sidecar now records which scope the number is in and how
+  many turns the thread had, and a run whose own share cannot be separated out
+  reports nothing rather than reporting the thread's.
+
+#### Fixed
+
+- **Delegation share has a denominator git measured.** The share of landed lines
+  committed inside an agy run has to be counted against every line that landed,
+  which means asking git about the window the runs sit in. Counted against the
+  attributed lines alone it reads 100% whenever any agy run landed anything and
+  null otherwise — two reachable values, neither of them a measurement, on the one
+  panel captioned as measuring work product rather than effort. Where the window
+  cannot be resolved, or the runs claim more lines than it holds, the panel reads
+  `—` and names the reason.
+- **A missing measurement is never a zero.** Runs logged before the instrumentation
+  read as `partial`. A range git could not resolve reads as a dash, not as a run
+  that landed nothing. A run whose tokens could not be attributed prices to null,
+  not to free, and leaves effort share rather than joining it as a run that spent
+  nothing. An unmeasurable run is excluded from *both* sides of retry burden,
+  because `null > 0` is false and would otherwise have read as a task that never
+  landed.
+- **Unread sources raise a banner rather than shifting the numbers quietly.** The
+  scraper's failure mode was never a crash — it was an unparseable log becoming a
+  run that simply is not counted, moving the split in whichever direction that run
+  would have pushed it. Every skip is recorded with a reason and rendered above
+  the figures.
+- **Credits and cost are kept apart.** An agy-agents task spends two subscriptions
+  with no shared denominator, so the dashboard shows two figures that do not add
+  up and one notional dollar amount, labelled as notional everywhere it appears.
+  Claude's own cost is quoted once and undivided, because one transcript covers
+  both arms and nothing in it records which turn served which. No blended score is
+  reported and no lone speedup figure: a ratio without both task descriptions in
+  view is not evidence.
+- **The page reads the same on every machine.** Numbers are grouped by hand rather
+  than through `toLocaleString`, which returns a different string per locale and
+  would have made every exact-string assertion in the suite green or red by
+  accident of where it ran.
+
+#### Notes
+
+The dashboard in the plan was measured rather than read, and did not survive
+being tested. `const claudeLines = 0` made the delegation denominator equal its
+own numerator, so the panel had two reachable values — 100% and null — and the
+plan's own test row asserting 80% could not have passed against the plan's own
+code. Six further corrections came out of the same pass, each carrying its
+reasoning at the site rather than in a commit message nobody will read again.
+
+Falsification, predictions written to disk before each run. Eleven mutants across
+the two engines, each restoring the plan's own version of a line: seven on the
+dashboard (518/5, 522/1, 522/1, 522/1, 522/1, 522/1, 521/2) and four on the
+verdict line and installer (541/0, 540/1, 536/5, 540/1). Two predictions missed
+and both are recorded rather than corrected after the fact — one mutant killed
+two rows where three were predicted, because the unresolved fixture keeps its
+numbers and the guardless page renders 80% rather than the 100% that row names;
+and the locale row did not discriminate at all, because node on Windows takes its
+default locale from the OS and ignores `LANG`, which made the suite's hostile-
+`LANG` setup a comment rather than a control.
+
+One mutant killed nothing, as predicted: the share line's `LANDED_MEASURED`
+condition is unreachable in the current code, since `LANDED_COMMITS` is only ever
+set non-zero on the path that also sets it. The clause stays with a comment
+saying exactly that. Adding an assertion to make the mutant die would have pinned
+the text without evidence the condition ever decides anything.
+
+Two rows were found to be weaker than their own comments claimed — a `hasnt`
+against a file that was never written, and a diff against two things the suite
+never made differ. Both were caught by writing the mutant first and asking what
+it would have to change to be noticed.
+
+selftest: 394 → 541 passed, 0 failed. The two field-report fixes that landed on
+this branch shipped separately as 1.8.16 and 1.8.17.
+
+Prices in `.agy/bench/prices.json` are placeholders. Check them against current
+published pricing before quoting any dollar figure to anyone; every figure the
+dashboard derives from them is labelled notional for the same reason.
+
 ### [1.8.17] — 2026-08-20
 
 One field report, and the fix is a refusal rather than a sentence because the

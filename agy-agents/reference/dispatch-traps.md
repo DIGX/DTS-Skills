@@ -319,6 +319,7 @@ behind them. Anything other than clean / clean / green stops the cycle.
 | `run` | the harness's own reading of the event stream, not `$?` |
 | `fence` | guarded surfaces before vs after — a violation names the files, and `COULD NOT JUDGE` means the baseline and the config disagree |
 | `landed` | what the run put in the tree: commits, uncommitted changes, or nothing |
+| `share` | the lines *this run* committed — one side only, not a ratio: dispatch cannot see Claude's tokens for the task. Absent when nothing landed, and absent when git could not resolve what did. Run `.agy/bench/collect` for the split |
 | `log` | the event stream of the attempt that produced this verdict |
 | `gates` | the project's verification suite, run by the harness |
 

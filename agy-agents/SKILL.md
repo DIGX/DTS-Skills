@@ -1,7 +1,7 @@
 ---
 name: agy-agents
 description: Use when setting up or adopting a repository where Claude plans and the Antigravity CLI (`agy`, Gemini) implements; when the user asks to delegate implementation to Gemini or Antigravity; when installing or authenticating `agy` itself; when an `agy` run reports SUCCESS but nothing changed, hangs without ever finishing, hits RESOURCE_EXHAUSTED or a rate limit, or writes outside its scope; or when a fence, tripwire, or gate check fails in a repo using this harness.
-version: 1.8.17
+version: 1.9.0
 user-invocable: true
 argument-hint: "[setup|install|adopt|status|doctor|protocol] — omit to route automatically"
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, TodoWrite
