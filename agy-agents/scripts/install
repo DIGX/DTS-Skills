@@ -156,6 +156,17 @@ cfg_workspace() {
 CONFIG_WORKSPACE="$(cfg_workspace)"
 CONFIG_WORKSPACE="${CONFIG_WORKSPACE#./}"
 
+# The config's own AGY_GATES, read the same way and for the same reason — plus a
+# sharper one. An adopted runner may carry arguments, so it is not a path any
+# scan of the filesystem can find: `verify.sh --with-pcp` exists as that string
+# in exactly one place, and this is the function that reads it.
+cfg_gates() {
+	[ -f .agy/config ] || return 0
+	( unset AGY_GATES; . ./.agy/config >/dev/null 2>&1
+	  printf '%s' "${AGY_GATES:-}" )
+}
+CONFIG_GATES="$(cfg_gates)"
+
 # Where the work lives, in order of authority:
 #   1. --workspace / --milestone — you said so, on this run
 #   2. .agy/config — the live binding every dispatch, fence and gate run reads
@@ -189,6 +200,22 @@ fi
 [ -n "$WORKSPACE" ] || WORKSPACE=".agy/work/${MILESTONE:-m1}"
 WORKSPACE="${WORKSPACE#./}"
 
+# The runner, in order of authority:
+#   1. --gates — you said so, on this run
+#   2. .agy/config — the binding every dispatch and gate run already resolves
+#   3. a runner sitting at one of the conventional paths (first adoption)
+#   4. .agy/gates — the starter suite this installer writes
+#
+# 2 was missing until GST-48, and its absence was invisible on any repo whose
+# runner happened to sit at one of the scanned names: those re-adopted correctly
+# by coincidence of filename. A repo binding `verify.sh --with-pcp` fell through
+# to 4 instead, and the installer planned an empty competing suite beside a
+# config that already answered the question — the same "bound the workspace but
+# not the runner" asymmetry, two screens apart in this file.
+if [ -z "$GATES" ] && [ -n "$CONFIG_GATES" ]; then
+	GATES="$CONFIG_GATES"
+	ADOPTED="$ADOPTED gates"
+fi
 if [ -z "$GATES" ]; then
 	for candidate in scripts/gates bin/gates ./gates; do
 		if [ -f "$candidate" ]; then
@@ -685,46 +712,19 @@ if [ ! -f .agy/.gitignore ] || [ "$FORCE" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------------------ verify it
-printf '\n--- checking -------------------------------------------------------\n'
-if [ "$DRY" -eq 1 ]; then
-	printf '  dry run — nothing written, nothing checked\n'
-	exit 0
-fi
-
+# ---------------------------------------------------------- inspecting it
+# Read-only, both of them: they run a grep over files that already exist and
+# derive from values this run has already printed. They used to live under
+# `--- checking ---`, below the `exit 0` that ends a dry run — so the preview
+# showed AGY_COAUTHOR arriving and never said what it would do, and showed a
+# context being kept without saying it was still full of {{markers}}.
+#
+# GST-49 (field report, GST Invoice) found the first of those from a dry run.
+# Skipping the gate suite and the fence self-test on a dry run is right: those
+# execute. These two were skipped by their position in the file rather than by
+# their nature, and a preview that withholds the consequence of the change it
+# is previewing is not a preview.
 problems=0
-
-# A config still bound to the previous milestone is worse than an obvious
-# failure: the new workspace exists, looks live, and nothing writes to it.
-[ "$REPOINT_FAILED" -eq 1 ] && problems=$((problems + 1))
-
-if command -v agy >/dev/null 2>&1 || [ -x "$HOME/AppData/Local/agy/bin/agy.exe" ]; then
-	say agy 'found'
-else
-	say agy 'NOT FOUND — install the Antigravity CLI before dispatching'
-	problems=$((problems + 1))
-fi
-
-if command -v node >/dev/null 2>&1; then
-	say node 'found'
-else
-	say node 'NOT FOUND — the fence differ and the stream parser both need it'
-	problems=$((problems + 1))
-fi
-
-# A Windows-form PATH entry is accepted by the shell and then never searched, so
-# whatever you put there is skipped without a word and the next match on PATH
-# answers instead. That is how a drill against a stubbed `agy` dispatched the
-# real one and spent live quota. Cheap to detect, invisible otherwise.
-case "$(uname -s 2>/dev/null)" in
-MINGW*|MSYS*|CYGWIN*)
-	if printf '%s' "$PATH" | grep -qE '(^|:)[A-Za-z]:[\\/]'; then
-		say path 'a Windows-form entry (C:\...) is on PATH — MSYS ignores those'
-		say ''   'silently. Convert it with `cygpath -u` or the binary you think'
-		say ''   'is being used will not be the one that runs.'
-		problems=$((problems + 1))
-	fi
-	;;
-esac
 
 # The templates ship unfilled on purpose — only you know what goes in them — but
 # nothing used to check that they were ever filled, and dispatch-context.md is
@@ -780,6 +780,45 @@ if [ "$ca_changed" -eq 1 ] && [ -n "$COAUTHOR" ] && [ -f "$CTX" ]; then
 		fi
 	fi
 fi
+
+printf '\n--- checking -------------------------------------------------------\n'
+if [ "$DRY" -eq 1 ]; then
+	printf '  dry run — nothing written; the checks below run on a real install\n'
+	exit 0
+fi
+
+# A config still bound to the previous milestone is worse than an obvious
+# failure: the new workspace exists, looks live, and nothing writes to it.
+[ "$REPOINT_FAILED" -eq 1 ] && problems=$((problems + 1))
+
+if command -v agy >/dev/null 2>&1 || [ -x "$HOME/AppData/Local/agy/bin/agy.exe" ]; then
+	say agy 'found'
+else
+	say agy 'NOT FOUND — install the Antigravity CLI before dispatching'
+	problems=$((problems + 1))
+fi
+
+if command -v node >/dev/null 2>&1; then
+	say node 'found'
+else
+	say node 'NOT FOUND — the fence differ and the stream parser both need it'
+	problems=$((problems + 1))
+fi
+
+# A Windows-form PATH entry is accepted by the shell and then never searched, so
+# whatever you put there is skipped without a word and the next match on PATH
+# answers instead. That is how a drill against a stubbed `agy` dispatched the
+# real one and spent live quota. Cheap to detect, invisible otherwise.
+case "$(uname -s 2>/dev/null)" in
+MINGW*|MSYS*|CYGWIN*)
+	if printf '%s' "$PATH" | grep -qE '(^|:)[A-Za-z]:[\\/]'; then
+		say path 'a Windows-form entry (C:\...) is on PATH — MSYS ignores those'
+		say ''   'silently. Convert it with `cygpath -u` or the binary you think'
+		say ''   'is being used will not be the one that runs.'
+		problems=$((problems + 1))
+	fi
+	;;
+esac
 
 printf '\n'
 if bash .agy/tripwire check >/dev/null 2>&1; then

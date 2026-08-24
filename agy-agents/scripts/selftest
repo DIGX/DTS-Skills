@@ -1772,6 +1772,90 @@ has "the dispatch template names the adopted runner" "scripts/gates" \
 # too, and has to be re-justified rather than silently re-admitted. Same
 # bargain as the tripwire fingerprints: the churn is the point.
 # ============================================================ continue threads
+printf '\n=== re-install over an adopted config ==============================\n'
+# GST-48/49 (field report, GST Invoice, both found by a dry run before the
+# upgrade). Adoption is tested above through --gates, which is the FIRST
+# install. The second one is the path a real project takes, and nothing here
+# covered it.
+#
+# The runner this fixture adopts carries an argument, deliberately. A filename
+# scan can match `scripts/gates`; it can never match `verify.sh --with-pcp`,
+# and .agy/config is the only place that string exists.
+REIN="$TMP/reinstall"
+mkdir -p "$REIN"
+(
+	cd "$REIN" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf '#!/usr/bin/env bash\necho house\n' > verify.sh
+	chmod +x verify.sh
+	printf 'x\n' > file.txt
+	git add -A && git commit -qm init
+	AGY_GUARD_FILES="" bash "$SKILL_DIR/scripts/install" --gates 'verify.sh --with-pcp' >/dev/null 2>&1
+	AGY_GUARD_FILES="" bash "$SKILL_DIR/scripts/install" > "$TMP/reinstall.log" 2>&1
+) || bad "re-install runs" "setup failed"
+
+has   "re-install adopts the runner the config binds" \
+	"verify.sh --with-pcp (left exactly as it is)" "$TMP/reinstall.log"
+hasnt "  and plans no competing suite beside it" \
+	".agy/gates (0 gate(s) detected)"              "$TMP/reinstall.log"
+if [ -f "$REIN/.agy/gates" ]; then
+	bad "  and writes none" "wrote .agy/gates over an adopted runner"
+else
+	ok  "  and writes none"
+fi
+# Green against the broken installer too, and that is its job: it says the
+# fixture really is an adopted repo. Were it red the rows around it would be
+# red for the wrong reason and this section would be grading a bad setup.
+has   "  the config still binds what it always bound" \
+	"verify.sh --with-pcp"                        "$REIN/.agy/config"
+
+# ------------------------------------------------ what the preview owes you
+# The migration section above settled that AGY_COAUTHOR SHOULD be appended to a
+# config that predates it: a check that ships and stays off is worse than one
+# that never shipped. It is appended with a warning, because turning the check
+# on makes the next dispatch refuse until the context names the same address.
+#
+# All of that was true only of a real install. The warning lived inside
+# `--- checking ---`, which --dry-run exits before, so the preview showed the
+# key arriving and never said what it would do. Someone deciding whether to
+# upgrade reads the dry run -- that is what it is for -- and the one line that
+# would inform the decision was the line withheld from it.
+#
+# The block is pure derivation from values the dry run has already computed and
+# printed. It executed nothing. It was skipped by its position in the file, not
+# by its nature.
+DRY="$TMP/drypreview"
+mkdir -p "$DRY/src"
+(
+	cd "$DRY" || exit 1
+	git init -q . && git config user.email t@t && git config user.name T
+	printf 'x\n' > src/x.txt && git add -A && git commit -qm init
+	bash "$SKILL_DIR/scripts/install" --project DRY >/dev/null 2>&1
+	# The shape of a repo installed before the key existed: neither rendering of
+	# the rule is present, which is what makes the upgrade a rule change.
+	sed -i '/^# ---* attribution/,/^: "${AGY_COAUTHOR/d' .agy/config
+	sed -i '/Co-Authored-By:/d' .agy/work/m1/dispatch-context.md
+	bash "$SKILL_DIR/scripts/install" --project DRY --dry-run > "$TMP/dry.log" 2>&1
+) || bad "dry-run fixture installs" "setup failed"
+
+has   "the dry run says the check would turn on" \
+	"co-author check is now ON"       "$TMP/dry.log"
+has   "  and gives the line to paste" \
+	"Co-Authored-By: Antigravity"     "$TMP/dry.log"
+# If the fix ever makes this red it has turned a preview into a write, which is
+# a worse defect than the one it was fixing.
+hasnt "  while still writing nothing" \
+	"AGY_COAUTHOR"                    "$DRY/.agy/config"
+# The unfilled-context check sat in the same skipped section and is read-only
+# for the same reason. A preview that cannot say the context is unfilled cannot
+# tell you the install you are previewing lands a repo dispatch will refuse.
+# Needle chosen so only the inspection can answer for it: the writing section
+# already prints `keep .agy/work/m1/dispatch-context.md`, and the first draft
+# of this row matched THAT and passed against an installer whose inspection
+# never ran. "unfilled line(s) in" is emitted by the check and by nothing else.
+has   "  and reports the context it inspected" \
+	"unfilled line(s) in"             "$TMP/dry.log"
+
 printf '\n=== continue threads ===============================================\n'
 
 # GST-47 (field report, GST Invoice). `agy --continue` resumes the last

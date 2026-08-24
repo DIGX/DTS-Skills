@@ -87,6 +87,59 @@ structural rather than a matter of care.
 
 ## agy-agents
 
+### [1.9.1] — 2026-08-24
+
+Two defects from one dry run against an adopted repository, both the same shape:
+the installer already held the answer and consulted something else. One resolved
+the gate runner by scanning filenames while the config sat there naming it; the
+other computed the consequence of a config change and printed it below the line
+a dry run exits at.
+
+#### Fixed
+
+- **Adoption binds the runner the config binds, not the one whose name it
+  recognises.** `--gates`, then `.agy/config`, then the conventional paths, then
+  the starter suite. Step two was missing, and its absence was invisible on every
+  repo whose runner happened to sit at `scripts/gates` — those re-adopted
+  correctly by coincidence of filename. A repo binding `verify.sh --with-pcp`
+  fell through to the starter suite instead, and the installer planned
+  `write .agy/gates (0 gate(s) detected)` beside a config that had already
+  answered the question — leaving behind the empty suite this skill's own docs
+  single out as indistinguishable from a clean run. An adopted runner may carry
+  arguments, so it is not a path any scan of the filesystem can find; the config
+  is the only place that string exists.
+- **A dry run now states what `AGY_COAUTHOR` will turn on.** On a real install
+  the upgrade path adds the key and warns that the check is now ON, that the
+  kept context does not carry the address, and gives the line to paste. A dry
+  run printed the key arriving and stopped there, because both read-only
+  inspections sat under `--- checking ---`, below the `exit 0` that ends a
+  preview. Skipping the gate suite and the fence self-test on a dry run is
+  right: those execute. These two run a grep over files that already exist and
+  derive from values the run has already printed — they were skipped by their
+  position in the file rather than by their nature, and a preview that withholds
+  the consequence of the change it is previewing is not a preview. The same lift
+  gives the preview its count of unfilled `{{markers}}` in the kept context.
+
+#### Notes
+
+- Both came from the field, from the dry run of an install into a repo whose
+  config carries a dated ruling about which addresses may appear in a trailer —
+  which is exactly the repo that needed to be told before the write rather than
+  after.
+- The first diagnosis of the second defect was wrong, and is recorded because
+  the suite caught it: suppressing the key on upgrade failed seven rows in
+  `=== config key migration ===`, which deliberately assert that the key arrives
+  and warns. A control that ships, arrives and does nothing is the one outcome
+  worse than not shipping it. The defect was in the preview, not in the append.
+- Eight new selftest rows, 549 total. Both fixes were mutation-tested against
+  predictions written to disk beforehand: reverting either produced 546 passed /
+  3 failed, the three named rows each time, with the one predicted survivor per
+  fix surviving for the predicted reason. One row was mispredicted during
+  development — its needle `dispatch-context.md` also matched an unrelated line
+  in the writing section, so it passed against a broken installer; it now reads
+  `unfilled line(s) in`. A needle must be unique to the code path under test,
+  not merely present when it works.
+
 ### [1.9.0] — 2026-08-21
 
 The skill has been telling people it delegates implementation work. This release
